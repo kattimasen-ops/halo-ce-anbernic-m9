@@ -1,0 +1,145 @@
+# Knulli (Allwinner H700 handhelds)
+
+`port/knulli` runs the Android port's guest image (the game as ILP32 AArch64
+code, [port/android/README.md](../android/README.md)) as an ordinary aarch64
+Linux program on handhelds with the Allwinner H700 under Knulli: the Anbernic
+RG35XX H, Plus, SP, 2024, RG40XX H/V, RG CubeXX and others. Their GPU, a
+Mali-G31, has only Arm's OpenGL ES driver for the framebuffer (no X11,
+Wayland, DRM or Vulkan), which the firmware's SDL2 drives.
+
+## Install
+
+1. Build the port (below), or take `halo`, `halo_guest.elf`, `halo_extract.py`
+   and `sdl_mapping.py` from a build.
+2. Copy them into `/userdata/roms/ports/halo/`, and `Halo.sh` into
+   `/userdata/roms/ports/`.
+3. Put an Xbox disc image of Halo (`.iso`) in `/userdata/roms/ports/halo/`.
+   The first start copies its `maps/` folder out (a few minutes), and the
+   image can then be deleted. Or copy an extracted `maps/` folder there.
+4. Start Halo from the Ports list.
+
+Hold the hotkey (MENU, or SELECT) and push START to quit. The log is
+`halo/log.txt`, the settings `halo/config.toml`, the saves and the shader
+cache `halo/save/`.
+
+## Build
+
+The guest image is the Android build's (`ninja build/android/halo_guest.elf`,
+which needs the Android NDK and a clang with the `arm64_32` target). The host
+is built with the `aarch64-linux-gnu` cross compiler against the device's
+own SDL2 and libmali (copy `libSDL2-2.0.so.0*` and `libmali.so.0*` from the
+device's `/usr/lib`), with SDL2's headers:
+
+```
+python configure.py --release --android-ndk <ndk> --android-guest-cc clang-22
+SDL2_INCLUDE=<folder holding SDL2/SDL.h> SYSROOT_LIB=<the device's libraries> \
+ANDROID_NDK=<ndk> sh port/knulli/build.sh
+```
+
+The result is in `build/knulli`.
+
+## How the port operates
+
+The host is the Android host library (`port/android/host`) with these files
+replaced or added:
+
+| File | Function |
+| --- | --- |
+| `host/host_main.c` | The entry point: no JNI or APK; the image and the game data are files next to the executable. |
+| `host/host_sdl2.c` | SDL3's calls answered by the firmware's SDL2, the only SDL with the Mali framebuffer's video driver. |
+| `host/host_sdl3_events.c` | SDL3's event layout, attribute and type numbering (the guest was built against SDL3). |
+| `host/host_glthread.c`, `glthread_gen.py` | The GL thread (below). |
+| `host/host_profile.c`, `profile.py` | A sampling profiler (`HALO_PROFILE_HZ`). |
+| `host/host_gl_timing.c`, `.S` | A timer of the driver's functions (`HALO_GL_TIMING`). |
+| `compat/android/log.h` | The NDK's log functions, to the standard error stream. |
+| `Halo.sh`, `sdl_mapping.py`, `halo_extract.py` | The launcher: the controls, the clocks, the first start's maps. |
+
+### The GL thread
+
+On the H700's Cortex-A53 the Mali driver's own work (about 30 µs for each
+draw call) is most of a frame. The guest's OpenGL ES calls are recorded into
+a queue and made by a thread of their own, so the driver's work runs on
+another core than the game. Calls that return nothing are queued with a copy
+of the memory their pointers refer to; calls that return a value wait.
+`glGen*` names come from a reserve the GL thread keeps filled. The game can be
+one frame ahead (`HALO_GL_THREAD_FRAMES`). `HALO_GL_THREAD=0` turns it off.
+
+### Changes to the renderer for this GPU
+
+These are in `port/linux/src`, for `HALO_ANDROID` builds:
+
+- `display.render_scale`: the 3D picture at a fraction of the screen's
+  resolution, scaled up by Present.
+- `display.fast_shaders`: colours and combiner arithmetic in half precision
+  (Mali computes it at twice the rate); texture coordinates stay single
+  precision.
+- `display.fast_textures`: DXT1 and 16-bit Xbox textures go to the GPU as
+  16-bit texels (the colours they hold) instead of 32-bit ones.
+- Vertex programs declare only the constant registers they read (Mali
+  processes a uniform array whole whenever one element changes).
+- One sampler object for each sampler configuration, bound rather than
+  reconfigured.
+- `glDrawRangeElementsBaseVertex` with the index range the renderer already
+  knows, which spares Mali its scan of the indices.
+- Linked shader programs are kept in `save/shaders` as the driver's binaries,
+  so a combination of shaders is compiled once, not at every start (a link
+  takes 60 ms on this GPU: a visible stutter). `debug.no_program_cache`
+  turns this off.
+- The guest's clock reads go through the C library's vDSO instead of a
+  system call.
+- Visibility test results (lens flares, the lights' occlusion) are read
+  without waiting for the GPU: the counters are copied at the end of each
+  frame into three read-back buffers, and a copy the GPU has finished is
+  read (`host_gl_visibility_frame`). Reading them directly held the game,
+  the GL thread and the GPU in lockstep once a frame.
+- Consecutive quad draws that change nothing but constant vertex attributes
+  are drawn as one (`debug.batch_quads = false` turns this off), and decals
+  whose blend function does not depend on their order are drawn grouped by
+  bitmap (`rasterizer_xbox_decals.c`). In a battle, some 700 decal draws a
+  frame become about 20.
+- The attributes of indexed draws from the mirror point at the base vertex,
+  so draws from the same vertex buffer share them (`debug.stable_streams =
+  false` turns this off).
+
+### Frame rates
+
+Anbernic RG35XX H, Knulli Gladiator II, stock thermal limits, frames per
+second over the last 40 to 60 seconds of a level's opening:
+
+| Level | 640x480 (`render_scale = 1.0`) | 480x360 (`render_scale = 0.75`, the default) |
+| --- | --- | --- |
+| Main menu | 60 | 60 |
+| c10 (swamp) | 26 | 41 |
+| b30 (beach, battle) | 26 | 32 |
+| a30 (drop pod) | 20 | 24 |
+
+At 640x480 the GPU is the limit; at lower resolutions, the driver's time
+for each draw call on the GL thread.
+
+### Clocks
+
+The launcher sets the CPU governor to `performance` and holds the GPU at its
+top frequency (648 MHz): its governor otherwise keeps it at 420 MHz. The
+kernel's thermal governor still lowers both at 70 °C.
+
+## Tools for performance work
+
+| Environment variable | Function |
+| --- | --- |
+| `HALO_FPS_LOG=<seconds>` | The frame rate, the longest frame, memory, temperature and clocks in the log. |
+| `HALO_GL_TIMING=1` | Each GL function's calls and time per frame (on the GL thread). |
+| `HALO_GPU_PASS_TIMING=1` | Finishes the GPU at each change of render target and logs the time of each target's passes. |
+| `HALO_PROFILE_HZ=<rate>`, `HALO_PROFILE_DELAY=<seconds>` | Samples every thread; `profile.py` reports the result. |
+| `HALO_DEBUG_DRAW_CALLERS=1` | The draws each caller of the draw functions makes, per frame. |
+| `HALO_DEBUG_FREEZE=textures,program,raster` | Draws keep the state they find, to measure what setting it costs. |
+| `HALO_DEBUG_LOD_BIAS=<levels>` | Samples smaller mip levels, to measure what texture bandwidth costs. |
+| `HALO_DEBUG_SKIP_GL=glA,glB` | The GL thread does not make these calls, to measure their cost. |
+| `HALO_DEBUG_TINY_SCISSOR=1` | Draws one pixel of each draw: the GPU's time without the pixels. |
+
+The renderer's switches (`HALO_DEBUG_DRAW_CALLERS`, `_FREEZE`, `_LOD_BIAS`,
+`_TINY_SCISSOR`, and `HALO_BATCH_QUADS`, `HALO_STABLE_STREAMS`) are also
+`debug.*` settings in `config.toml`; the variables set them for one run.
+
+`init.txt` in the data folder runs console commands at start-up, for example
+`map_name levels\b30\b30` to start a level, and the `rasterizer_*` globals
+that turn the renderer's features off.

@@ -1,0 +1,465 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Halo CE on Anbernic RG35XX H: native Knulli port for the H700</title>
+<meta name="description" content="Halo: Combat Evolved runs natively on the Anbernic RG35XX H and other Allwinner H700 handhelds under Knulli: 60 fps menus, about 31 to 41 fps in the campaign. Open-source ARM64 port of the halo-ce-universal decompilation. Bring your own Xbox disc.">
+<meta name="keywords" content="Halo CE, Halo Combat Evolved, Anbernic, RG35XX H, RG35XXH, Knulli, Batocera, H700, Mali-G31, retro handheld, ARM64, native port, decompilation">
+<meta name="robots" content="index, follow">
+<link rel="canonical" href="https://kirklandsig.github.io/halo-ce-anbernic-rg35xx/">
+<meta name="color-scheme" content="light dark">
+<link rel="icon" href="data:,">
+<meta name="theme-color" content="#f5f7fa" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0d1117" media="(prefers-color-scheme: dark)">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Halo CE for Anbernic RG35XX H">
+<meta property="og:title" content="Halo: Combat Evolved on Anbernic RG35XX H: native port for Knulli">
+<meta property="og:description" content="A native ARM64 port of the Halo CE decompilation to the Allwinner H700 handhelds under Knulli. 60 fps menus, about 31 to 41 fps in the campaign. No emulation.">
+<meta property="og:url" content="https://kirklandsig.github.io/halo-ce-anbernic-rg35xx/">
+<meta property="og:image" content="https://kirklandsig.github.io/halo-ce-anbernic-rg35xx/screenshots/b30-beach.png">
+<meta property="og:image:width" content="640">
+<meta property="og:image:height" content="480">
+<meta property="og:image:alt" content="Halo CE beach battle on The Silent Cartographer running on an Anbernic RG35XX H">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Halo: Combat Evolved on Anbernic RG35XX H: native port for Knulli">
+<meta name="twitter:description" content="A native ARM64 port of the Halo CE decompilation to the Allwinner H700 handhelds under Knulli. 60 fps menus, about 31 to 41 fps in the campaign. No emulation.">
+<meta name="twitter:image" content="https://kirklandsig.github.io/halo-ce-anbernic-rg35xx/screenshots/b30-beach.png">
+<meta name="twitter:image:alt" content="Halo CE beach battle on The Silent Cartographer running on an Anbernic RG35XX H">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareSourceCode",
+  "name": "Halo: Combat Evolved for Anbernic RG35XX H (Knulli, Allwinner H700)",
+  "alternateName": "halo-ce-anbernic-rg35xx",
+  "description": "A native ARM64 port of the Halo: Combat Evolved decompilation (halo-ce-universal) to the Anbernic RG35XX H and other Allwinner H700 handhelds running Knulli. No emulation. Requires your own copy of the original Xbox game.",
+  "url": "https://kirklandsig.github.io/halo-ce-anbernic-rg35xx/",
+  "codeRepository": "https://github.com/kirklandsig/halo-ce-anbernic-rg35xx",
+  "programmingLanguage": [
+    "C",
+    "Python",
+    "Shell"
+  ],
+  "runtimePlatform": "Knulli (Linux, AArch64) on the Allwinner H700 with the Mali-G31 GPU",
+  "license": "https://creativecommons.org/publicdomain/zero/1.0/",
+  "isBasedOn": {
+    "@type": "SoftwareSourceCode",
+    "name": "halo-ce-universal",
+    "codeRepository": "https://github.com/cybersecurity/halo-ce-universal"
+  },
+  "author": {
+    "@type": "Person",
+    "name": "kirklandsig",
+    "url": "https://github.com/kirklandsig"
+  },
+  "image": "https://kirklandsig.github.io/halo-ce-anbernic-rg35xx/screenshots/b30-beach.png",
+  "dateModified": "2026-09-30",
+  "keywords": [
+    "Halo CE",
+    "Halo Combat Evolved",
+    "Anbernic",
+    "RG35XX H",
+    "RG35XXH",
+    "Knulli",
+    "Batocera",
+    "H700",
+    "Mali-G31",
+    "retro handheld",
+    "ARM64",
+    "native port",
+    "decompilation"
+  ],
+  "targetProduct": {
+    "@type": "SoftwareApplication",
+    "name": "Halo: Combat Evolved, native port for Knulli",
+    "applicationCategory": "GameApplication",
+    "operatingSystem": "Knulli",
+    "processorRequirements": "Allwinner H700 (ARM Cortex-A53, AArch64)",
+    "memoryRequirements": "1 GB"
+  }
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "Can the Anbernic RG35XX H run Halo: Combat Evolved?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. This port runs Halo CE natively on the RG35XX H under Knulli, as AArch64 code on the H700's Cortex-A53 cores with the Mali-G31 GPU. It is built from the halo-ce-universal decompilation; you supply the Xbox game's data."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "What frame rate does Halo CE get on the RG35XX H?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "At the default render scale of 0.75: 60 fps in the menus, about 41 fps on 343 Guilty Spark (c10), about 35 to 38 fps in the beach battle of The Silent Cartographer (b30), and about 31 to 33 fps at the opening of Halo (a30). At the full 640x480 it is 20 to 26 fps. The numbers are improving; see the performance table."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does it work with the Xbox version or the PC version of Halo?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "The Xbox version. The decompilation is of the Xbox build, and it reads the Xbox maps. The PC version (Gearbox's port) has different map files that this code cannot load. Use a disc image of the original Xbox game."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Is this legal?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "The repository contains only source code and documentation: the upstream decompilation's authors released their code under CC0, and so does this port. It contains no game files, disc images, maps or binaries of the game. You need your own copy of the Xbox game. Whether decompilation projects are lawful depends on where you live; this is not legal advice. See the legal notice."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does it need PortMaster?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No. It is a plain Knulli port: a launcher script in roms/ports and a folder. It uses the firmware's own SDL2 and Mali driver and none of PortMaster's runtimes."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does it work on muOS or ROCKNIX?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Untested. The host is built against Knulli's SDL2 (2.30.12) and Arm's framebuffer Mali driver. Other firmware for the H700 may ship a different graphics stack, which the host's SDL2 and EGL bridge would need to support. Reports are welcome."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Why not run the PC version with Box64 and Wine?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "The PC version is a 32-bit x86 Windows program that draws with Direct3D 9. Running it on the H700 would need x86 translation, Wine, and a Direct3D to OpenGL ES translation layer, all on four Cortex-A53 cores and 1 GB of RAM. Each layer costs CPU time the device does not have. The native port runs the game's own logic as ARM64 code and draws with OpenGL ES directly."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Why not use xemu?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "xemu emulates the whole original Xbox, its Pentium III CPU and its NV2A GPU, and needs a fast desktop CPU and a desktop OpenGL or Vulkan GPU. The H700's Cortex-A53 cores and its OpenGL ES-only Mali driver are far below that. A native port of the decompiled code avoids the emulation entirely."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Which other handhelds does it work on?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "It should work on the other Allwinner H700 handhelds that run Knulli: the Anbernic RG35XX Plus, SP and 2024, RG40XX H and V, RG CubeXX and RG34XX. Only the RG35XX H has been tested. TrimUI handhelds and other SoCs are not supported."
+      }
+    }
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "HowTo",
+  "name": "How to install Halo: Combat Evolved on the Anbernic RG35XX H with Knulli",
+  "description": "Install the native Halo CE port on an Allwinner H700 handheld running Knulli, using your own Xbox disc image.",
+  "image": "https://kirklandsig.github.io/halo-ce-anbernic-rg35xx/screenshots/main-menu.png",
+  "supply": [
+    {
+      "@type": "HowToSupply",
+      "name": "An Allwinner H700 handheld with Knulli, such as the Anbernic RG35XX H"
+    },
+    {
+      "@type": "HowToSupply",
+      "name": "Your own Halo: Combat Evolved disc image for the original Xbox"
+    },
+    {
+      "@type": "HowToSupply",
+      "name": "The files built from this repository: halo, halo_guest.elf, Halo.sh, halo_extract.py, sdl_mapping.py"
+    }
+  ],
+  "step": [
+    {
+      "@type": "HowToStep",
+      "position": 1,
+      "name": "Copy the game files",
+      "text": "Copy halo, halo_guest.elf, halo_extract.py and sdl_mapping.py into /userdata/roms/ports/halo/ on the handheld.",
+      "url": "https://kirklandsig.github.io/halo-ce-anbernic-rg35xx/#install"
+    },
+    {
+      "@type": "HowToStep",
+      "position": 2,
+      "name": "Copy the launcher",
+      "text": "Copy Halo.sh into /userdata/roms/ports/.",
+      "url": "https://kirklandsig.github.io/halo-ce-anbernic-rg35xx/#install"
+    },
+    {
+      "@type": "HowToStep",
+      "position": 3,
+      "name": "Add your disc image",
+      "text": "Put your own Xbox disc image of Halo: Combat Evolved (.iso) in /userdata/roms/ports/halo/.",
+      "url": "https://kirklandsig.github.io/halo-ce-anbernic-rg35xx/#install"
+    },
+    {
+      "@type": "HowToStep",
+      "position": 4,
+      "name": "Launch from Ports",
+      "text": "Start Halo from the Ports list. The first launch extracts the maps/ folder from the image, which takes a few minutes; the image can be deleted afterwards.",
+      "url": "https://kirklandsig.github.io/halo-ce-anbernic-rg35xx/#install"
+    },
+    {
+      "@type": "HowToStep",
+      "position": 5,
+      "name": "Quit",
+      "text": "To quit, hold the hotkey (MENU or SELECT) and press START.",
+      "url": "https://kirklandsig.github.io/halo-ce-anbernic-rg35xx/#install"
+    }
+  ]
+}
+</script>
+<style>
+:root {
+  --bg: #f5f7fa;
+  --surface: #ffffff;
+  --text: #16202c;
+  --muted: #4f5d6d;
+  --border: #d9e0e8;
+  --accent: #1f6fb2;
+  --accent-text: #ffffff;
+  --code-bg: #eef2f6;
+  --stat-bg: #eaf2fa;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1117;
+    --surface: #151b23;
+    --text: #e3e9f0;
+    --muted: #9aa7b5;
+    --border: #2a3441;
+    --accent: #5aa9e6;
+    --accent-text: #0d1117;
+    --code-bg: #1c2430;
+    --stat-bg: #16263a;
+  }
+}
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+a { color: var(--accent); }
+a:hover { text-decoration-thickness: 2px; }
+code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 0.9em; }
+code { background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 4px; overflow-wrap: anywhere; }
+pre { background: var(--code-bg); padding: 14px 16px; border-radius: 8px; overflow-x: auto; line-height: 1.45; }
+pre code { background: none; padding: 0; overflow-wrap: normal; }
+.wrap { max-width: 920px; margin: 0 auto; padding: 0 16px; }
+header.site { border-bottom: 1px solid var(--border); background: var(--surface); }
+header.site .wrap { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 20px; padding-top: 12px; padding-bottom: 12px; }
+.brand { font-weight: 700; color: var(--text); text-decoration: none; }
+nav ul { list-style: none; display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 0; padding: 0; }
+nav a { text-decoration: none; color: var(--muted); }
+nav a:hover { color: var(--accent); }
+.hero { padding: 40px 0 16px; }
+h1 { font-size: clamp(1.7rem, 4.5vw, 2.5rem); line-height: 1.2; margin: 0 0 12px; letter-spacing: -0.01em; }
+.subtitle { font-size: 1.15rem; color: var(--muted); margin: 0 0 20px; }
+.lead { font-size: 1.08rem; margin: 0 0 20px; }
+.buttons { display: flex; flex-wrap: wrap; gap: 10px; margin: 0 0 8px; }
+.button { display: inline-block; padding: 10px 18px; border-radius: 8px; text-decoration: none; font-weight: 600; border: 1px solid var(--accent); }
+.button.primary { background: var(--accent); color: var(--accent-text); }
+.button.secondary { color: var(--accent); background: transparent; }
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 28px 0 8px; padding: 0; list-style: none; }
+.stats li { background: var(--stat-bg); border-radius: 10px; padding: 14px 16px; }
+.stats strong { display: block; font-size: 1.6rem; line-height: 1.2; }
+.stats span { color: var(--muted); font-size: 0.92rem; }
+section { padding: 28px 0 8px; border-top: 1px solid var(--border); margin-top: 28px; }
+.hero + section { border-top: none; margin-top: 8px; }
+h2 { font-size: 1.5rem; line-height: 1.3; margin: 0 0 14px; }
+h3 { font-size: 1.1rem; line-height: 1.35; margin: 22px 0 6px; }
+.shots { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; margin: 0; }
+figure { margin: 0; }
+figure img { display: block; width: 100%; height: auto; border-radius: 8px; border: 1px solid var(--border); background: #000; }
+figcaption { color: var(--muted); font-size: 0.92rem; margin-top: 6px; }
+.table { overflow-x: auto; margin: 0 0 12px; }
+table { border-collapse: collapse; width: 100%; background: var(--surface); border-radius: 8px; overflow: hidden; }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { font-weight: 600; }
+tr:last-child td { border-bottom: none; }
+td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.note { color: var(--muted); font-size: 0.95rem; }
+ol.steps { padding-left: 1.4em; }
+ol.steps li { margin-bottom: 8px; }
+ul.features li { margin-bottom: 6px; }
+footer { border-top: 1px solid var(--border); margin-top: 40px; padding: 24px 0 40px; color: var(--muted); font-size: 0.92rem; }
+footer p { margin: 0 0 10px; }
+</style>
+</head>
+<body>
+<header class="site">
+  <div class="wrap">
+    <a class="brand" href="./">Halo CE for RG35XX H</a>
+    <nav aria-label="Sections">
+      <ul>
+        <li><a href="#performance">Performance</a></li>
+        <li><a href="#install">Install</a></li>
+        <li><a href="#build">Build</a></li>
+        <li><a href="#faq">FAQ</a></li>
+        <li><a href="https://github.com/kirklandsig/halo-ce-anbernic-rg35xx">GitHub</a></li>
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="hero">
+    <h1>Halo: Combat Evolved on the Anbernic RG35XX H</h1>
+    <p class="subtitle">A native ARM64 port for Knulli on the Allwinner H700 and its Mali-G31 GPU.</p>
+    <p class="lead">Yes, Halo CE runs natively on the Anbernic RG35XX H (RG35XXH) under Knulli: 60 fps in the menus and about 31 to 41 fps in campaign levels at the default render scale. The port builds the <a href="https://github.com/cybersecurity/halo-ce-universal">halo-ce-universal</a> decompilation of the Xbox game as AArch64 code, with no emulation, no Box64, no Wine and no xemu. You need your own copy of the original Xbox game; the project is source code and documentation only.</p>
+    <p class="buttons">
+      <a class="button primary" href="https://github.com/kirklandsig/halo-ce-anbernic-rg35xx">Source on GitHub</a>
+      <a class="button secondary" href="#install">How to install</a>
+    </p>
+    <!-- performance numbers: keep in step with the README's performance table -->
+    <ul class="stats" aria-label="Frame rates at render scale 0.75">
+      <li><strong>60 fps</strong><span>Main menu</span></li>
+      <li><strong>~41 fps</strong><span>343 Guilty Spark (c10)</span></li>
+      <li><strong>~35–38 fps</strong><span>The Silent Cartographer battle (b30)</span></li>
+      <li><strong>~31–33 fps</strong><span>Halo, level opening (a30)</span></li>
+    </ul>
+  </div>
+
+  <section id="screenshots" aria-labelledby="screenshots-title">
+    <h2 id="screenshots-title">Screenshots</h2>
+    <div class="shots">
+      <figure>
+        <img src="screenshots/main-menu.png" width="640" height="480" alt="Halo: Combat Evolved main menu running natively on an Anbernic RG35XX H under Knulli">
+        <figcaption>The main menu on the RG35XX H (640x480).</figcaption>
+      </figure>
+      <figure>
+        <img src="screenshots/b30-beach.png" width="640" height="480" loading="lazy" alt="Halo CE beach battle on The Silent Cartographer running on an Anbernic RG35XX H at 36 fps">
+        <figcaption>The Silent Cartographer (b30) at render scale 0.75, 36 fps.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section id="features" aria-labelledby="features-title">
+    <h2 id="features-title">Features</h2>
+    <ul class="features">
+      <li>Native AArch64 code for the game and the host: the Cortex-A53 cores run the game's own logic, nothing is translated or emulated.</li>
+      <li>Runs on stock Knulli with the firmware's own SDL2 and Arm's Mali-G31 OpenGL ES driver on the framebuffer.</li>
+      <li>A GL thread moves the Mali driver's per-draw CPU cost, about 28 µs a draw call, onto another core.</li>
+      <li>Renderer changes for a tile-based GPU: program binary cache, fp16 shaders, 16-bit textures, asynchronous occlusion readback, quad batching and decal ordering (about 700 decal draws become about 20), model LOD scaling, and shadows drawn without render-target switches.</li>
+      <li>Adjustable render scale, CPU and GPU clocks pinned while playing, and the handheld's own controls.</li>
+      <li>The first launch extracts <code>maps/</code> from your Xbox disc image on the handheld.</li>
+    </ul>
+  </section>
+
+  <section id="performance" aria-labelledby="performance-title">
+    <h2 id="performance-title">Performance</h2>
+    <p>Frames per second on an Anbernic RG35XX H, Knulli Gladiator II, stock thermal limits. Last updated 2026-09-30; the numbers are improving.</p>
+    <!-- performance numbers: keep in step with the README's performance table -->
+    <div class="table">
+      <table>
+        <thead><tr><th scope="col">Scene</th><th scope="col">Render scale 0.75 (default)</th><th scope="col">Render scale 1.0 (640x480)</th></tr></thead>
+        <tbody>
+          <tr><td>Main menu</td><td class="num">60</td><td class="num">60</td></tr>
+          <tr><td>c10, 343 Guilty Spark (swamp)</td><td class="num">about 41</td><td class="num">26</td></tr>
+          <tr><td>b30, The Silent Cartographer (beach battle)</td><td class="num">about 35–38</td><td class="num">26</td></tr>
+          <tr><td>a30, Halo (level opening)</td><td class="num">about 31–33</td><td class="num">20</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">At 640x480 the GPU is the limit; at 0.75, the Mali driver's CPU time per draw call. The measurements behind each optimisation are in <a href="https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/blob/main/docs/PERFORMANCE.md">PERFORMANCE.md</a>.</p>
+  </section>
+
+  <section id="devices" aria-labelledby="devices-title">
+    <h2 id="devices-title">Supported devices</h2>
+    <p>The port needs an Allwinner H700 (4x Cortex-A53 at 1.5 GHz, Mali-G31 MP2, 1 GB RAM) running Knulli.</p>
+    <div class="table">
+      <table>
+        <thead><tr><th scope="col">Device</th><th scope="col">Screen</th><th scope="col">Status</th></tr></thead>
+        <tbody>
+          <tr><td>Anbernic RG35XX H</td><td>640x480</td><td>Tested</td></tr>
+          <tr><td>Anbernic RG35XX Plus</td><td>640x480</td><td>Untested, expected to work</td></tr>
+          <tr><td>Anbernic RG35XX SP</td><td>640x480</td><td>Untested, expected to work</td></tr>
+          <tr><td>Anbernic RG35XX 2024</td><td>640x480</td><td>Untested, expected to work</td></tr>
+          <tr><td>Anbernic RG40XX H</td><td>640x480</td><td>Untested, expected to work</td></tr>
+          <tr><td>Anbernic RG40XX V</td><td>640x480</td><td>Untested, expected to work</td></tr>
+          <tr><td>Anbernic RG CubeXX</td><td>720x720</td><td>Untested</td></tr>
+          <tr><td>Anbernic RG34XX</td><td>720x480</td><td>Untested</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">TrimUI handhelds and devices with other SoCs are not supported. muOS and ROCKNIX are untested.</p>
+  </section>
+
+  <section id="install" aria-labelledby="install-title">
+    <h2 id="install-title">Install</h2>
+    <p>You need an H700 handheld with Knulli, your own Halo: Combat Evolved disc image for the original Xbox, about 2 GB free for the maps, and the files from a build (<a href="#build">below</a>).</p>
+    <ol class="steps">
+      <li><strong>Copy the game files.</strong> Copy <code>halo</code>, <code>halo_guest.elf</code>, <code>halo_extract.py</code> and <code>sdl_mapping.py</code> into <code>/userdata/roms/ports/halo/</code> on the handheld.</li>
+      <li><strong>Copy the launcher.</strong> Copy <code>Halo.sh</code> into <code>/userdata/roms/ports/</code>.</li>
+      <li><strong>Add your disc image.</strong> Put your own Xbox disc image of Halo: Combat Evolved (<code>.iso</code>) in <code>/userdata/roms/ports/halo/</code>.</li>
+      <li><strong>Launch from Ports.</strong> Start Halo from the Ports list. The first launch extracts the <code>maps/</code> folder from the image, which takes a few minutes; the image can be deleted afterwards.</li>
+      <li><strong>Quit.</strong> To quit, hold the hotkey (MENU or SELECT) and press START.</li>
+    </ol>
+    <p class="note">Settings are in <code>halo/config.toml</code> (for example <code>display.render_scale</code>, default 0.75), the log in <code>halo/log.txt</code>.</p>
+  </section>
+
+  <section id="build" aria-labelledby="build-title">
+    <h2 id="build-title">Build from source</h2>
+    <p>The build runs on Linux x86-64 (Ubuntu 24.04, WSL works) with python3, ninja-build, git, clang 22 from apt.llvm.org (for the <code>arm64_32</code> guest target), the Android NDK r28c and gcc-aarch64-linux-gnu. It links against <code>libSDL2-2.0.so.0</code> and <code>libmali.so.0</code> copied from the handheld's <code>/usr/lib</code>; those are never committed.</p>
+<pre><code>git clone https://github.com/kirklandsig/halo-ce-anbernic-rg35xx.git
+cd halo-ce-anbernic-rg35xx
+mkdir -p sysroot   # copy libSDL2-2.0.so.0* and libmali.so.0* from the handheld here
+ANDROID_NDK=/path/to/android-ndk-r28c SYSROOT_LIB=$PWD/sysroot ./build.sh
+ls dist/           # halo  halo_guest.elf  Halo.sh  halo_extract.py  sdl_mapping.py</code></pre>
+    <p><code>build.sh</code> clones halo-ce-universal at a pinned commit, applies this project's patch, adds the Knulli host, and builds. The first build takes 10 to 30 minutes.</p>
+  </section>
+
+  <section id="how" aria-labelledby="how-title">
+    <h2 id="how-title">How it works</h2>
+    <p>Halo's data holds 32-bit pointers, so the upstream Android port compiles the game as ILP32 AArch64 code (64-bit ARM instructions with 32-bit pointers) into a guest image that a small host loads. This project adds a host for Knulli: an aarch64 glibc Linux program that answers the guest's SDL3 calls with the firmware's SDL2, the only SDL with the Mali framebuffer driver, and replays the guest's OpenGL ES calls on a GL thread. Renderer changes for the tile-based Mali-G31 remove pipeline stalls and render-target switches. Details are in <a href="https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/blob/main/docs/HOW-IT-WORKS.md">HOW-IT-WORKS.md</a>.</p>
+  </section>
+
+  <section id="faq" aria-labelledby="faq-title">
+    <h2 id="faq-title">FAQ</h2>
+    <h3>Can the Anbernic RG35XX H run Halo: Combat Evolved?</h3>
+    <p>Yes. This port runs Halo CE natively on the RG35XX H under Knulli, as AArch64 code on the H700's Cortex-A53 cores with the Mali-G31 GPU. It is built from the halo-ce-universal decompilation; you supply the Xbox game's data.</p>
+    <h3>What frame rate does Halo CE get on the RG35XX H?</h3>
+    <p>At the default render scale of 0.75: 60 fps in the menus, about 41 fps on 343 Guilty Spark (c10), about 35 to 38 fps in the beach battle of The Silent Cartographer (b30), and about 31 to 33 fps at the opening of Halo (a30). At the full 640x480 it is 20 to 26 fps. The numbers are improving; see the <a href="#performance">performance table</a>.</p>
+    <h3>Does it work with the Xbox version or the PC version of Halo?</h3>
+    <p>The Xbox version. The decompilation is of the Xbox build, and it reads the Xbox maps. The PC version (Gearbox's port) has different map files that this code cannot load. Use a disc image of the original Xbox game.</p>
+    <h3>Is this legal?</h3>
+    <p>The repository contains only source code and documentation: the upstream decompilation's authors released their code under CC0, and so does this port. It contains no game files, disc images, maps or binaries of the game. You need your own copy of the Xbox game. Whether decompilation projects are lawful depends on where you live; this is not legal advice. See the <a href="https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/blob/main/docs/LEGAL.md">legal notice</a>.</p>
+    <h3>Does it need PortMaster?</h3>
+    <p>No. It is a plain Knulli port: a launcher script in <code>roms/ports</code> and a folder. It uses the firmware's own SDL2 and Mali driver and none of PortMaster's runtimes.</p>
+    <h3>Does it work on muOS or ROCKNIX?</h3>
+    <p>Untested. The host is built against Knulli's SDL2 (2.30.12) and Arm's framebuffer Mali driver. Other firmware for the H700 may ship a different graphics stack, which the host's SDL2 and EGL bridge would need to support. Reports are welcome.</p>
+    <h3>Why not run the PC version with Box64 and Wine?</h3>
+    <p>The PC version is a 32-bit x86 Windows program that draws with Direct3D 9. Running it on the H700 would need x86 translation, Wine, and a Direct3D to OpenGL ES translation layer, all on four Cortex-A53 cores and 1 GB of RAM. Each layer costs CPU time the device does not have. The native port runs the game's own logic as ARM64 code and draws with OpenGL ES directly.</p>
+    <h3>Why not use xemu?</h3>
+    <p>xemu emulates the whole original Xbox, its Pentium III CPU and its NV2A GPU, and needs a fast desktop CPU and a desktop OpenGL or Vulkan GPU. The H700's Cortex-A53 cores and its OpenGL ES-only Mali driver are far below that. A native port of the decompiled code avoids the emulation entirely.</p>
+    <h3>Which other handhelds does it work on?</h3>
+    <p>It should work on the other Allwinner H700 handhelds that run Knulli: the Anbernic RG35XX Plus, SP and 2024, RG40XX H and V, RG CubeXX and RG34XX. Only the RG35XX H has been tested. TrimUI handhelds and other SoCs are not supported.</p>
+  </section>
+
+  <section id="legal" aria-labelledby="legal-title">
+    <h2 id="legal-title">Legal notice</h2>
+    <p>This is an unofficial fan project, not affiliated with, endorsed by or sponsored by Microsoft, Xbox Game Studios, Halo Studios or Bungie. Halo, Halo: Combat Evolved and Xbox are trademarks of Microsoft Corporation. The project contains no Halo game files (no disc images, maps, XBE, extracted assets or prebuilt game binaries) and no Arm Mali driver or device libraries. To play, you need your own copy of the original Xbox game. See <a href="https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/blob/main/docs/LEGAL.md">LEGAL.md</a>.</p>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>Built on <a href="https://github.com/cybersecurity/halo-ce-universal">halo-ce-universal</a> and its contributors, which starts from <a href="https://github.com/bnunu/halo-1">bnunu/halo-1</a>, a fork of <a href="https://github.com/punpckhdq/halo">punpckhdq/halo</a>. Uses <a href="https://www.libsdl.org/">SDL</a> and runs on <a href="https://knulli.org/">Knulli</a>, based on <a href="https://batocera.org/">Batocera</a>.</p>
+    <p>Code and documentation released under <a href="https://creativecommons.org/publicdomain/zero/1.0/">CC0 1.0</a>. Source: <a href="https://github.com/kirklandsig/halo-ce-anbernic-rg35xx">github.com/kirklandsig/halo-ce-anbernic-rg35xx</a>.</p>
+  </div>
+</footer>
+</body>
+</html>

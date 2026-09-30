@@ -1,0 +1,222 @@
+/*
+HOST_PROFILE.C
+
+A sampling profiler for the Knulli port, to find where a frame's time goes
+on the handheld, which has no perf. HALO_PROFILE_HZ=<rate> interrupts
+every thread of the process at that rate, after HALO_PROFILE_DELAY seconds
+(default 0), and records its program counter,
+link register and frame chain (the guest's frame records, and those of the
+host code that keeps them); HALO_PROFILE_FILE (default profile.txt in the
+data folder) receives them when the game exits, after the process's
+mappings and each thread's name and CPU time. port/knulli/profile.py turns
+the file into a report.
+*/
+
+#include "host.h"
+
+#include <dirent.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/syscall.h>
+#include <time.h>
+#include <ucontext.h>
+#include <unistd.h>
+
+#define PROFILE_SIGNAL SIGPROF
+#define PROFILE_DEPTH 8
+#define PROFILE_CAPACITY (256 * 1024)
+
+struct profile_sample
+{
+	int32_t tid;
+	int32_t depth;
+	uint64_t pc;
+	uint64_t lr;
+	uint64_t frames[PROFILE_DEPTH];
+};
+
+static struct profile_sample *samples;
+static volatile uint32_t sample_count;
+static int profiling;
+static char profile_path[1024];
+static unsigned int profile_delay;
+
+static void profile_handler(int signal_number, siginfo_t *information, void *context)
+{
+	const ucontext_t *ucontext = context;
+	const struct sigcontext *registers = (const struct sigcontext *)&ucontext->uc_mcontext;
+	uint32_t index = __sync_fetch_and_add(&sample_count, 1);
+	struct profile_sample *sample;
+	uint64_t fp = registers->regs[29];
+	int depth;
+
+	(void)signal_number;
+	(void)information;
+	if (index >= PROFILE_CAPACITY)
+		return;
+	sample = &samples[index];
+	sample->tid = (int32_t)syscall(SYS_gettid);
+	sample->pc = registers->pc;
+	sample->lr = registers->regs[30];
+	/* frame records on the stacks the host made for guest threads (below
+	4 GB); other stacks are not followed. The bounds come from TLS: a lock
+	here would deadlock against a thread interrupted while holding it */
+	for (depth = 0; depth < PROFILE_DEPTH && fp && !(fp & 7) && fp >= host_thread_stack_low &&
+		fp + 16 <= host_thread_stack_high; depth++)
+	{
+		const uint64_t *frame = (const uint64_t *)fp;
+
+		sample->frames[depth] = frame[1];
+		if (frame[0] <= fp)
+		{
+			depth++;
+			break;
+		}
+		fp = frame[0];
+	}
+	sample->depth = depth;
+}
+
+static void *profile_thread(void *context)
+{
+	long interval_ns = (long)(uintptr_t)context;
+	pid_t self = (pid_t)syscall(SYS_gettid);
+	pid_t process = getpid();
+
+	sleep(profile_delay);
+	for (;;)
+	{
+		struct timespec interval = { interval_ns / 1000000000L, interval_ns % 1000000000L };
+		DIR *tasks;
+		struct dirent *entry;
+
+		nanosleep(&interval, NULL);
+		if (sample_count >= PROFILE_CAPACITY)
+			continue;
+		tasks = opendir("/proc/self/task");
+		if (!tasks)
+			continue;
+		while ((entry = readdir(tasks)))
+		{
+			pid_t tid = (pid_t)atoi(entry->d_name);
+
+			if (tid > 0 && tid != self)
+				syscall(SYS_tgkill, process, tid, PROFILE_SIGNAL);
+		}
+		closedir(tasks);
+	}
+	return NULL;
+}
+
+void host_profile_start(const char *data_root)
+{
+	const char *rate = getenv("HALO_PROFILE_HZ");
+	const char *file = getenv("HALO_PROFILE_FILE");
+	const char *delay = getenv("HALO_PROFILE_DELAY");
+	struct sigaction action;
+	pthread_t thread;
+	long hertz;
+
+	hertz = rate && *rate ? atol(rate) : 0;
+	if (hertz <= 0)
+		return;
+	samples = calloc(PROFILE_CAPACITY, sizeof(*samples));
+	if (!samples)
+		return;
+	if (file && *file)
+		snprintf(profile_path, sizeof(profile_path), "%s", file);
+	else
+		snprintf(profile_path, sizeof(profile_path), "%s/profile.txt", data_root);
+	memset(&action, 0, sizeof(action));
+	action.sa_sigaction = profile_handler;
+	action.sa_flags = SA_SIGINFO | SA_RESTART;
+	sigemptyset(&action.sa_mask);
+	sigaction(PROFILE_SIGNAL, &action, NULL);
+	profile_delay = delay && *delay ? (unsigned int)atoi(delay) : 0;
+	profiling = 1;
+	if (pthread_create(&thread, NULL, profile_thread, (void *)(uintptr_t)(1000000000L / hertz)) == 0)
+		pthread_detach(thread);
+	host_logf(HOST_LOG_INFO, "profiling at %ld Hz into %s", hertz, profile_path);
+}
+
+static void copy_file(FILE *output, const char *path)
+{
+	FILE *input = fopen(path, "r");
+	char line[1024];
+
+	if (!input)
+		return;
+	while (fgets(line, sizeof(line), input))
+		fputs(line, output);
+	fclose(input);
+}
+
+void host_profile_write(void)
+{
+	FILE *output;
+	DIR *tasks;
+	struct dirent *entry;
+	uint32_t count, index;
+
+	if (!profiling)
+		return;
+	profiling = 0;
+	signal(PROFILE_SIGNAL, SIG_IGN);
+	count = sample_count < PROFILE_CAPACITY ? sample_count : PROFILE_CAPACITY;
+	output = fopen(profile_path, "w");
+	if (!output)
+		return;
+	fprintf(output, "# maps\n");
+	copy_file(output, "/proc/self/maps");
+	fprintf(output, "# threads: tid name utime stime (clock ticks)\n");
+	tasks = opendir("/proc/self/task");
+	while (tasks && (entry = readdir(tasks)))
+	{
+		char path[300], stat[1024], name[64] = "?";
+		unsigned long user = 0, system = 0;
+		FILE *file;
+
+		if (entry->d_name[0] == '.')
+			continue;
+		snprintf(path, sizeof(path), "/proc/self/task/%s/stat", entry->d_name);
+		file = fopen(path, "r");
+		if (!file)
+			continue;
+		if (fgets(stat, sizeof(stat), file))
+		{
+			char *open = strchr(stat, '('), *close = strrchr(stat, ')');
+
+			if (open && close && close > open)
+			{
+				size_t length = (size_t)(close - open - 1);
+
+				if (length >= sizeof(name))
+					length = sizeof(name) - 1;
+				memcpy(name, open + 1, length);
+				name[length] = 0;
+				/* after ") ": state, then fields 4 to 13, utime (14), stime (15) */
+				sscanf(close + 2, "%*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %lu %lu", &user, &system);
+			}
+		}
+		fclose(file);
+		fprintf(output, "thread %s %s %lu %lu\n", entry->d_name, name, user, system);
+	}
+	if (tasks)
+		closedir(tasks);
+	fprintf(output, "# samples: tid pc lr frames...\n");
+	for (index = 0; index < count; index++)
+	{
+		const struct profile_sample *sample = &samples[index];
+		int depth;
+
+		fprintf(output, "%d %llx %llx", sample->tid, (unsigned long long)sample->pc, (unsigned long long)sample->lr);
+		for (depth = 0; depth < sample->depth; depth++)
+			fprintf(output, " %llx", (unsigned long long)sample->frames[depth]);
+		fputc('\n', output);
+	}
+	fclose(output);
+	host_logf(HOST_LOG_INFO, "profile: %u samples in %s", count, profile_path);
+}

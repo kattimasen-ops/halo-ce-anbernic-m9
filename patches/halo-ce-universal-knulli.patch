@@ -1,0 +1,2447 @@
+diff --git a/port/android/guest/runtime/guest_host.h b/port/android/guest/runtime/guest_host.h
+index 2c18715a..9dabac6f 100644
+--- a/port/android/guest/runtime/guest_host.h
++++ b/port/android/guest/runtime/guest_host.h
+@@ -91,6 +91,10 @@ void host_gl_get_string(unsigned int name, int index, char *buffer, unsigned int
+ int host_gl_has_extension(const char *name);
+ /* a 32-bit word of a GL buffer object, waiting for the GPU */
+ unsigned int host_gl_read_buffer_word(unsigned int buffer, unsigned int offset);
++/* visibility test results without waiting for the GPU (host_gl.c) */
++void host_gl_visibility_frame(unsigned int counters, unsigned int counter_bytes, const unsigned int *pairs,
++	unsigned int pair_count);
++unsigned int host_gl_visibility_result(unsigned int index);
+ /* unsynchronized write into the buffer bound to target */
+ void host_gl_buffer_write(unsigned int target, unsigned int offset, unsigned int size, const void *data);
+ /* fences the GPU work queued so far as that of ring slot `slot`; waits for
+diff --git a/port/android/host/host.h b/port/android/host/host.h
+index eef727c6..c2ad6b08 100644
+--- a/port/android/host/host.h
++++ b/port/android/host/host.h
+@@ -72,6 +72,9 @@ uint32_t host_call_guest(uint32_t function, uint32_t a, uint32_t b, uint32_t c,
+ memory, so that it can call guest code; the stack is freed after it exits.
+ Returns 0 or an errno value */
+ int host_native_thread_create(void *(*function)(void *), void *argument, size_t stack_size);
++/* the stack of the calling thread if host_native_thread_create made it,
++else 0 and 0 (readable from signal handlers, which cannot take locks) */
++extern __thread uintptr_t host_thread_stack_low, host_thread_stack_high;
+ /* runs the guest's __guest_start on the calling thread (one made by
+ host_native_thread_create); does not return */
+ void host_run_guest_main(uint32_t boot) __attribute__((noreturn));
+diff --git a/port/android/host/host_debug.c b/port/android/host/host_debug.c
+index 4d103199..82a30bda 100644
+--- a/port/android/host/host_debug.c
++++ b/port/android/host/host_debug.c
+@@ -13,6 +13,7 @@ symbolize against build/android/halo_guest.elf (llvm-symbolizer
+ 
+ #include <pthread.h>
+ #include <signal.h>
++#include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+ #include <sys/syscall.h>
+diff --git a/port/android/host/host_gl.c b/port/android/host/host_gl.c
+index 62d1d0a2..19f8f997 100644
+--- a/port/android/host/host_gl.c
++++ b/port/android/host/host_gl.c
+@@ -20,6 +20,9 @@ void *host_gl_resolve(const char *name)
+ 
+ 	if (!library)
+ 		library = dlopen("libGLESv3.so", RTLD_NOW | RTLD_GLOBAL);
++	/* glibc systems (the Knulli port): libGLESv2 carries OpenGL ES 3 */
++	if (!library)
++		library = dlopen("libGLESv2.so.2", RTLD_NOW | RTLD_GLOBAL);
+ 	if (library)
+ 		function = dlsym(library, name);
+ 	if (!function)
+@@ -77,6 +80,91 @@ uint32_t host_gl_read_buffer_word(uint32_t buffer, uint32_t offset)
+ 	return value;
+ }
+ 
++/* ---------- visibility test results, without waiting for the GPU
++
++The game asks for its visibility tests' counts (lens flares, the lights'
++occlusion) at the start of the next frame. Reading the counter buffer then
++waits for the GPU to finish every draw before, and with the GL thread
++(port/knulli) for that thread to empty its queue too: the game, the driver
++and the GPU in lockstep once a frame. Instead, at the end of each frame
++the counters are copied into the next of three read-back buffers, and the
++copy made three frames before, which the GPU has long finished (the stream
++buffers' fences are two frames behind), is read without waiting. A test's
++count is known two or three frames after it was drawn, as on the NV2A
++while the GPU was behind. */
++
++#define VISIBILITY_FRAMES 3
++
++static struct
++{
++	GLuint buffer;
++	uint32_t size;
++	uint32_t pair_count;
++	uint32_t pairs[HALO_VISIBILITY_FRAME_TESTS][2];
++	int valid;
++} visibility_frames[VISIBILITY_FRAMES];
++static uint32_t visibility_results[HALO_VISIBILITY_RESULTS];
++static uint32_t visibility_frame;
++
++/* the end of a frame: counters is the counter buffer, pairs its tests (the
++game's index and the counter's), pair_count of them */
++void host_gl_visibility_frame(uint32_t counters, uint32_t counter_bytes, const uint32_t *pairs, uint32_t pair_count)
++{
++	unsigned int slot = visibility_frame++ % VISIBILITY_FRAMES;
++	GLint previous_read = 0, previous_write = 0;
++	uint32_t index;
++
++	glGetIntegerv(GL_COPY_READ_BUFFER_BINDING, &previous_read);
++	glGetIntegerv(GL_COPY_WRITE_BUFFER_BINDING, &previous_write);
++	if (visibility_frames[slot].valid)
++	{
++		const uint32_t *values;
++
++		glBindBuffer(GL_COPY_READ_BUFFER, visibility_frames[slot].buffer);
++		values = glMapBufferRange(GL_COPY_READ_BUFFER, 0, visibility_frames[slot].size, GL_MAP_READ_BIT);
++		if (values)
++		{
++			for (index = 0; index < visibility_frames[slot].pair_count; index++)
++			{
++				uint32_t test = visibility_frames[slot].pairs[index][0];
++				uint32_t counter = visibility_frames[slot].pairs[index][1];
++
++				if (test < HALO_VISIBILITY_RESULTS && counter * sizeof(uint32_t) < visibility_frames[slot].size)
++					__atomic_store_n(&visibility_results[test], values[counter], __ATOMIC_RELAXED);
++			}
++			glUnmapBuffer(GL_COPY_READ_BUFFER);
++		}
++		visibility_frames[slot].valid = 0;
++	}
++	if (pair_count && counter_bytes)
++	{
++		if (!visibility_frames[slot].buffer || visibility_frames[slot].size != counter_bytes)
++		{
++			if (!visibility_frames[slot].buffer)
++				glGenBuffers(1, &visibility_frames[slot].buffer);
++			glBindBuffer(GL_COPY_WRITE_BUFFER, visibility_frames[slot].buffer);
++			glBufferData(GL_COPY_WRITE_BUFFER, counter_bytes, NULL, GL_STREAM_READ);
++			visibility_frames[slot].size = counter_bytes;
++		}
++		glBindBuffer(GL_COPY_READ_BUFFER, counters);
++		glBindBuffer(GL_COPY_WRITE_BUFFER, visibility_frames[slot].buffer);
++		glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, counter_bytes);
++		if (pair_count > HALO_VISIBILITY_FRAME_TESTS)
++			pair_count = HALO_VISIBILITY_FRAME_TESTS;
++		memcpy(visibility_frames[slot].pairs, pairs, pair_count * 2 * sizeof(uint32_t));
++		visibility_frames[slot].pair_count = pair_count;
++		visibility_frames[slot].valid = 1;
++	}
++	glBindBuffer(GL_COPY_READ_BUFFER, (GLuint)previous_read);
++	glBindBuffer(GL_COPY_WRITE_BUFFER, (GLuint)previous_write);
++}
++
++/* the latest known count of the game's test index */
++uint32_t host_gl_visibility_result(uint32_t index)
++{
++	return __atomic_load_n(&visibility_results[index % HALO_VISIBILITY_RESULTS], __ATOMIC_RELAXED);
++}
++
+ /* The renderer streams each frame's vertices and indices into the next of
+ a ring of buffers (d3d8_gl.c). A fence marks the end of each frame's work,
+ and a buffer is written again only once the GPU has passed the fence of the
+diff --git a/port/android/host/host_loader.c b/port/android/host/host_loader.c
+index a2cb5c6c..ac9a6498 100644
+--- a/port/android/host/host_loader.c
++++ b/port/android/host/host_loader.c
+@@ -16,6 +16,14 @@ host functions of the same names.
+ 
+ struct host_guest_image host_image;
+ 
++/* a port can put a function of its own in an import's place (the Knulli
++port's GL thread, port/knulli/host/host_glthread.c) */
++__attribute__((weak)) void *host_import_wrap(const char *name, void *function)
++{
++	(void)name;
++	return function;
++}
++
+ static void missing_import(void)
+ {
+ 	host_fatal("the guest called a host function that is not available");
+@@ -89,6 +97,7 @@ int host_load_image(const void *file, size_t size)
+ 
+ 		if (!function && !strncmp(name, "hostgl_", 7))
+ 			function = host_gl_resolve(name + 7);
++		function = host_import_wrap(name, function);
+ 		if (!function)
+ 		{
+ 			host_logf(HOST_LOG_WARN, "guest import %s is not available", name);
+diff --git a/port/android/host/host_syscall.c b/port/android/host/host_syscall.c
+index e7e47501..ffb6a735 100644
+--- a/port/android/host/host_syscall.c
++++ b/port/android/host/host_syscall.c
+@@ -207,7 +207,10 @@ long long host_syscall(long long number, long long a, long long b, long long c,
+ 	case SYS_clock_getres:
+ 	{
+ 		struct timespec value;
+-		long result = syscall(number, (clockid_t)a, &value);
++		/* through the C library, which reads the clock in the vDSO
++		without entering the kernel: the game reads it very often */
++		long result = number == SYS_clock_gettime ? clock_gettime((clockid_t)a, &value) :
++			clock_getres((clockid_t)a, &value);
+ 
+ 		if (result == 0)
+ 			timespec_out((uint64_t)b, &value);
+diff --git a/port/android/host/host_thread.c b/port/android/host/host_thread.c
+index bc939b8b..a7821200 100644
+--- a/port/android/host/host_thread.c
++++ b/port/android/host/host_thread.c
+@@ -27,6 +27,7 @@ Thread stacks are freed by a reaper thread once the thread has fully exited.
+ #define GUARD_SIZE 0x4000
+ 
+ static __thread uint32_t guest_tp;
++__thread uintptr_t host_thread_stack_low, host_thread_stack_high;
+ 
+ uint32_t host_get_tp(void)
+ {
+@@ -129,6 +130,8 @@ static void *thread_main(void *context)
+ 	struct finished_thread *finished;
+ 
+ 	free(context);
++	host_thread_stack_low = (uintptr_t)start.mapping;
++	host_thread_stack_high = (uintptr_t)start.mapping + start.mapping_size;
+ 	host_debug_thread_started();
+ 	start.function(start.argument);
+ 	host_debug_thread_exited();
+diff --git a/port/android/host_imports.list b/port/android/host_imports.list
+index 2888fe99..ec41d803 100644
+--- a/port/android/host_imports.list
++++ b/port/android/host_imports.list
+@@ -44,6 +44,8 @@ host_sdl_resume_audio_stream_device
+ host_gl_get_string
+ host_gl_has_extension
+ host_gl_read_buffer_word
++host_gl_visibility_frame
++host_gl_visibility_result
+ host_gl_buffer_write
+ host_gl_fence_frame
+ host_gl_wait_frame
+diff --git a/port/android/include/halo_android_abi.h b/port/android/include/halo_android_abi.h
+index baa28789..f1d55fcf 100644
+--- a/port/android/include/halo_android_abi.h
++++ b/port/android/include/halo_android_abi.h
+@@ -34,6 +34,11 @@ keeps its heaps low in the address space and fills it upwards */
+ #define HALO_GUEST_WINDOW_BASE 0x80000000u
+ #define HALO_GUEST_WINDOW_SIZE 0x08000000u
+ 
++/* host_gl_visibility_frame: the most tests of one frame it takes, and the
++game's test indexes it keeps results for */
++#define HALO_VISIBILITY_FRAME_TESTS 512
++#define HALO_VISIBILITY_RESULTS 4096
++
+ #define HALO_GUEST_MAGIC 0x4f4c4148u /* 'HALO' */
+ #define HALO_GUEST_ABI_VERSION 1
+ 
+diff --git a/port/linux/src/d3d8_gl.c b/port/linux/src/d3d8_gl.c
+index 36c5f238..917e02f2 100644
+--- a/port/linux/src/d3d8_gl.c
++++ b/port/linux/src/d3d8_gl.c
+@@ -25,6 +25,7 @@ Conventions carried over from the Xbox:
+ #include "sdl_platform.h"
+ #include "halo_ui_pointer.h"
+ #include "port_config.h"
++#include "posix.h"
+ 
+ #include <math.h>
+ #include <stdio.h>
+@@ -97,7 +98,13 @@ static void screen_mode_choose(long *width, float scale[2])
+ 	if (*width > 1600)
+ 		*width = 1600;
+ 	*width &= ~1L;
+-	scale[0] = scale[1] = 1.0f;
++	/* display.render_scale: render targets the size of the screen get
++	fewer pixels, and Present scales the back buffer up to the display */
++	scale[0] = scale[1] = (float)config_real("display.render_scale");
++	if (!(scale[0] >= 0.5f))
++		scale[0] = scale[1] = 0.5f;
++	if (scale[0] > 1.0f)
++		scale[0] = scale[1] = 1.0f;
+ #else
+ 	long display_width, display_height;
+ 
+@@ -118,6 +125,15 @@ static void screen_mode_choose(long *width, float scale[2])
+ #endif
+ }
+ 
++int xgpu_fast_shaders(void)
++{
++	static int fast = -1;
++
++	if (fast < 0)
++		fast = config_boolean("display.fast_shaders") ? 1 : 0;
++	return fast;
++}
++
+ long halo_screen_width(void)
+ {
+ 	if (!screen_width)
+@@ -347,12 +363,14 @@ struct gl_device
+ 	GLuint active_query;
+ 	BOOL visibility_test_active;
+ #ifdef HALO_ANDROID
+-	/* with atomic counters: one counter per test, used as a ring; the
+-	counter a test ended in, per result slot */
++	/* with atomic counters: one counter per test, used as a ring */
+ 	GLuint visibility_counters;
+ 	unsigned long counter_next;
+ 	unsigned long counter_active;
+-	unsigned long counter_of_slot[VISIBILITY_TEST_SLOTS];
++	/* the tests of this frame: the game's index and the counter
++	(host_gl_visibility_frame at Present) */
++	unsigned int visibility_pairs[HALO_VISIBILITY_FRAME_TESTS][2];
++	unsigned long visibility_pair_count;
+ #else
+ 	/* each test's latest result, which the GPU writes (as a query buffer)
+ 	when the test's draws are done: the game waits for results at the start
+@@ -410,6 +428,15 @@ static struct
+ 	const char *skip_vertex_shaders;
+ 	const char *dump_shaders;
+ 	BOOL statistics;
++#ifdef HALO_ANDROID
++	/* the ES renderer's switches (port/knulli/README.md) */
++	BOOL batch_quads;
++	BOOL stable_streams;
++	const char *freeze;
++	BOOL tiny_scissor;
++	float lod_bias;
++	long draw_callers;
++#endif
+ } debug_settings;
+ 
+ /* ---------- GL state cache
+@@ -468,6 +495,12 @@ static struct
+ 	float attribute_values[XGPU_VERTEX_ATTRIBUTE_COUNT][4];
+ } gl_state;
+ 
++#ifdef HALO_ANDROID
++static void batch_flush(void);
++#else
++#define batch_flush() ((void)0)
++#endif
++
+ void xgpu_gl_state_invalidate(void)
+ {
+ 	memset(&gl_state, 0xff, sizeof(gl_state));
+@@ -528,12 +561,15 @@ static void state_sampler(int unit, GLuint sampler)
+ 	}
+ }
+ 
++/* The helpers below record the state after making their call: a batch of
++quads can be drawn from within the call (batch_flush, guest_gl_before_call),
++and it binds through them too */
+ static void state_array_buffer(GLuint buffer)
+ {
+ 	if (gl_state.array_buffer != buffer)
+ 	{
+-		gl_state.array_buffer = buffer;
+ 		glBindBuffer(GL_ARRAY_BUFFER, buffer);
++		gl_state.array_buffer = buffer;
+ 	}
+ }
+ 
+@@ -541,8 +577,8 @@ static void state_element_array_buffer(GLuint buffer)
+ {
+ 	if (gl_state.element_array_buffer != buffer)
+ 	{
+-		gl_state.element_array_buffer = buffer;
+ 		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, buffer);
++		gl_state.element_array_buffer = buffer;
+ 	}
+ }
+ 
+@@ -553,8 +589,8 @@ static void state_attribute_pointer(GLuint index, GLuint buffer, GLint size, GLe
+ 
+ 	if (gl_state.attribute_enabled[index] != 1)
+ 	{
+-		gl_state.attribute_enabled[index] = 1;
+ 		glEnableVertexAttribArray(index);
++		gl_state.attribute_enabled[index] = 1;
+ 	}
+ 	if (pointer->buffer == buffer && pointer->size == size && pointer->type == type &&
+ 		pointer->normalized == normalized && pointer->integer == (integer ? GL_TRUE : GL_FALSE) &&
+@@ -583,24 +619,24 @@ static void state_attribute_value(GLuint index, const float *value)
+ 
+ 	if (gl_state.attribute_enabled[index] != 0)
+ 	{
+-		gl_state.attribute_enabled[index] = 0;
+ 		glDisableVertexAttribArray(index);
++		gl_state.attribute_enabled[index] = 0;
+ 	}
+ 	if (gl_state.attribute_value_kind[index] == kind &&
+ 		(!value || !memcmp(gl_state.attribute_values[index], value, sizeof(gl_state.attribute_values[index]))))
+ 	{
+ 		return;
+ 	}
+-	gl_state.attribute_value_kind[index] = kind;
+ 	if (value)
+ 	{
+-		memcpy(gl_state.attribute_values[index], value, sizeof(gl_state.attribute_values[index]));
+ 		glVertexAttrib4fv(index, value);
++		memcpy(gl_state.attribute_values[index], value, sizeof(gl_state.attribute_values[index]));
+ 	}
+ 	else
+ 	{
+ 		glVertexAttribI4ui(index, 0, 0, 0, 0);
+ 	}
++	gl_state.attribute_value_kind[index] = kind;
+ }
+ 
+ /* ---------- vertical blank emulation */
+@@ -700,7 +736,7 @@ void WINAPI D3DDevice_BlockUntilVerticalBlank(void)
+ 
+ /* ---------- GL helpers */
+ 
+-static GLuint compile_shader(GLenum type, const char *source, const char *what)
++static GLuint compile_shader_now(GLenum type, const char *source, const char *what)
+ {
+ 	GLuint shader = glCreateShader(type);
+ 	GLint status = 0;
+@@ -720,6 +756,191 @@ static GLuint compile_shader(GLenum type, const char *source, const char *what)
+ 	return shader;
+ }
+ 
++#ifdef HALO_ANDROID
++/* ---------- shader programs kept on disk (ES)
++
++Mali compiles and links a program in tens to hundreds of milliseconds: in
++the middle of a frame the first time a combination of shaders is drawn with,
++and again at every start. Linked programs are therefore kept, as the
++driver's binaries, in shaders/ of the save folder, named by a hash of their
++two sources and the driver's version; a program found there is loaded
++without compiling anything. So that it need not be, compile_shader only
++keeps a shader's source, and returns a handle to it: the shaders are
++compiled when a program that uses them is linked. */
++
++#define LAZY_SHADER 0x40000000u
++/* changes to what the port expects of a linked program invalidate the cache */
++#define PROGRAM_CACHE_VERSION 1
++
++struct lazy_shader
++{
++	GLenum type;
++	char *source;
++	unsigned long long hash;
++	GLuint shader;
++	BOOL failed;
++	const char *what;
++};
++
++static struct lazy_shader *lazy_shaders;
++static unsigned long lazy_shader_count, lazy_shader_capacity;
++
++static unsigned long long hash_text(const char *text, unsigned long long hash)
++{
++	while (*text)
++		hash = (hash ^ (unsigned char)*text++) * 1099511628211ull;
++	return hash;
++}
++
++static GLuint compile_shader(GLenum type, const char *source, const char *what)
++{
++	struct lazy_shader *shader;
++
++	if (lazy_shader_count == lazy_shader_capacity)
++	{
++		lazy_shader_capacity = lazy_shader_capacity ? lazy_shader_capacity * 2 : 256;
++		lazy_shaders = realloc(lazy_shaders, lazy_shader_capacity * sizeof(*lazy_shaders));
++	}
++	shader = &lazy_shaders[lazy_shader_count];
++	memset(shader, 0, sizeof(*shader));
++	shader->type = type;
++	shader->source = strdup(source);
++	shader->hash = hash_text(source, 14695981039346656037ull);
++	shader->what = what;
++	return LAZY_SHADER | (GLuint)lazy_shader_count++;
++}
++
++static struct lazy_shader *lazy_shader_get(GLuint handle)
++{
++	unsigned long index = handle & ~LAZY_SHADER;
++
++	return (handle & LAZY_SHADER) && index < lazy_shader_count ? &lazy_shaders[index] : NULL;
++}
++
++/* the GL shader for a handle, compiled now if it has not been */
++static GLuint lazy_shader_compile(GLuint handle)
++{
++	struct lazy_shader *shader = lazy_shader_get(handle);
++
++	if (!shader)
++		return handle;
++	if (!shader->shader && !shader->failed)
++	{
++		shader->shader = compile_shader_now(shader->type, shader->source, shader->what);
++		shader->failed = !shader->shader;
++		free(shader->source);
++		shader->source = NULL;
++	}
++	return shader->shader;
++}
++
++static const char *program_cache_folder(void)
++{
++	static char folder[512];
++	static int made;
++
++	if (!made)
++	{
++		made = 1;
++		if (!config_boolean("debug.no_program_cache"))
++		{
++			snprintf(folder, sizeof(folder), "%s/shaders", platform_save_root());
++			posix_make_directory(folder);
++		}
++	}
++	return folder;
++}
++
++static unsigned long long program_key(GLuint vertex_shader, GLuint fragment_shader)
++{
++	static unsigned long long driver;
++	struct lazy_shader *vertex = lazy_shader_get(vertex_shader);
++	struct lazy_shader *fragment = lazy_shader_get(fragment_shader);
++	unsigned long long key;
++
++	if (!driver)
++	{
++		driver = hash_text((const char *)glGetString(GL_VERSION), 14695981039346656037ull);
++		driver = hash_text((const char *)glGetString(GL_RENDERER), driver) + PROGRAM_CACHE_VERSION;
++	}
++	if (!vertex || !fragment)
++		return 0;
++	key = (driver ^ vertex->hash) * 1099511628211ull;
++	return (key ^ fragment->hash) * 1099511628211ull;
++}
++
++/* a program from the cache, or 0 */
++static GLuint program_cache_load(unsigned long long key)
++{
++	const char *folder = program_cache_folder();
++	char path[600];
++	FILE *file;
++	unsigned int header[2];
++	void *binary;
++	GLuint program = 0;
++	GLint status = 0;
++
++	if (!*folder || !key)
++		return 0;
++	snprintf(path, sizeof(path), "%s/%016llx.bin", folder, key);
++	if (!(file = fopen(path, "rb")))
++		return 0;
++	if (fread(header, sizeof(header), 1, file) == 1 && header[1] && header[1] < 16u * 1024 * 1024 &&
++		(binary = malloc(header[1])) != NULL)
++	{
++		if (fread(binary, header[1], 1, file) == 1)
++		{
++			program = glCreateProgram();
++			glProgramBinary(program, (GLenum)header[0], binary, (GLsizei)header[1]);
++			glGetProgramiv(program, GL_LINK_STATUS, &status);
++			if (!status)
++			{
++				glDeleteProgram(program);
++				program = 0;
++			}
++		}
++		free(binary);
++	}
++	fclose(file);
++	if (!program)
++		remove(path);
++	return program;
++}
++
++static void program_cache_store(unsigned long long key, GLuint program)
++{
++	const char *folder = program_cache_folder();
++	char path[600], temporary[620];
++	GLint length = 0;
++	GLsizei written = 0;
++	GLenum format = 0;
++	void *binary;
++	FILE *file;
++
++	if (!*folder || !key)
++		return;
++	glGetProgramiv(program, GL_PROGRAM_BINARY_LENGTH, &length);
++	if (length <= 0 || !(binary = malloc((size_t)length)))
++		return;
++	glGetProgramBinary(program, length, &written, &format, binary);
++	snprintf(path, sizeof(path), "%s/%016llx.bin", folder, key);
++	snprintf(temporary, sizeof(temporary), "%s.part", path);
++	if (written > 0 && (file = fopen(temporary, "wb")) != NULL)
++	{
++		unsigned int header[2] = { (unsigned int)format, (unsigned int)written };
++		BOOL complete = fwrite(header, sizeof(header), 1, file) == 1 && fwrite(binary, (size_t)written, 1, file) == 1;
++
++		if (fclose(file) == 0 && complete)
++			rename(temporary, path);
++		else
++			remove(temporary);
++	}
++	free(binary);
++}
++#else
++#define compile_shader compile_shader_now
++#endif
++
+ #ifndef HALO_ANDROID
+ static void GLAPIENTRY gl_debug_callback(GLenum source, GLenum type, GLuint id, GLenum severity,
+ 	GLsizei length, const GLchar *message, const void *user)
+@@ -971,6 +1192,15 @@ static void gl_initialize(void)
+ 	debug_settings.dump_shaders = *config_string("debug.gpu_dump_shaders") ?
+ 		config_string("debug.gpu_dump_shaders") : NULL;
+ 	debug_settings.statistics = config_boolean("debug.gpu_stats");
++#ifdef HALO_ANDROID
++	debug_settings.batch_quads = config_boolean("debug.batch_quads");
++	/* the draws without a base vertex index from the range's first vertex */
++	debug_settings.stable_streams = config_boolean("debug.stable_streams") && xgpu_capabilities.base_vertex;
++	debug_settings.freeze = config_string("debug.freeze");
++	debug_settings.tiny_scissor = config_boolean("debug.tiny_scissor");
++	debug_settings.lod_bias = (float)config_real("debug.lod_bias");
++	debug_settings.draw_callers = config_integer("debug.draw_callers");
++#endif
+ 	xgpu_gl_state_invalidate();
+ 	device.gl_ready = TRUE;
+ }
+@@ -1378,8 +1608,13 @@ HRESULT WINAPI D3DDevice_EndVisibilityTest(DWORD index)
+ #ifdef HALO_ANDROID
+ 	if (xgpu_capabilities.atomic_counters)
+ 	{
+-		device.counter_of_slot[index] = device.counter_active;
+ 		device.query_pending[index] = TRUE;
++		if (device.visibility_pair_count < HALO_VISIBILITY_FRAME_TESTS)
++		{
++			device.visibility_pairs[device.visibility_pair_count][0] = (unsigned int)index;
++			device.visibility_pairs[device.visibility_pair_count][1] = (unsigned int)device.counter_active;
++			device.visibility_pair_count++;
++		}
+ 		return S_OK;
+ 	}
+ #endif
+@@ -1434,9 +1669,10 @@ HRESULT WINAPI D3DDevice_GetVisibilityTestResult(DWORD index, UINT *result, ULON
+ #ifdef HALO_ANDROID
+ 	if (xgpu_capabilities.atomic_counters)
+ 	{
+-		/* reading the buffer waits for the draws that counted */
+-		samples = host_gl_read_buffer_word(device.visibility_counters,
+-			(unsigned int)(device.counter_of_slot[index] * sizeof(GLuint)));
++		/* the count known without waiting for the GPU: from this test two
++		or three frames ago, or from the slot's earlier ones
++		(host_gl_visibility_frame) */
++		samples = host_gl_visibility_result((unsigned int)index);
+ 		if (result)
+ 			*result = samples;
+ 		return S_OK;
+@@ -1895,11 +2131,39 @@ static struct program_entry *program_get(GLuint vertex_shader, GLuint fragment_s
+ 	if (!vertex_shader || !fragment_shader)
+ 		return NULL;
+ 
++#ifdef HALO_ANDROID
++	{
++		unsigned long long key = program_key(vertex_shader, fragment_shader);
++
++		entry->program = program_cache_load(key);
++		if (!entry->program)
++		{
++			GLuint vertex = lazy_shader_compile(vertex_shader);
++			GLuint fragment = lazy_shader_compile(fragment_shader);
++
++			if (!vertex || !fragment)
++				return NULL;
++			entry->program = glCreateProgram();
++			glProgramParameteri(entry->program, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
++			glAttachShader(entry->program, vertex);
++			glAttachShader(entry->program, fragment);
++			glLinkProgram(entry->program);
++			glGetProgramiv(entry->program, GL_LINK_STATUS, &status);
++			if (status)
++				program_cache_store(key, entry->program);
++		}
++		else
++		{
++			status = GL_TRUE;
++		}
++	}
++#else
+ 	entry->program = glCreateProgram();
+ 	glAttachShader(entry->program, vertex_shader);
+ 	glAttachShader(entry->program, fragment_shader);
+ 	glLinkProgram(entry->program);
+ 	glGetProgramiv(entry->program, GL_LINK_STATUS, &status);
++#endif
+ 	if (!status)
+ 	{
+ 		char log[4096];
+@@ -1988,11 +2252,51 @@ static GLenum address_mode(DWORD mode)
+ 	}
+ }
+ 
+-static void configure_sampler(int stage, BOOL mipmapped)
++#ifdef HALO_ANDROID
++/* ES: a sampler object for each distinct configuration, made once and bound
++thereafter. Changing the parameters of a bound sampler makes Mali build the
++draw's sampler descriptors again, which cost more than the draw itself */
++#define SAMPLER_CACHE_SIZE 512
++
++static struct
++{
++	DWORD inputs[10];
++	GLuint sampler;
++} sampler_cache[SAMPLER_CACHE_SIZE];
++
++static GLuint sampler_for(const DWORD inputs[10], BOOL *created)
++{
++	unsigned long hash = hash_words(inputs, 10 * sizeof(DWORD)), probe;
++
++	*created = FALSE;
++	for (probe = 0; probe < SAMPLER_CACHE_SIZE; probe++)
++	{
++		unsigned long slot = (hash + probe) % SAMPLER_CACHE_SIZE;
++
++		if (!sampler_cache[slot].sampler)
++		{
++			memcpy(sampler_cache[slot].inputs, inputs, sizeof(sampler_cache[slot].inputs));
++			glGenSamplers(1, &sampler_cache[slot].sampler);
++			*created = TRUE;
++			return sampler_cache[slot].sampler;
++		}
++		if (!memcmp(sampler_cache[slot].inputs, inputs, sizeof(sampler_cache[slot].inputs)))
++			return sampler_cache[slot].sampler;
++	}
++	/* full: reconfigure the stage's own */
++	*created = TRUE;
++	return 0;
++}
++#endif
++
++/* configures the stage's sampler from its texture stage state; returns the
++sampler to bind */
++static GLuint configure_sampler(int stage, BOOL mipmapped)
+ {
+ 	/* the texture stage state each sampler was last configured from */
+ 	static DWORD configured[D3DTSS_MAXSTAGES][10];
+ 	static BOOL configured_valid[D3DTSS_MAXSTAGES];
++	static GLuint configured_sampler[D3DTSS_MAXSTAGES];
+ 	GLuint sampler = device.samplers[stage];
+ 	DWORD *state = D3D__TextureState[stage];
+ 	DWORD min_filter = state[D3DTSS_MINFILTER];
+@@ -2012,9 +2316,23 @@ static void configure_sampler(int stage, BOOL mipmapped)
+ 	inputs[8] = state[D3DTSS_MAXANISOTROPY];
+ 	inputs[9] = state[D3DTSS_BORDERCOLOR];
+ 	if (configured_valid[stage] && !memcmp(configured[stage], inputs, sizeof(inputs)))
+-		return;
++		return configured_sampler[stage];
+ 	memcpy(configured[stage], inputs, sizeof(inputs));
+ 	configured_valid[stage] = TRUE;
++#ifdef HALO_ANDROID
++	{
++		BOOL created;
++		GLuint cached = sampler_for(inputs, &created);
++
++		if (cached)
++			sampler = cached;
++		configured_sampler[stage] = sampler;
++		if (!created)
++			return sampler;
++	}
++#else
++	configured_sampler[stage] = sampler;
++#endif
+ 
+ 	if (min_filter == D3DTEXF_POINT)
+ 		minification = mip_filter == D3DTEXF_NONE ? GL_NEAREST :
+@@ -2047,6 +2365,7 @@ static void configure_sampler(int stage, BOOL mipmapped)
+ 	color_to_vec4(state[D3DTSS_BORDERCOLOR], border);
+ 	glSamplerParameterfv(sampler, GL_TEXTURE_BORDER_COLOR, border);
+ #endif
++	return sampler;
+ }
+ 
+ 
+@@ -2154,6 +2473,47 @@ static GLuint mip_composite_get(const struct xgpu_texture_description *descripti
+ 	return composite->texture;
+ }
+ 
++#ifdef HALO_ANDROID
++/* xgpu_sample_blurred: the pixel shaders read stage 0 blurred */
++static int sample_blurred;
++
++void xgpu_sample_blurred(int enable)
++{
++	sample_blurred = enable != 0;
++}
++#endif
++
++#ifdef HALO_ANDROID
++float xgpu_model_detail_scale(void)
++{
++	static float scale;
++
++	if (!scale)
++	{
++		/* the rendered pixels, not the screen's: detail beyond them is lost */
++		double render = config_real("display.render_scale"), detail = config_real("display.model_detail");
++
++		render = render < 0.5 ? 0.5 : render > 1.0 ? 1.0 : render;
++		detail = detail < 0.1 ? 0.1 : detail > 1.0 ? 1.0 : detail;
++		scale = (float)(render * detail);
++	}
++	return scale;
++}
++#endif
++
++/* debug.freeze: after 20 seconds, draws keep the textures, program or raster
++state they find instead of setting their own, to measure what setting them
++costs the driver (the picture is wrong; the draws stay valid) */
++static BOOL debug_frozen(const char *what)
++{
++#ifdef HALO_ANDROID
++	return strstr(debug_settings.freeze, what) && device.frame > 600;
++#else
++	(void)what;
++	return FALSE;
++#endif
++}
++
+ static void bind_textures(struct nv2a_pixel_shader_key *key, float texture_scale[4][4])
+ {
+ 	int stage;
+@@ -2205,9 +2565,11 @@ static void bind_textures(struct nv2a_pixel_shader_key *key, float texture_scale
+ 					texture_scale[stage][1] = 1.0f / (float)description.height;
+ 				}
+ 			}
+-			state_texture(stage, gl_target, gl_texture);
+-			state_sampler(stage, device.samplers[stage]);
+-			configure_sampler(stage, description.levels > 1);
++			if (!debug_frozen("textures"))
++			{
++				state_texture(stage, gl_target, gl_texture);
++				state_sampler(stage, configure_sampler(stage, description.levels > 1));
++			}
+ 			key->sampler_type[stage] = gl_target == GL_TEXTURE_CUBE_MAP ? _xgpu_sampler_cube :
+ 				gl_target == GL_TEXTURE_3D ? _xgpu_sampler_3d : _xgpu_sampler_2d;
+ 		}
+@@ -2257,6 +2619,12 @@ static void apply_raster_state(BOOL has_depth)
+ 	what keeps a split-screen window's geometry from bleeding across the divider */
+ 	/* (glScissor takes the corner and the size, as glViewport does) */
+ 	memcpy(scissor, viewport, sizeof(scissor));
++#ifdef HALO_ANDROID
++	/* debug.tiny_scissor: one pixel of each draw, to measure the GPU's time
++	without the pixels (the vertices and the tiler) */
++	if (debug_settings.tiny_scissor)
++		scissor[2] = scissor[3] = 1;
++#endif
+ 	if (memcmp(gl_state.scissor, scissor, sizeof(scissor)))
+ 	{
+ 		memcpy(gl_state.scissor, scissor, sizeof(scissor));
+@@ -2491,7 +2859,8 @@ static struct program_entry *prepare_draw(BOOL immediate)
+ 		stats.skipped_no_target++;
+ 		return NULL;
+ 	}
+-	apply_raster_state(has_depth);
++	if (!debug_frozen("raster"))
++		apply_raster_state(has_depth);
+ 
+ 	memset(&key, 0, sizeof(key));
+ 	memcpy(key.combiner_state, D3D__RenderState, sizeof(key.combiner_state));
+@@ -2511,6 +2880,7 @@ static struct program_entry *prepare_draw(BOOL immediate)
+ 	key.fog_table_mode = (unsigned char)D3D__RenderState[D3DRS_FOGTABLEMODE];
+ #ifdef HALO_ANDROID
+ 	key.count_samples = device.visibility_test_active && xgpu_capabilities.atomic_counters;
++	key.blur_stage0 = (unsigned char)sample_blurred;
+ #endif
+ 
+ 	entry = program_get(vertex_shader_get(program, immediate), fragment_shader_get(&key));
+@@ -2525,7 +2895,8 @@ static struct program_entry *prepare_draw(BOOL immediate)
+ 		stats.immediate_draws++;
+ 	else
+ 		stats.draws++;
+-	state_program(entry->program);
++	if (!debug_frozen("program"))
++		state_program(entry->program);
+ #ifdef HALO_ANDROID
+ 	if (key.count_samples)
+ 		glBindBufferRange(GL_ATOMIC_COUNTER_BUFFER, 0, device.visibility_counters,
+@@ -2646,7 +3017,12 @@ static struct program_entry *prepare_draw(BOOL immediate)
+ 				converted->bump_luminance[stage][0] = dword_to_float(state[D3DTSS_BUMPENVLSCALE]);
+ 				converted->bump_luminance[stage][1] = dword_to_float(state[D3DTSS_BUMPENVLOFFSET]);
+ 				converted->bump_luminance[stage][2] = converted->bump_luminance[stage][3] = 0.0f;
+-				converted->texture_lod_bias[stage] = dword_to_float(state[D3DTSS_MIPMAPLODBIAS]);
++				converted->texture_lod_bias[stage] = dword_to_float(state[D3DTSS_MIPMAPLODBIAS])
++#ifdef HALO_ANDROID
++					/* debug.lod_bias */
++					+ debug_settings.lod_bias
++#endif
++					;
+ 			}
+ 			converted->screen_offset = (float)UI_OFFSET;
+ 		}
+@@ -3047,24 +3423,51 @@ static unsigned long stream_upload(const void *data, unsigned long size)
+ }
+ 
+ #ifdef HALO_ANDROID
+-/* stream_upload, with the D3DCOLOR elements of the stream turned from BGRA
+-into the RGBA byte order ES reads */
+-static unsigned long stream_upload_swizzled(const struct vertex_shader_object *declaration, unsigned long stream,
+-	const unsigned char *data, unsigned long size, unsigned long stride)
++/* ES has no BGRA attributes, so a stream with colours is swizzled as it is
++uploaded (stream_upload_swizzled) and cannot come from the mirror */
++static BOOL stream_has_colors(const struct vertex_shader_object *declaration, unsigned long stream)
+ {
+-	static unsigned char *scratch;
+-	static unsigned long scratch_size;
+-	unsigned long offsets[XGPU_VERTEX_ATTRIBUTE_COUNT];
+-	unsigned long count = 0, index, vertex;
++	unsigned long index;
++
++	for (index = 0; index < declaration->element_count; index++)
++	{
++		if (declaration->elements[index].stream == stream && declaration->elements[index].type == D3DVSDT_D3DCOLOR)
++			return TRUE;
++	}
++	return FALSE;
++}
++
++/* turns the stream's D3DCOLOR elements in data from BGRA into the RGBA byte
++order ES reads */
++static void swizzle_colors(const struct vertex_shader_object *declaration, unsigned long stream, unsigned char *data,
++	unsigned long size, unsigned long stride)
++{
++	unsigned long index, vertex;
+ 
+ 	for (index = 0; index < declaration->element_count; index++)
+ 	{
+ 		const struct vertex_element *element = &declaration->elements[index];
+ 
+-		if (element->stream == stream && element->type == D3DVSDT_D3DCOLOR)
+-			offsets[count++] = element->offset;
++		if (element->stream != stream || element->type != D3DVSDT_D3DCOLOR)
++			continue;
++		for (vertex = 0; vertex + stride <= size; vertex += stride)
++		{
++			unsigned char *color = data + vertex + element->offset;
++			unsigned char blue = color[0];
++
++			color[0] = color[2];
++			color[2] = blue;
++		}
+ 	}
+-	if (!count || !stride)
++}
++
++static unsigned long stream_upload_swizzled(const struct vertex_shader_object *declaration, unsigned long stream,
++	const unsigned char *data, unsigned long size, unsigned long stride)
++{
++	static unsigned char *scratch;
++	static unsigned long scratch_size;
++
++	if (!stride || !stream_has_colors(declaration, stream))
+ 		return stream_upload(data, size);
+ 	if (scratch_size < size)
+ 	{
+@@ -3073,17 +3476,7 @@ static unsigned long stream_upload_swizzled(const struct vertex_shader_object *d
+ 		scratch = malloc(scratch_size);
+ 	}
+ 	memcpy(scratch, data, size);
+-	for (vertex = 0; vertex + stride <= size; vertex += stride)
+-	{
+-		for (index = 0; index < count; index++)
+-		{
+-			unsigned char *color = scratch + vertex + offsets[index];
+-			unsigned char blue = color[0];
+-
+-			color[0] = color[2];
+-			color[2] = blue;
+-		}
+-	}
++	swizzle_colors(declaration, stream, scratch, size, stride);
+ 	return stream_upload(scratch, size);
+ }
+ #endif
+@@ -3143,24 +3536,22 @@ static void attribute_format(const struct vertex_element *element, GLint *size,
+ /* upload vertices [first, first + count) of every stream the declaration
+ uses and point the attributes at them; attribute data then starts at
+ vertex 0 of the uploaded range */
+-#ifdef HALO_ANDROID
+-/* ES has no BGRA attributes, so a stream with colours is swizzled as it is
+-uploaded (stream_upload_swizzled) and cannot come from the mirror */
+-static BOOL stream_has_colors(const struct vertex_shader_object *declaration, unsigned long stream)
+-{
+-	unsigned long index;
++/* sets the attributes to the streams' vertices first to first + count;
++with rebase, when every stream is in the mirror, they point that many
++vertices earlier instead (at the draw's base vertex), and setup_streams
++returns TRUE: the draw then indexes from there with no base vertex. The
++attributes of consecutive draws from the same vertex buffer are then the
++same, which spares the driver setting them up again for each draw */
++static BOOL setup_streams_rebased(unsigned long first, unsigned long count, unsigned long rebase);
+ 
+-	for (index = 0; index < declaration->element_count; index++)
+-	{
+-		if (declaration->elements[index].stream == stream && declaration->elements[index].type == D3DVSDT_D3DCOLOR)
+-			return TRUE;
+-	}
+-	return FALSE;
++static void setup_streams(unsigned long first, unsigned long count)
++{
++	setup_streams_rebased(first, count, 0);
+ }
+-#endif
+ 
+-static void setup_streams(unsigned long first, unsigned long count)
++static BOOL setup_streams_rebased(unsigned long first, unsigned long count, unsigned long rebase)
+ {
++	BOOL rebased;
+ 	struct vertex_shader_object *declaration = device.vertex_shader;
+ 	GLuint stream_buffers[16];
+ 	unsigned long stream_offsets[16];
+@@ -3190,6 +3581,21 @@ static void setup_streams(unsigned long first, unsigned long count)
+ 		stream_buffers[stream] = 0;
+ 		total += (bytes + 15) & ~15UL;
+ 	}
++	/* rebased only if every stream is in the mirror with room before it */
++	rebased = rebase && !total;
++	for (index = 0; rebased && index < 16; index++)
++	{
++		if (placed[index] && stream_offsets[index] < rebase * device.streams[index].stride)
++			rebased = FALSE;
++	}
++	if (rebased)
++	{
++		for (index = 0; index < 16; index++)
++		{
++			if (placed[index])
++				stream_offsets[index] -= rebase * device.streams[index].stride;
++		}
++	}
+ 	stream_reserve(total);
+ 	for (index = 0; index < declaration->element_count; index++)
+ 	{
+@@ -3233,6 +3639,7 @@ static void setup_streams(unsigned long first, unsigned long count)
+ 		if (!enabled[index])
+ 			state_attribute_value(index, declaration->packed_mask & (1UL << index) ? NULL : device.attributes[index]);
+ 	}
++	return rebased;
+ }
+ 
+ static GLenum primitive_mode(D3DPRIMITIVETYPE type)
+@@ -3290,13 +3697,271 @@ void WINAPI D3DDevice_SetIndices(D3DIndexBuffer *index_data, UINT base_vertex_in
+ 	D3D__IndexData = index_data ? (WORD *)index_data->Data : NULL;
+ }
+ 
+-void WINAPI D3DDevice_DrawVertices(D3DPRIMITIVETYPE primitive_type, UINT start_vertex, UINT vertex_count)
++static void draw_caller_count(void *address, unsigned long vertices);
++
++/* the draw function's caller, or with debug.draw_callers = 2, its caller's */
++#ifdef HALO_ANDROID
++#define DRAW_CALLER() (debug_settings.draw_callers > 1 ? __builtin_return_address(1) : __builtin_return_address(0))
++#else
++#define DRAW_CALLER() __builtin_return_address(0)
++#endif
++
++/* the index buffer that draws count / 4 quads from vertex 0 as triangles,
++made once */
++#define QUAD_INDEX_VERTICES 8192
++
++static GLuint quad_index_buffer(void)
+ {
+-	if (!vertex_count || !prepare_draw(FALSE))
++	static GLuint buffer;
++
++	if (!buffer)
++	{
++		unsigned long count;
++		WORD *indices = quad_indices(NULL, QUAD_INDEX_VERTICES, &count);
++
++		glGenBuffers(1, &buffer);
++		state_element_array_buffer(buffer);
++		glBufferData(GL_ELEMENT_ARRAY_BUFFER, (GLsizeiptr)(count * sizeof(WORD)), indices, GL_STATIC_DRAW);
++		free(indices);
++	}
++	return buffer;
++}
++
++#ifdef HALO_ANDROID
++/* ---------- batched quad draws
++
++Decals are drawn a quad or two at a time (rasterizer_xbox_decals.c), each
++with its colour in a constant vertex attribute: in a battle, half the
++frame's draws, and every draw costs the Mali driver about 30 us whatever its
++size. Consecutive quad draws that change nothing between them but constant
++attributes are gathered here and drawn as one: their vertices copied
++together, with the constant attributes that differ between them as arrays.
++
++A draw joins the batch when preparing it made no GL call: the generated GL
++entry points call guest_gl_before_call first, which draws the batch before
++any call, so a batch still pending means the GL state is still its own. It
++is also drawn before the next draw of another kind and before Present. It
++can be drawn from within a state_* helper's call; they record the state after
++their call, so the batch binds through them as any draw does.
++A batch is pending only between quad draws (every other draw draws it before
++preparing its own), so the call that draws it is one of a quad draw's
++preparation, which sets no vertex state (all a batch changes).
++debug.batch_quads = false draws each quad draw by itself. */
++
++void (*guest_gl_before_call)(void);
++
++#define BATCH_MAXIMUM_VERTICES QUAD_INDEX_VERTICES
++#define BATCH_MAXIMUM_ENTRIES 1024
++#define BATCH_STREAMS 4
++#define BATCH_MAXIMUM_STRIDE 256
++
++struct batch_entry
++{
++	unsigned long first_vertex;
++	unsigned long vertex_count;
++	float attributes[XGPU_VERTEX_ATTRIBUTE_COUNT][4];
++};
++
++static struct
++{
++	BOOL pending;
++	const struct vertex_shader_object *declaration;
++	unsigned long stream_stride[BATCH_STREAMS];
++	unsigned long streams;              /* a bit for each stream read */
++	unsigned long stream_attributes;    /* a bit for each register a stream feeds */
++	unsigned char *vertices[BATCH_STREAMS];
++	float (*values)[4];                 /* scratch: a varying constant attribute */
++	unsigned long vertex_count;
++	struct batch_entry entries[BATCH_MAXIMUM_ENTRIES];
++	unsigned long entry_count;
++	unsigned long quad_draws, draws;    /* statistics */
++} batch;
++
++static void batch_flush(void)
++{
++	unsigned long varying = 0, total = 0, index, stream, entry, vertex;
++	unsigned long offsets[BATCH_STREAMS];
++
++	if (!batch.pending)
+ 		return;
++	batch.pending = FALSE;
++	guest_gl_before_call = NULL;
++	/* the constant attributes that differ between the draws */
++	for (index = 0; index < XGPU_VERTEX_ATTRIBUTE_COUNT; index++)
++	{
++		if (batch.stream_attributes & (1UL << index))
++			continue;
++		for (entry = 1; entry < batch.entry_count; entry++)
++		{
++			if (memcmp(batch.entries[entry].attributes[index], batch.entries[0].attributes[index], 4 * sizeof(float)))
++			{
++				varying |= 1UL << index;
++				total += (batch.vertex_count * sizeof(batch.values[0]) + 15) & ~15UL;
++				break;
++			}
++		}
++	}
++	for (stream = 0; stream < BATCH_STREAMS; stream++)
++	{
++		if (batch.streams & (1UL << stream))
++			total += (batch.vertex_count * batch.stream_stride[stream] + 15) & ~15UL;
++	}
++	/* one reservation for everything (stream_reserve) */
++	stream_reserve(total);
++	for (stream = 0; stream < BATCH_STREAMS; stream++)
++	{
++		if (batch.streams & (1UL << stream))
++			offsets[stream] = stream_upload(batch.vertices[stream], batch.vertex_count * batch.stream_stride[stream]);
++	}
++	for (index = 0; index < batch.declaration->element_count; index++)
++	{
++		const struct vertex_element *element = &batch.declaration->elements[index];
++		GLint size;
++		GLenum type;
++		GLboolean normalized;
++
++		if (element->type == D3DVSDT_NONE)
++			continue;
++		stream = element->stream;
++		if (element->type == D3DVSDT_NORMPACKED3)
++		{
++			state_attribute_pointer(element->reg, device.stream_buffer, 1, GL_UNSIGNED_INT, GL_FALSE, TRUE,
++				(GLsizei)batch.stream_stride[stream], offsets[stream] + element->offset);
++		}
++		else
++		{
++			attribute_format(element, &size, &type, &normalized);
++			state_attribute_pointer(element->reg, device.stream_buffer, size, type, normalized, FALSE,
++				(GLsizei)batch.stream_stride[stream], offsets[stream] + element->offset);
++		}
++	}
++	for (index = 0; index < XGPU_VERTEX_ATTRIBUTE_COUNT; index++)
++	{
++		if (batch.stream_attributes & (1UL << index))
++			continue;
++		if (varying & (1UL << index))
++		{
++			for (entry = 0; entry < batch.entry_count; entry++)
++			{
++				for (vertex = 0; vertex < batch.entries[entry].vertex_count; vertex++)
++					memcpy(batch.values[batch.entries[entry].first_vertex + vertex],
++						batch.entries[entry].attributes[index], sizeof(batch.values[0]));
++			}
++			state_attribute_pointer(index, device.stream_buffer, 4, GL_FLOAT, GL_FALSE, FALSE, sizeof(batch.values[0]),
++				stream_upload(batch.values, batch.vertex_count * sizeof(batch.values[0])));
++		}
++		else
++		{
++			state_attribute_value(index, batch.declaration->packed_mask & (1UL << index) ? NULL :
++				batch.entries[0].attributes[index]);
++		}
++	}
++	state_element_array_buffer(quad_index_buffer());
++	glDrawElements(GL_TRIANGLES, (GLsizei)(batch.vertex_count / 4 * 6), GL_UNSIGNED_SHORT, NULL);
++	batch.draws++;
++	batch.entry_count = 0;
++	batch.vertex_count = 0;
++}
++
++/* adds a prepared quad draw to the batch; FALSE if it cannot be batched */
++static BOOL batch_add(unsigned long start_vertex, unsigned long vertex_count)
++{
++	const struct vertex_shader_object *declaration = device.vertex_shader;
++	unsigned long stream_stride[BATCH_STREAMS] = { 0 };
++	unsigned long streams = 0, stream_attributes = 0, index, stream;
++	struct batch_entry *entry;
++
++	vertex_count &= ~3UL;
++	if (!vertex_count || vertex_count > BATCH_MAXIMUM_VERTICES)
++		return FALSE;
++	for (index = 0; index < declaration->element_count; index++)
++	{
++		const struct vertex_element *element = &declaration->elements[index];
++
++		if (element->type == D3DVSDT_NONE)
++			continue;
++		stream = element->stream;
++		if (stream >= BATCH_STREAMS || !device.streams[stream].data || !device.streams[stream].stride ||
++			device.streams[stream].stride > BATCH_MAXIMUM_STRIDE)
++		{
++			return FALSE;
++		}
++		streams |= 1UL << stream;
++		stream_attributes |= 1UL << element->reg;
++		stream_stride[stream] = device.streams[stream].stride;
++	}
++	if (!streams)
++		return FALSE;
++	if (batch.pending && (batch.declaration != declaration || batch.streams != streams ||
++		memcmp(batch.stream_stride, stream_stride, sizeof(stream_stride)) ||
++		batch.vertex_count + vertex_count > BATCH_MAXIMUM_VERTICES || batch.entry_count == BATCH_MAXIMUM_ENTRIES))
++	{
++		batch_flush();
++	}
++	if (!batch.pending)
++	{
++		batch.declaration = declaration;
++		batch.streams = streams;
++		batch.stream_attributes = stream_attributes;
++		memcpy(batch.stream_stride, stream_stride, sizeof(stream_stride));
++	}
++	if (!batch.values)
++		batch.values = malloc(BATCH_MAXIMUM_VERTICES * sizeof(batch.values[0]));
++	for (stream = 0; stream < BATCH_STREAMS; stream++)
++	{
++		unsigned long bytes = vertex_count * stream_stride[stream];
++		unsigned char *destination;
++
++		if (!(streams & (1UL << stream)))
++			continue;
++		if (!batch.vertices[stream])
++			batch.vertices[stream] = malloc(BATCH_MAXIMUM_VERTICES * BATCH_MAXIMUM_STRIDE);
++		destination = batch.vertices[stream] + batch.vertex_count * stream_stride[stream];
++		memcpy(destination, (const unsigned char *)PLATFORM_PHYSICAL_TO_VIRTUAL(device.streams[stream].data) +
++			start_vertex * stream_stride[stream], bytes);
++		swizzle_colors(declaration, stream, destination, bytes, stream_stride[stream]);
++	}
++	entry = &batch.entries[batch.entry_count++];
++	entry->first_vertex = batch.vertex_count;
++	entry->vertex_count = vertex_count;
++	memcpy(entry->attributes, device.attributes, sizeof(entry->attributes));
++	batch.vertex_count += vertex_count;
++	batch.quad_draws++;
++	batch.pending = TRUE;
++	guest_gl_before_call = batch_flush;
++	return TRUE;
++}
++#endif
++
++void WINAPI D3DDevice_DrawVertices(D3DPRIMITIVETYPE primitive_type, UINT start_vertex, UINT vertex_count)
++{
++	draw_caller_count(DRAW_CALLER(), vertex_count);
++#ifdef HALO_ANDROID
++	if (primitive_type == D3DPT_QUADLIST && vertex_count >= 4 && debug_settings.batch_quads && !trace_frame())
++	{
++		/* a GL call while preparing the draw (other state) draws the batch
++		first (batch_flush) */
++		if (!prepare_draw(FALSE))
++			return;
++		if (batch_add(start_vertex, vertex_count))
++			return;
++		batch_flush();
++	}
++	else
++#endif
++	{
++		batch_flush();
++		if (!vertex_count || !prepare_draw(FALSE))
++			return;
++	}
+ 	trace_draw("draw", primitive_type, vertex_count, NULL);
+ 	setup_streams(start_vertex, vertex_count);
+-	if (primitive_type == D3DPT_QUADLIST)
++	if (primitive_type == D3DPT_QUADLIST && vertex_count <= QUAD_INDEX_VERTICES)
++	{
++		state_element_array_buffer(quad_index_buffer());
++		glDrawElements(GL_TRIANGLES, (GLsizei)(vertex_count / 4 * 6), GL_UNSIGNED_SHORT, NULL);
++	}
++	else if (primitive_type == D3DPT_QUADLIST)
+ 	{
+ 		unsigned long count;
+ 		WORD *indices = quad_indices(NULL, vertex_count, &count);
+@@ -3318,8 +3983,12 @@ void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type, UINT
+ 	WORD *indices = NULL;
+ 	const WORD *source = index_data;
+ 	GLuint index_buffer = 0;
++	GLint base_vertex;
+ 	BOOL mirrored;
+ 
++	draw_caller_count(DRAW_CALLER(), vertex_count);
++	batch_flush();
++
+ 	if (!vertex_count || !index_data || !prepare_draw(FALSE))
+ 		return;
+ 	/* quads are drawn as triangles, from indices made for the draw */
+@@ -3331,13 +4000,22 @@ void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type, UINT
+ 	index_extent(index_data, vertex_count, generation, mirrored, &minimum, &maximum);
+ 	trace_draw("indexed", primitive_type, vertex_count, NULL);
+ 	/* (the streams from the base vertex on: index i is vertex base + i) */
++	/* the attributes start at vertex minimum, or at the base vertex when
++	they can (setup_streams_rebased) */
++#ifdef HALO_ANDROID
++	base_vertex = setup_streams_rebased(device.base_vertex_index + minimum, maximum - minimum + 1,
++		debug_settings.stable_streams ? minimum : 0) ? 0 : -(GLint)minimum;
++#else
+ 	setup_streams(device.base_vertex_index + minimum, maximum - minimum + 1);
++	base_vertex = -(GLint)minimum;
++#endif
+ 	if (mirrored)
+ 	{
+-		/* the attributes start at vertex minimum */
++		/* the range spares the driver a scan of the indices for it (Mali
++		scans every draw's) */
+ 		state_element_array_buffer(index_buffer);
+-		glDrawElementsBaseVertex(primitive_mode(primitive_type), (GLsizei)vertex_count, GL_UNSIGNED_SHORT,
+-			(const void *)index_offset, -(GLint)minimum);
++		glDrawRangeElementsBaseVertex(primitive_mode(primitive_type), (GLuint)minimum, (GLuint)maximum,
++			(GLsizei)vertex_count, GL_UNSIGNED_SHORT, (const void *)index_offset, base_vertex);
+ 		return;
+ 	}
+ 	stats.streamed_bytes += vertex_count * sizeof(WORD);
+@@ -3363,11 +4041,76 @@ void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type, UINT
+ 	}
+ #endif
+ 	(void)index;
+-	glDrawElementsBaseVertex(primitive_mode(primitive_type), (GLsizei)count, GL_UNSIGNED_SHORT,
+-		(const void *)index_upload(source, count * sizeof(WORD)), -(GLint)minimum);
++	glDrawRangeElementsBaseVertex(primitive_mode(primitive_type), (GLuint)minimum, (GLuint)maximum, (GLsizei)count,
++		GL_UNSIGNED_SHORT, (const void *)index_upload(source, count * sizeof(WORD)), base_vertex);
+ 	free(indices);
+ }
+ 
++/* ---------- which code draws (debug.draw_callers)
++
++Counts the draws each caller of the draw functions makes, and logs the
++busiest callers' draws per frame every 300 frames: the return addresses
++symbolize against the guest image (llvm-symbolizer). */
++
++#define DRAW_CALLER_SLOTS 256
++
++static struct
++{
++	unsigned long address;
++	unsigned long draws;
++	unsigned long vertices;
++} draw_callers[DRAW_CALLER_SLOTS];
++
++/* the busiest first */
++static int draw_caller_compare(const void *a, const void *b)
++{
++	unsigned long first = ((const unsigned long *)a)[1], second = ((const unsigned long *)b)[1];
++
++	return first < second ? 1 : first > second ? -1 : 0;
++}
++
++static void draw_caller_count(void *address, unsigned long vertices)
++{
++	static unsigned long first_frame;
++	unsigned long slot, probe;
++
++#ifdef HALO_ANDROID
++	if (!debug_settings.draw_callers)
++		return;
++#else
++	return;
++#endif
++	slot = ((unsigned long)address >> 2) % DRAW_CALLER_SLOTS;
++	for (probe = 0; probe < DRAW_CALLER_SLOTS; probe++, slot = (slot + 1) % DRAW_CALLER_SLOTS)
++	{
++		if (!draw_callers[slot].address || draw_callers[slot].address == (unsigned long)address)
++		{
++			draw_callers[slot].address = (unsigned long)address;
++			draw_callers[slot].draws++;
++			draw_callers[slot].vertices += vertices;
++			break;
++		}
++	}
++	if (!first_frame)
++		first_frame = device.frame;
++	if (device.frame - first_frame >= 300)
++	{
++		unsigned long frames = device.frame - first_frame, total = 0, index;
++
++		for (index = 0; index < DRAW_CALLER_SLOTS; index++)
++			total += draw_callers[index].draws;
++		platform_log("draw callers: %lu draws a frame", total / frames);
++		qsort(draw_callers, DRAW_CALLER_SLOTS, sizeof(draw_callers[0]), draw_caller_compare);
++		for (index = 0; index < 24 && draw_callers[index].draws; index++)
++		{
++			platform_log("draw callers:   %08lx %6.1f draws %8.0f vertices", draw_callers[index].address,
++				(double)draw_callers[index].draws / frames, (double)draw_callers[index].vertices / frames);
++		}
++		memset(draw_callers, 0, sizeof(draw_callers));
++		first_frame = device.frame;
++	}
++}
++
+ /* ---------- immediate mode */
+ 
+ void WINAPI D3DDevice_Begin(D3DPRIMITIVETYPE primitive_type)
+@@ -3397,6 +4140,8 @@ void WINAPI D3DDevice_End(void)
+ 	unsigned long offset, index, count = device.immediate_count;
+ 	D3DPRIMITIVETYPE type = device.immediate_type;
+ 
++	draw_caller_count(DRAW_CALLER(), device.immediate_count);
++	batch_flush();
+ 	device.immediate_active = FALSE;
+ 	if (!count || !prepare_draw(TRUE))
+ 		return;
+@@ -3613,6 +4358,7 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
+ 	if (screenshot_every < 0)
+ 		screenshot_every = config_integer("debug.screenshot_every");
+ 
++	batch_flush();
+ 	if (device.gl_ready)
+ 	{
+ 		struct render_target_entry *back_buffer = render_target_get(&device.back_buffer);
+@@ -3648,6 +4394,12 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
+ 		xgpu_gl_state_invalidate();
+ 		xgpu_texture_cache_begin_frame();
+ #ifdef HALO_ANDROID
++		if (xgpu_capabilities.atomic_counters)
++		{
++			host_gl_visibility_frame(device.visibility_counters, VISIBILITY_TEST_SLOTS * sizeof(GLuint),
++				&device.visibility_pairs[0][0], (unsigned int)device.visibility_pair_count);
++			device.visibility_pair_count = 0;
++		}
+ 		host_gl_fence_frame((unsigned int)device.buffer_ring);
+ 		device.buffer_ring = (device.buffer_ring + 1) % STREAM_BUFFER_RING;
+ 		host_gl_wait_frame((unsigned int)device.buffer_ring);
+@@ -3670,6 +4422,10 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
+ 			stats.target_changes / stats.presents, stats.skipped_no_program, stats.skipped_no_target, stats.skipped_link,
+ 			stats.mirrored_bytes / stats.presents / 1024, stats.streamed_bytes / stats.presents / 1024);
+ 		memset(&stats, 0, sizeof(stats));
++#ifdef HALO_ANDROID
++		platform_log("quad batches: %lu quad draws in %lu draws", batch.quad_draws / 60, batch.draws / 60);
++		batch.quad_draws = batch.draws = 0;
++#endif
+ 	}
+ 	platform_pump_events();
+ 
+diff --git a/port/linux/src/gl.h b/port/linux/src/gl.h
+index 578e0567..95b1c208 100644
+--- a/port/linux/src/gl.h
++++ b/port/linux/src/gl.h
+@@ -106,6 +106,7 @@ this list to generate the guest's entry points */
+ 	X(glDrawArrays) \
+ 	X(glDrawElements) \
+ 	X(glDrawElementsBaseVertex) \
++	X(glDrawRangeElementsBaseVertex) \
+ 	X(glCreateShader) \
+ 	X(glShaderSource) \
+ 	X(glCompileShader) \
+@@ -116,6 +117,10 @@ this list to generate the guest's entry points */
+ 	X(glAttachShader) \
+ 	X(glBindAttribLocation) \
+ 	X(glLinkProgram) \
++	X(glProgramParameteri) \
++	X(glProgramBinary) \
++	X(glGetProgramBinary) \
++	X(glDeleteProgram) \
+ 	X(glGetProgramiv) \
+ 	X(glGetProgramInfoLog) \
+ 	X(glUseProgram) \
+@@ -210,6 +215,7 @@ this list to generate the guest's entry points */
+ 	X(glDrawArrays) \
+ 	X(glDrawElements) \
+ 	X(glDrawElementsBaseVertex) \
++	X(glDrawRangeElementsBaseVertex) \
+ 	X(glCreateShader) \
+ 	X(glShaderSource) \
+ 	X(glCompileShader) \
+@@ -321,6 +327,7 @@ pointers, sees the declarations without these aliases */
+ #define glDrawArrays halo_glDrawArrays
+ #define glDrawElements halo_glDrawElements
+ #define glDrawElementsBaseVertex halo_glDrawElementsBaseVertex
++#define glDrawRangeElementsBaseVertex halo_glDrawRangeElementsBaseVertex
+ #define glCreateShader halo_glCreateShader
+ #define glShaderSource halo_glShaderSource
+ #define glCompileShader halo_glCompileShader
+@@ -331,6 +338,10 @@ pointers, sees the declarations without these aliases */
+ #define glAttachShader halo_glAttachShader
+ #define glBindAttribLocation halo_glBindAttribLocation
+ #define glLinkProgram halo_glLinkProgram
++#define glProgramParameteri halo_glProgramParameteri
++#define glProgramBinary halo_glProgramBinary
++#define glGetProgramBinary halo_glGetProgramBinary
++#define glDeleteProgram halo_glDeleteProgram
+ #define glGetProgramiv halo_glGetProgramiv
+ #define glGetProgramInfoLog halo_glGetProgramInfoLog
+ #define glUseProgram halo_glUseProgram
+@@ -423,6 +434,7 @@ pointers, sees the declarations without these aliases */
+ #define glDrawArrays halo_glDrawArrays
+ #define glDrawElements halo_glDrawElements
+ #define glDrawElementsBaseVertex halo_glDrawElementsBaseVertex
++#define glDrawRangeElementsBaseVertex halo_glDrawRangeElementsBaseVertex
+ #define glCreateShader halo_glCreateShader
+ #define glShaderSource halo_glShaderSource
+ #define glCompileShader halo_glCompileShader
+diff --git a/port/linux/src/nv2a_psh.c b/port/linux/src/nv2a_psh.c
+index 5223c9ab..a911982c 100644
+--- a/port/linux/src/nv2a_psh.c
++++ b/port/linux/src/nv2a_psh.c
+@@ -317,12 +317,12 @@ static void dot_input(struct xgpu_text *text, const DWORD *state, int stage)
+ #ifdef HALO_ANDROID
+ /* ES samplers have no LOD bias: pass D3DTSS_MIPMAPLODBIAS to the lookup */
+ #define SAMPLE_BIAS ", texture_lod_bias[%d]"
++/* the default precisions come first (display.fast_shaders): colours, the
++texels the samplers return and the combiners' arithmetic, all within
++[-1, 1], in half precision; texture coordinates and what they are computed
++from stay in single precision */
+ #define SHADER_VERSION \
+-	"precision highp float;\n" \
+-	"precision highp int;\n" \
+-	"precision highp sampler2D;\n" \
+-	"precision highp sampler3D;\n" \
+-	"precision highp samplerCube;\n"
++	"precision highp int;\n"
+ #else
+ #define SAMPLE_BIAS ""
+ #define SHADER_VERSION "#version 450 core\n"
+@@ -347,6 +347,27 @@ static void sample(struct xgpu_text *text, const struct nv2a_pixel_shader_key *k
+ 			);
+ 		break;
+ 	default:
++#ifdef HALO_ANDROID
++		if (stage == 0 && key->blur_stage0)
++		{
++			/* the four taps of rasterizer_shadow_convolve */
++			static const char *const taps[4] =
++			{
++				"-0.00390625, -0.00390625", "0.00390625, 0.00390625",
++				"-0.00390625, 0.00390625", "0.00390625, -0.00390625"
++			};
++			int tap;
++
++			xgpu_text_append(text, "(0.25 * (");
++			for (tap = 0; tap < 4; tap++)
++			{
++				xgpu_text_append(text, "%stexture(tex0, ((%s).xy + vec2(%s)) * texture_scale[0].xy" SAMPLE_BIAS ")",
++					tap ? " + " : "", coordinates, taps[tap], 0);
++			}
++			xgpu_text_append(text, "))");
++			break;
++		}
++#endif
+ 		xgpu_text_append(text, "texture(tex%d, (%s).xy * texture_scale[%d].xy" SAMPLE_BIAS ")", stage, coordinates, stage
+ #ifdef HALO_ANDROID
+ 			, stage
+@@ -540,6 +561,14 @@ char *nv2a_pixel_shader_to_glsl(const struct nv2a_pixel_shader_key *key)
+ 			"layout(early_fragment_tests) in;\n"
+ 			"layout(binding = 0, offset = 0) uniform atomic_uint visible_samples;\n");
+ 	}
++#endif
++#ifdef HALO_ANDROID
++	{
++		const char *precision = xgpu_fast_shaders() ? "mediump" : "highp";
++
++		xgpu_text_append(&text, "precision %s float;\nprecision %s sampler2D;\nprecision %s sampler3D;\n"
++			"precision %s samplerCube;\n", precision, precision, precision, precision);
++	}
+ #endif
+ 	xgpu_text_append(&text,
+ 		SHADER_VERSION
+@@ -547,11 +576,11 @@ char *nv2a_pixel_shader_to_glsl(const struct nv2a_pixel_shader_key *key)
+ 		"in vec4 xD1;\n"
+ 		"in vec4 xB0;\n"
+ 		"in vec4 xB1;\n"
+-		"in vec4 xT0;\n"
+-		"in vec4 xT1;\n"
+-		"in vec4 xT2;\n"
+-		"in vec4 xT3;\n"
+-		"in float xFog;\n"
++		"in highp vec4 xT0;\n"
++		"in highp vec4 xT1;\n"
++		"in highp vec4 xT2;\n"
++		"in highp vec4 xT3;\n"
++		"in highp float xFog;\n"
+ 		"layout(location = 0) out vec4 fragment_color;\n"
+ 		XGPU_PIXEL_UNIFORMS);
+ 	for (stage = 0; stage < 4; stage++)
+diff --git a/port/linux/src/nv2a_vsh.c b/port/linux/src/nv2a_vsh.c
+index bfb1a7b1..57aff14b 100644
+--- a/port/linux/src/nv2a_vsh.c
++++ b/port/linux/src/nv2a_vsh.c
+@@ -147,16 +147,11 @@ static const char shader_prologue[] =
+ #else
+ 	"#version 450 core\n"
+ #endif
+-	"uniform vec4 c[192];\n"
+ 	"uniform vec4 viewport_scale;\n"
+ 	"uniform vec4 viewport_offset;\n"
+ 	"uniform float point_size;\n"
+ 	/* columns the menus shift by to center on a wide screen (d3d8_gl.c) */
+ 	"uniform float screen_offset;\n"
+-	"out vec4 xD0;\n"
+-	"out vec4 xD1;\n"
+-	"out vec4 xB0;\n"
+-	"out vec4 xB1;\n"
+ 	"out vec4 xT0;\n"
+ 	"out vec4 xT1;\n"
+ 	"out vec4 xT2;\n"
+@@ -194,6 +189,34 @@ static const char shader_prologue[] =
+ 	"	return vec4(1.0, max(s.x, 0.0), specular, 1.0);\n"
+ 	"}\n";
+ 
++/* the number of constant registers a program needs: one past the highest it
++reads, or all of them if it reads any relative to a0 */
++static unsigned long constant_registers(const DWORD *instructions, unsigned long instruction_count)
++{
++#ifdef HALO_ANDROID
++	unsigned long index, count = 1;
++
++	for (index = 0; index < instruction_count; index++)
++	{
++		const DWORD *instruction = instructions + index * 4;
++		BOOL reads_constant = field(instruction, 2, 26, 2) == _mux_constant ||
++			field(instruction, 2, 11, 2) == _mux_constant || field(instruction, 3, 28, 2) == _mux_constant;
++
++		if (!reads_constant)
++			continue;
++		if (field(instruction, 3, 1, 1))
++			return XGPU_VERTEX_CONSTANT_COUNT;
++		if (field(instruction, 1, 13, 8) + 1 > count)
++			count = field(instruction, 1, 13, 8) + 1;
++	}
++	return count > XGPU_VERTEX_CONSTANT_COUNT ? XGPU_VERTEX_CONSTANT_COUNT : count;
++#else
++	(void)instructions;
++	(void)instruction_count;
++	return XGPU_VERTEX_CONSTANT_COUNT;
++#endif
++}
++
+ char *nv2a_vertex_shader_to_glsl(const DWORD *instructions, unsigned long instruction_count,
+ 	unsigned long packed_attribute_mask)
+ {
+@@ -204,6 +227,23 @@ char *nv2a_vertex_shader_to_glsl(const DWORD *instructions, unsigned long instru
+ 	xgpu_text_append(&text, "#version %s\n", xgpu_capabilities.shading_language);
+ #endif
+ 	xgpu_text_append(&text, "%s", shader_prologue);
++	{
++		/* the colours in half precision (display.fast_shaders): half the
++		memory the GPU writes and reads for each vertex's outputs */
++#ifdef HALO_ANDROID
++		const char *colour = xgpu_fast_shaders() ? "mediump " : "";
++#else
++		const char *colour = "";
++#endif
++
++		xgpu_text_append(&text, "out %svec4 xD0;\nout %svec4 xD1;\nout %svec4 xB0;\nout %svec4 xB1;\n",
++			colour, colour, colour, colour);
++	}
++	/* the constant registers: on ES, only as many as the program reads
++	(all of them when it indexes them with a0). Mali processes a uniform
++	array whole whenever one element changes, so a program that reads
++	c[0..20) and declares c[192] pays for 192 at every draw */
++	xgpu_text_append(&text, "uniform vec4 c[%lu];\n", constant_registers(instructions, instruction_count));
+ 	for (index = 0; index < XGPU_VERTEX_ATTRIBUTE_COUNT; index++)
+ 	{
+ 		if (packed_attribute_mask & (1UL << index))
+diff --git a/port/linux/src/port_config.c b/port/linux/src/port_config.c
+index 004871e3..6c086bac 100644
+--- a/port/linux/src/port_config.c
++++ b/port/linux/src/port_config.c
+@@ -73,6 +73,40 @@ static const struct config_setting config_settings[] =
+ 	{ "display.screen_width", _config_integer, "0", "HALO_SCREEN_WIDTH", _environment_value, _platform_android,
+ 		"Columns of the 480-line picture: 0 for the display's shape, 640 for the\n"
+ 		"Xbox's 4:3." },
++	{ "display.render_scale", _config_real, "1.0", "HALO_RENDER_SCALE", _environment_value, _platform_android,
++		"The picture's resolution as a fraction of the screen's, 0.5 to 1.0:\n"
++		"below 1.0 the GPU draws fewer pixels, and the picture is scaled up." },
++	{ "display.fast_shaders", _config_boolean, "true", "HALO_FAST_SHADERS", _environment_value, _platform_android,
++		"Compute colours in half precision, which Mali GPUs do at twice the\n"
++		"rate; false keeps single precision everywhere." },
++	{ "display.fast_textures", _config_boolean, "true", "HALO_FAST_TEXTURES", _environment_value, _platform_android,
++		"Give the GPU DXT1 and 16-bit textures as 16-bit texels, the colours\n"
++		"they hold, rather than 32-bit ones: half the memory and bandwidth." },
++	{ "display.model_detail", _config_real, "0.5", "HALO_MODEL_DETAIL", _environment_value, _platform_android,
++		"How early objects switch to their simpler models, as a fraction of the\n"
++		"size the game switches at (1.0), times render_scale. Models are most of\n"
++		"the GPU's vertex work, which limits large scenes on this GPU." },
++	{ "debug.batch_quads", _config_boolean, "true", "HALO_BATCH_QUADS", _environment_value, _platform_android,
++		"Draw consecutive quad draws of the same state (decals) as one." },
++	{ "debug.stable_streams", _config_boolean, "true", "HALO_STABLE_STREAMS", _environment_value, _platform_android,
++		"Point indexed draws' attributes at their base vertex, so that draws\n"
++		"from one vertex buffer share them." },
++	{ "debug.freeze", _config_string, "\"\"", "HALO_DEBUG_FREEZE", _environment_value, _platform_android,
++		"\"textures\", \"program\", \"raster\" (comma-separated): after 20 seconds,\n"
++		"draws keep the state they find instead of setting their own, to measure\n"
++		"what setting it costs (the picture is wrong)." },
++	{ "debug.tiny_scissor", _config_boolean, "false", "HALO_DEBUG_TINY_SCISSOR", _environment_set_is_true,
++		_platform_android,
++		"Draw one pixel of each draw: the GPU's time without the pixels." },
++	{ "debug.lod_bias", _config_real, "0.0", "HALO_DEBUG_LOD_BIAS", _environment_value, _platform_android,
++		"Added to every texture lookup's mip level, to measure what the\n"
++		"textures' bandwidth costs." },
++	{ "debug.draw_callers", _config_integer, "0", "HALO_DEBUG_DRAW_CALLERS", _environment_value, _platform_android,
++		"Log the draws each caller of the draw functions makes, every 300 frames:\n"
++		"1 counts the draw functions' callers, 2 their callers' callers." },
++	{ "debug.no_program_cache", _config_boolean, "false", "HALO_NO_PROGRAM_CACHE", _environment_value, _platform_android,
++		"Do not keep linked shader programs in the save folder's shaders\n"
++		"folder; every start compiles them again." },
+ 	{ "display.vsync", _config_boolean, "true", "HALO_NO_VSYNC", _environment_set_is_false, _platform_all,
+ 		"Wait for the display between frames; false draws as fast as possible." },
+ 	{ "display.interpolation", _config_boolean, "true", "HALO_INTERPOLATION", _environment_value, _platform_all,
+diff --git a/port/linux/src/xbox_textures.c b/port/linux/src/xbox_textures.c
+index 9bdcdc99..690061d3 100644
+--- a/port/linux/src/xbox_textures.c
++++ b/port/linux/src/xbox_textures.c
+@@ -572,6 +572,87 @@ static void texture_dump(GLenum target, const struct xgpu_texture_description *d
+ }
+ #endif
+ 
++/* ---------- 16-bit texels (display.fast_textures)
++
++Textures whose texels hold no more than 16 bits' worth go to the GPU as
++16-bit texels rather than the 32-bit ones they are decoded to: DXT1, whose
++colours are 565 (with punch-through alpha, 5551), and the 16-bit Xbox
++formats. The picture is the same; the memory and the bandwidth of every
++lookup are halved, and Mali-G31 has little of either. */
++
++enum
++{
++	_packing_none,
++	_packing_565,
++	_packing_5551,
++	_packing_4444,
++};
++
++/* the GL format of decoded texels: 32-bit ARGB words, or packed
++(texels_pack) */
++static const struct
++{
++	GLenum internal_format, format, type;
++} packings[] =
++{
++	{ GL_RGBA8, GL_BGRA, GL_UNSIGNED_BYTE },
++#ifdef HALO_ANDROID
++	{ GL_RGB565, GL_RGB, GL_UNSIGNED_SHORT_5_6_5 },
++	{ GL_RGB5_A1, GL_RGBA, GL_UNSIGNED_SHORT_5_5_5_1 },
++	{ GL_RGBA4, GL_RGBA, GL_UNSIGNED_SHORT_4_4_4_4 },
++#endif
++};
++
++#ifdef HALO_ANDROID
++static int fast_textures(void)
++{
++	static int fast = -1;
++
++	if (fast < 0)
++		fast = config_boolean("display.fast_textures") ? 1 : 0;
++	return fast;
++}
++
++static BOOL texels_have_alpha(const unsigned long *texels, unsigned long count)
++{
++	unsigned long index;
++
++	for (index = 0; index < count; index++)
++	{
++		if ((texels[index] >> 24) < 0xff)
++			return TRUE;
++	}
++	return FALSE;
++}
++
++/* the texels (32-bit ARGB) as 16-bit texels in the same memory, the
++components from the top bit down (the order GL's packed types take) */
++static void texels_pack(unsigned long *texels, unsigned long count, int packing)
++{
++	unsigned short *packed = (unsigned short *)texels;
++	unsigned long index;
++
++	for (index = 0; index < count; index++)
++	{
++		unsigned long argb = texels[index];
++		unsigned long a = argb >> 24, r = (argb >> 16) & 0xff, g = (argb >> 8) & 0xff, b = argb & 0xff;
++
++		switch (packing)
++		{
++		case _packing_565:
++			packed[index] = (unsigned short)(((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3));
++			break;
++		case _packing_5551:
++			packed[index] = (unsigned short)(((r >> 3) << 11) | ((g >> 3) << 6) | ((b >> 3) << 1) | (a >> 7));
++			break;
++		default:
++			packed[index] = (unsigned short)(((r >> 4) << 12) | ((g >> 4) << 8) | ((b >> 4) << 4) | (a >> 4));
++			break;
++		}
++	}
++}
++#endif
++
+ static void upload(GLuint texture, GLenum target, const struct xgpu_texture_description *description,
+ 	const unsigned char *base, const D3DCOLOR *palette)
+ {
+@@ -582,18 +663,42 @@ static void upload(GLuint texture, GLenum target, const struct xgpu_texture_desc
+ 	BOOL decode_compressed = FALSE;
+ 	unsigned long *converted;
+ 	unsigned long face, level;
++	int packing = _packing_none;
+ 
+ #ifdef HALO_ANDROID
+ 	decode_compressed = description->compressed && !xgpu_capabilities.s3tc;
+ #endif
+ 	converted = description->compressed && !decode_compressed ? NULL : malloc(largest * sizeof(unsigned long));
++#ifdef HALO_ANDROID
++	if (converted && fast_textures())
++	{
++		switch (information.kind)
++		{
++		case _texel_dxt1:
++			/* the alpha of the largest level decides */
++			dxt_decode_level(information.kind, base, description->width, description->height, description->depth,
++				converted);
++			packing = texels_have_alpha(converted, largest) ? _packing_5551 : _packing_565;
++			break;
++		case _texel_r5g6b5: case _texel_x1r5g5b5: case _texel_r6g5b5:
++			packing = _packing_565;
++			break;
++		case _texel_a1r5g5b5: case _texel_r5g5b5a1:
++			packing = _packing_5551;
++			break;
++		case _texel_a4r4g4b4: case _texel_r4g4b4a4:
++			packing = _packing_4444;
++			break;
++		}
++	}
++#endif
+ 	glBindTexture(target, texture);
+ 	xgpu_gl_state_invalidate();
+ #ifdef HALO_ANDROID
+ 	/* converted texels are BGRA in memory (32-bit ARGB words); ES takes
+-	RGBA */
+-	glTexParameteri(target, GL_TEXTURE_SWIZZLE_R, converted ? GL_BLUE : GL_RED);
+-	glTexParameteri(target, GL_TEXTURE_SWIZZLE_B, converted ? GL_RED : GL_BLUE);
++	RGBA. Packed ones are in GL's order already */
++	glTexParameteri(target, GL_TEXTURE_SWIZZLE_R, converted && packing == _packing_none ? GL_BLUE : GL_RED);
++	glTexParameteri(target, GL_TEXTURE_SWIZZLE_B, converted && packing == _packing_none ? GL_RED : GL_BLUE);
+ #endif
+ 	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+ 	glTexParameteri(target, GL_TEXTURE_BASE_LEVEL, 0);
+@@ -627,10 +732,16 @@ static void upload(GLuint texture, GLenum target, const struct xgpu_texture_desc
+ 				else
+ #endif
+ 				decode_level(description, level, source, palette, converted);
++#ifdef HALO_ANDROID
++				if (packing != _packing_none)
++					texels_pack(converted, (unsigned long)width * (unsigned long)height * (unsigned long)depth, packing);
++#endif
+ 				if (target == GL_TEXTURE_3D)
+-					glTexImage3D(image_target, (GLint)level, GL_RGBA8, width, height, depth, 0, GL_BGRA, GL_UNSIGNED_BYTE, converted);
++					glTexImage3D(image_target, (GLint)level, (GLint)packings[packing].internal_format, width, height, depth, 0,
++						packings[packing].format, packings[packing].type, converted);
+ 				else
+-					glTexImage2D(image_target, (GLint)level, GL_RGBA8, width, height, 0, GL_BGRA, GL_UNSIGNED_BYTE, converted);
++					glTexImage2D(image_target, (GLint)level, (GLint)packings[packing].internal_format, width, height, 0,
++						packings[packing].format, packings[packing].type, converted);
+ 			}
+ 		}
+ 	}
+diff --git a/port/linux/src/xgpu.h b/port/linux/src/xgpu.h
+index 7d276da8..bd0ee4a7 100644
+--- a/port/linux/src/xgpu.h
++++ b/port/linux/src/xgpu.h
+@@ -14,6 +14,7 @@ device itself (d3d8_gl.c).
+ #include "gl.h"
+ 
+ #ifdef HALO_ANDROID
++#include "../../android/include/halo_android_abi.h"
+ /* OpenGL ES features that are optional (d3d8_gl.c gl_initialize) */
+ struct xgpu_capabilities
+ {
+@@ -34,6 +35,15 @@ extern struct xgpu_capabilities xgpu_capabilities;
+ /* port/android/guest/runtime/guest_host.h */
+ int host_gl_has_extension(const char *name);
+ unsigned int host_gl_read_buffer_word(unsigned int buffer, unsigned int offset);
++/* visibility test results without waiting for the GPU (host_gl.c) */
++void host_gl_visibility_frame(unsigned int counters, unsigned int counter_bytes, const unsigned int *pairs,
++	unsigned int pair_count);
++unsigned int host_gl_visibility_result(unsigned int index);
++/* what an object's size on screen counts as when its model's detail level
++is chosen (display.model_detail, source/render/render_objects.c) */
++float xgpu_model_detail_scale(void);
++/* the draws that follow read texture stage 0 blurred (blur_stage0) */
++void xgpu_sample_blurred(int enable);
+ void host_gl_buffer_write(unsigned int target, unsigned int offset, unsigned int size, const void *data);
+ void host_gl_fence_frame(unsigned int slot);
+ void host_gl_wait_frame(unsigned int slot);
+@@ -100,14 +110,20 @@ struct nv2a_pixel_shader_key
+ 	unsigned char fog_table_mode;
+ 	/* inside a visibility test: count the samples that pass (Android) */
+ 	unsigned char count_samples;
+-	unsigned char pad;
++	/* stage 0 read as the average of four taps half a texel of a 128-texel
++	texture apart diagonally: the shadows' blur, drawn with the shadow
++	rather than as a pass of its own (rasterizer_xbox_shadows.c, Android) */
++	unsigned char blur_stage0;
+ };
+ 
+ char *nv2a_pixel_shader_to_glsl(const struct nv2a_pixel_shader_key *key);
+ 
+ #ifdef HALO_ANDROID
+ /* ES samplers have no LOD bias of their own */
+-#define XGPU_PIXEL_UNIFORMS_ES "uniform vec4 texture_lod_bias;\n"
++#define XGPU_PIXEL_UNIFORMS_ES "uniform highp vec4 texture_lod_bias;\n"
++/* display.fast_shaders (nv2a_psh.c, nv2a_vsh.c): colours in half
++precision, which Mali GPUs compute at twice the rate */
++int xgpu_fast_shaders(void);
+ #else
+ #define XGPU_PIXEL_UNIFORMS_ES ""
+ #endif
+@@ -120,11 +136,11 @@ C0/C1 of each stage and the final combiner, and texture constants */
+ 	"uniform vec4 ps_final_c0;\n" \
+ 	"uniform vec4 ps_final_c1;\n" \
+ 	"uniform vec4 fog_color;\n" \
+-	"uniform vec4 fog_parameters;\n" \
++	"uniform highp vec4 fog_parameters;\n" \
+ 	"uniform float alpha_reference;\n" \
+-	"uniform vec4 bump_matrix[4];\n" \
++	"uniform highp vec4 bump_matrix[4];\n" \
+ 	"uniform vec4 bump_luminance[4];\n" \
+-	"uniform vec4 texture_scale[4];\n" \
++	"uniform highp vec4 texture_scale[4];\n" \
+ 	XGPU_PIXEL_UNIFORMS_ES
+ 
+ /* ---------- textures */
+diff --git a/source/models/models.c b/source/models/models.c
+index ebaeaccc..2d69abf2 100644
+--- a/source/models/models.c
++++ b/source/models/models.c
+@@ -262,6 +262,10 @@ typedef char verify_rasterizer_debug_options_size[sizeof(struct rasterizer_debug
+ 
+ #include "rasterizer/rasterizer_models.h"
+ 
++#ifdef HALO_ANDROID
++float xgpu_model_detail_scale(void); /* port/linux/src/d3d8_gl.c */
++#endif
++
+ static void render_model_parts(
+ 	struct model const *model,
+ 	char const *region_permutation_indices,
+@@ -837,7 +841,13 @@ void render_model(
+ 
+ 		geometry_detail_level_index = NUMBER_OF_DETAIL_LEVELS_PER_MODEL-1;
+ 		while (geometry_detail_level_index>0 &&
++#ifdef HALO_ANDROID
++			/* the Mali port: simpler models sooner (display.model_detail) */
++			level_of_detail_pixels * xgpu_model_detail_scale() <
++				model->detail_cutoff_pixels[geometry_detail_level_index])
++#else
+ 			level_of_detail_pixels<model->detail_cutoff_pixels[geometry_detail_level_index])
++#endif
+ 		{
+ 			geometry_detail_level_index--;
+ 		}
+diff --git a/source/rasterizer/xbox/rasterizer_xbox.c b/source/rasterizer/xbox/rasterizer_xbox.c
+index 6b32a94f..f0427e90 100644
+--- a/source/rasterizer/xbox/rasterizer_xbox.c
++++ b/source/rasterizer/xbox/rasterizer_xbox.c
+@@ -1390,6 +1390,55 @@ boolean rasterizer_set_texture_non_blocking(
+ 	return FALSE;
+ }
+ 
++#ifdef HALO_ANDROID
++/* The shadow targets' textures, for the Mali port's shadows in two passes
++(rasterizer_xbox_shadows.c): each shadow of a frame has a pair of its own,
++and consecutive frames draw into different pairs.
++Slot 0 is the pair made at start-up; the others are made when first used. */
++#define SHADOW_TARGET_SLOTS 48 /* 16 shadows in each of 3 frames */
++
++boolean rasterizer_shadow_targets_select(short slot)
++{
++	static struct
++	{
++		D3DTexture *primary_texture;
++		D3DSurface *primary;
++		D3DTexture *secondary_texture;
++		D3DSurface *secondary;
++	} slots[SHADOW_TARGET_SLOTS];
++
++	if (slot < 0 || slot >= SHADOW_TARGET_SLOTS)
++		return FALSE;
++	if (!slots[0].primary)
++	{
++		slots[0].primary_texture = global_d3d_texture_shadow_primary;
++		slots[0].primary = global_d3d_surface_shadow_primary;
++		slots[0].secondary_texture = global_d3d_texture_shadow_secondary;
++		slots[0].secondary = global_d3d_surface_shadow_secondary;
++	}
++	if (!slots[slot].primary)
++	{
++		if (IDirect3DDevice8_CreateTexture(global_d3d_device, RASTERIZER_TARGET_SHADOW_PRIMARY_SIZE,
++				RASTERIZER_TARGET_SHADOW_PRIMARY_SIZE, 1, D3DUSAGE_RENDERTARGET, D3DFMT_R5G6B5, D3DPOOL_DEFAULT,
++				&slots[slot].primary_texture) < 0 ||
++			IDirect3DTexture8_GetSurfaceLevel(slots[slot].primary_texture, 0, &slots[slot].primary) < 0 ||
++			IDirect3DDevice8_CreateTexture(global_d3d_device, RASTERIZER_TARGET_SHADOW_SECONDARY_SIZE,
++				RASTERIZER_TARGET_SHADOW_SECONDARY_SIZE, 1, D3DUSAGE_RENDERTARGET, D3DFMT_R5G6B5, D3DPOOL_DEFAULT,
++				&slots[slot].secondary_texture) < 0 ||
++			IDirect3DTexture8_GetSurfaceLevel(slots[slot].secondary_texture, 0, &slots[slot].secondary) < 0)
++		{
++			slots[slot].primary = NULL;
++			return FALSE;
++		}
++	}
++	global_d3d_texture_shadow_primary = slots[slot].primary_texture;
++	global_d3d_surface_shadow_primary = slots[slot].primary;
++	global_d3d_texture_shadow_secondary = slots[slot].secondary_texture;
++	global_d3d_surface_shadow_secondary = slots[slot].secondary;
++	return TRUE;
++}
++#endif
++
+ void rasterizer_set_target_as_texture(
+ 	short stage,
+ 	short target,
+diff --git a/source/rasterizer/xbox/rasterizer_xbox_decals.c b/source/rasterizer/xbox/rasterizer_xbox_decals.c
+index 410140b9..75ca8708 100644
+--- a/source/rasterizer/xbox/rasterizer_xbox_decals.c
++++ b/source/rasterizer/xbox/rasterizer_xbox_decals.c
+@@ -668,10 +668,69 @@ void _rasterizer_decals_begin(
+ 	return;
+ }
+ 
++#ifdef HALO_ANDROID
++/* The Mali port draws consecutive quads of the same state as one draw
++(port/linux/src/d3d8_gl.c), and a decal's quads are drawn by themselves
++whenever its bitmap differs from the one before. Decals whose blend function
++does not depend on the order they are drawn in (all but alpha blending) are
++therefore drawn grouped by blend function and bitmap, within each run of
++such decals in the list: the picture is the same, in far fewer draws. */
++
++static boolean decal_order_independent(short framebuffer_blend_function)
++{
++	return framebuffer_blend_function != _shader_framebuffer_blend_function_alpha_blend &&
++		framebuffer_blend_function != _shader_framebuffer_blend_function_alpha_multiply_add;
++}
++
++/* the cluster's decals in drawing order; returns their count */
++static long decal_drawing_order(short cluster_index, long *order, long capacity)
++{
++	/* an order independent decal's key: a flag, its blend function, bitmap
++	and place in the list (so that the sort is stable); 0 for the others */
++	static unsigned long long keys[MAXIMUM_DECALS_PER_MAP];
++	long count = 0, run, end, index, place;
++
++	for (index = decal_get_first_decal_index(cluster_index, local_layer); index != NONE && count < capacity;
++		index = DECAL_GET(index)->next_decal_index)
++	{
++		struct decal_datum *decal = DECAL_GET(index);
++		struct decal_shader_definition *shader = &decal_definition_get(decal->definition_index)->shader;
++
++		keys[count] = decal_order_independent(shader->framebuffer_blend_function) ?
++			1ULL << 48 | (unsigned long long)(unsigned short)shader->framebuffer_blend_function << 40 |
++			(unsigned long long)(shader->map.index & 0xffff) << 24 | (unsigned long long)(unsigned char)decal->bitmap_index << 16 |
++			(unsigned long long)count : 0;
++		order[count++] = index;
++	}
++	/* an insertion sort of each run of order independent decals */
++	for (run = 0; run < count; run = end + 1)
++	{
++		for (end = run; end < count && keys[end]; end++)
++		{
++			unsigned long long key = keys[end];
++			long moving = order[end];
++
++			for (place = end; place > run && keys[place - 1] > key; place--)
++			{
++				keys[place] = keys[place - 1];
++				order[place] = order[place - 1];
++			}
++			keys[place] = key;
++			order[place] = moving;
++		}
++	}
++	return count;
++}
++#endif
++
+ void _rasterizer_decals_draw(
+ 	short cluster_index)
+ {
+ 	long decal_index;
++#ifdef HALO_ANDROID
++	static long order[MAXIMUM_DECALS_PER_MAP];
++	long order_count, order_position = 0;
++#endif
+ 
+ 	match_assert(
+ 		"c:\\halo\\SOURCE\\rasterizer\\xbox\\rasterizer_xbox_decals.c",
+@@ -682,7 +741,12 @@ void _rasterizer_decals_draw(
+ 	if (!rasterizer_debug_options.draw_environment_decals)
+ 		return;
+ 
++#ifdef HALO_ANDROID
++	order_count = decal_drawing_order(cluster_index, order, MAXIMUM_DECALS_PER_MAP);
++	decal_index = order_count ? order[0] : NONE;
++#else
+ 	decal_index = decal_get_first_decal_index(cluster_index, local_layer);
++#endif
+ 	while (decal_index != NONE)
+ 	{
+ 		struct decal_datum *decal = DECAL_GET(decal_index);
+@@ -804,7 +868,11 @@ void _rasterizer_decals_draw(
+ 			rasterizer_frame_statistics.decal_vertex_count += 4*decal->quad_count;
+ 		}
+ 
++#ifdef HALO_ANDROID
++		decal_index = ++order_position < order_count ? order[order_position] : NONE;
++#else
+ 		decal_index = decal->next_decal_index;
++#endif
+ 	}
+ 
+ 	return;
+diff --git a/source/rasterizer/xbox/rasterizer_xbox_shadows.c b/source/rasterizer/xbox/rasterizer_xbox_shadows.c
+index 35dbdf72..38080fe8 100644
+--- a/source/rasterizer/xbox/rasterizer_xbox_shadows.c
++++ b/source/rasterizer/xbox/rasterizer_xbox_shadows.c
+@@ -262,6 +262,97 @@ static boolean shadow_used = FALSE;
+ 
+ /* ---------- public code */
+ 
++#ifdef HALO_ANDROID
++/* ---------- shadows in two passes (the Mali port)
++
++On the Xbox each object's shadow switches to the shadow targets, draws the
++object's silhouette there, blurs it, and switches back to the primary target
++to draw the shadow onto the environment. Mali-G31 draws a target a tile at a
++time: each switch back made it write the whole primary target out to memory
++and read it back in, which cost more than drawing the shadows (a30: 24 frames
++a second with them, 38 without). render_object_shadows goes through the
++objects twice instead: the first pass draws every shadow's texture, each into
++a pair of target textures of its own (rasterizer_shadow_targets_select), the
++second draws every shadow onto the environment without leaving the primary
++target. A shadow beyond the slots is drawn the Xbox way in the second pass,
++after the others. */
++
++enum
++{
++	_shadow_phase_single,
++	_shadow_phase_textures,
++	_shadow_phase_project,
++};
++
++#define SHADOW_SLOTS 16
++
++boolean rasterizer_shadow_targets_select(short slot); /* rasterizer_xbox.c */
++void xgpu_sample_blurred(int enable); /* port/linux/src/d3d8_gl.c */
++
++/* the frames the GPU can be behind: a frame draws into textures the
++frames before are done with, or the driver waits for the GPU to finish them */
++#define SHADOW_SLOT_SETS 3
++
++static short shadow_phase = _shadow_phase_single;
++static long shadow_slot_objects[SHADOW_SLOTS];
++static short shadow_slot_count = 0;
++static short shadow_slot_base = 0;
++static boolean shadow_slot_ready = FALSE; /* the shadow begun has its texture */
++
++void rasterizer_environment_shadows_textures_begin(
++	void)
++{
++	shadow_phase = _shadow_phase_textures;
++	shadow_slot_count = 0;
++	shadow_slot_base = (shadow_slot_base + SHADOW_SLOTS) % (SHADOW_SLOTS * SHADOW_SLOT_SETS);
++
++	return;
++}
++
++void rasterizer_environment_shadows_textures_end(
++	void)
++{
++	short slot;
++
++	/* no blur passes: the shadows are blurred as they are drawn onto the
++	environment (xgpu_sample_blurred), which on Mali-G31 costs less than
++	the passes' switches of target did */
++	(void)slot;
++	/* back to the primary target, once for all the shadows */
++	if (shadow_slot_count)
++	{
++		rasterizer_set_target(global_window_parameters.rasterizer_target, 0, 0, FALSE, TRUE);
++	}
++	shadow_phase = _shadow_phase_project;
++
++	return;
++}
++
++void rasterizer_environment_shadows_project_end(
++	void)
++{
++	shadow_phase = _shadow_phase_single;
++	shadow_slot_ready = FALSE;
++	rasterizer_shadow_targets_select(0);
++
++	return;
++}
++
++/* whether the shadow begun still needs the object's silhouette drawn */
++boolean rasterizer_environment_shadow_draws_model(
++	void)
++{
++	return !shadow_slot_ready;
++}
++
++/* whether the shadow is drawn onto the environment in this pass */
++boolean rasterizer_environment_shadow_draws_environment(
++	void)
++{
++	return shadow_phase != _shadow_phase_textures;
++}
++#endif
++
+ void _rasterizer_environment_shadows_begin(
+ 	void)
+ {
+@@ -290,6 +381,47 @@ boolean _rasterizer_environment_shadow_begin(
+ 			_rasterizer_target_render_primary &&
+ 		rasterizer_debug_options.draw_environment_shadows)
+ 	{
++#ifdef HALO_ANDROID
++		shadow_slot_ready = FALSE;
++		if (shadow_phase == _shadow_phase_textures)
++		{
++			/* a pair of targets of its own, or the Xbox way in the second pass */
++			if (shadow_slot_count == SHADOW_SLOTS ||
++				!rasterizer_shadow_targets_select(shadow_slot_base + shadow_slot_count))
++			{
++				return FALSE;
++			}
++			shadow_slot_objects[shadow_slot_count++] = object_index;
++		}
++		else if (shadow_phase == _shadow_phase_project)
++		{
++			short slot;
++
++			for (slot = 0; slot < shadow_slot_count && shadow_slot_objects[slot] != object_index; slot++)
++				;
++			if (slot < shadow_slot_count)
++			{
++				/* the texture is drawn: only the environment's shadow is left */
++				rasterizer_shadow_targets_select(shadow_slot_base + slot);
++				local_shadow_matrix = *shadow_matrix;
++				local_shadow_color = *shadow_color;
++				local_object_bounding_radius = object_bounding_radius;
++				if (shadow_volume_bounding_radius)
++				{
++					*shadow_volume_bounding_radius = object_bounding_radius;
++				}
++				local_parameters = 0;
++				shadow_setup = FALSE;
++				shadow_used = TRUE;
++				shadow_restored = TRUE;
++				shadow_slot_ready = TRUE;
++				return success;
++			}
++			/* beyond the slots: the Xbox way, with slot 0's targets, which
++			the shadows before have done with */
++			rasterizer_shadow_targets_select(0);
++		}
++#endif
+ 		match_assert(
+ 			"c:\\halo\\SOURCE\\rasterizer\\xbox\\rasterizer_xbox_shadows.c",
+ 			153,
+@@ -605,6 +737,15 @@ void _rasterizer_environment_shadow_end(
+ 				"### WARNING empty shadow has been cast");
+ 		}
+ 
++#ifdef HALO_ANDROID
++		if (shadow_phase == _shadow_phase_textures)
++		{
++			/* the primary target after all the shadows' silhouettes
++			(rasterizer_environment_shadows_textures_end) */
++			shadow_restored = TRUE;
++		}
++		xgpu_sample_blurred(FALSE);
++#endif
+ 		if (!shadow_restored)
+ 		{
+ 			rasterizer_set_target(
+@@ -645,10 +786,23 @@ void _rasterizer_environment_shadow_draw(
+ 	{
+ 		if (!shadow_setup)
+ 		{
+-			if (rasterizer_debug_options.shadows_convolution)
++			if (rasterizer_debug_options.shadows_convolution
++#ifdef HALO_ANDROID
++				/* blurred as it is read (xgpu_sample_blurred) */
++				&& !shadow_slot_ready
++#endif
++				)
+ 			{
+ 				rasterizer_shadow_convolve();
+ 			}
++#ifdef HALO_ANDROID
++			if (shadow_slot_ready && rasterizer_debug_options.shadows_convolution)
++			{
++				rasterizer_set_target_as_texture(0, 2, FALSE);
++				xgpu_sample_blurred(TRUE);
++			}
++			else
++#endif
+ 
+ 			rasterizer_set_target_as_texture(
+ 				0,
+@@ -1038,7 +1192,13 @@ static void rasterizer_shadow_convolve(
+ 		pixel_shader.final_combiner_inputs_abcd = 0x0C20001C;
+ 		rasterizer_set_pixel_shader(&pixel_shader);
+ 
++#ifdef HALO_ANDROID
++		/* cleared, though the quad covers it all: a tiled GPU otherwise
++		reads the target's old contents in before drawing */
++		rasterizer_set_target(3, 0, 0, TRUE, FALSE);
++#else
+ 		rasterizer_set_target(3, 0, 0, FALSE, FALSE);
++#endif
+ 
+ 		IDirect3DDevice8_Begin(global_d3d_device, D3DPT_TRIANGLEFAN);
+ 		IDirect3DDevice8_SetVertexData2s(global_d3d_device, 4, 0, 0);
+diff --git a/source/render/render_objects.c b/source/render/render_objects.c
+index 95cb7853..f160eb3f 100644
+--- a/source/render/render_objects.c
++++ b/source/render/render_objects.c
+@@ -284,6 +284,15 @@ void rasterizer_models_begin(
+ 	boolean sky);
+ void rasterizer_models_end(
+ 	void);
++#ifdef HALO_ANDROID
++/* the Mali port's shadows in two passes (rasterizer_xbox_shadows.c) */
++void rasterizer_environment_shadows_textures_begin(void);
++void rasterizer_environment_shadows_textures_end(void);
++void rasterizer_environment_shadows_project_end(void);
++boolean rasterizer_environment_shadow_draws_model(void);
++boolean rasterizer_environment_shadow_draws_environment(void);
++#endif
++
+ void rasterizer_environment_shadows_begin(
+ 	void);
+ void rasterizer_environment_shadows_end(
+@@ -429,7 +438,17 @@ void render_object_shadows(
+ 		rasterizer_environment_shadows_begin();
+ 
+ 		data.shadow = TRUE;
++#ifdef HALO_ANDROID
++		/* the Mali port: every shadow's texture, then every shadow
++		(rasterizer_xbox_shadows.c) */
++		rasterizer_environment_shadows_textures_begin();
++		process_rendered_objects(&data);
++		rasterizer_environment_shadows_textures_end();
++		process_rendered_objects(&data);
++		rasterizer_environment_shadows_project_end();
++#else
+ 		process_rendered_objects(&data);
++#endif
+ 
+ 		rasterizer_environment_shadows_end();
+ 	}
+@@ -911,6 +930,9 @@ static void render_object_shadow_end(
+ 	shadow_volume_bounds.z1 = shadow_volume_bounds.z1 * data->shadow_bounding_radius +
+ 		data->shadow_matrix.position.z;
+ 
++#ifdef HALO_ANDROID
++	if (rasterizer_environment_shadow_draws_environment())
++#endif
+ 	structure_render_shadow(
+ 		&data->shadow_matrix.position,
+ 		data->shadow_bounding_radius * 4.f,
+@@ -1184,6 +1206,9 @@ static void render_object(
+ 
+ 				if (render_object_shadow_begin(data, darkness_fraction * size_fraction))
+ 				{
++#ifdef HALO_ANDROID
++					if (rasterizer_environment_shadow_draws_model())
++#endif
+ 					render_object_list(data, NULL, data->object_index);
+ 					render_object_shadow_end(data);
+ 				}
+diff --git a/tools/android_gl_stubs.py b/tools/android_gl_stubs.py
+index c28a0f0b..7cc5dca0 100644
+--- a/tools/android_gl_stubs.py
++++ b/tools/android_gl_stubs.py
+@@ -66,6 +66,11 @@ def main():
+         "",
+         "void host_gl_get_string(unsigned int name, int index, char *buffer, unsigned int size);",
+         "",
++        "/* d3d8_gl.c: what runs before each call (the batched quad draws, which",
++        "are drawn before any other call) */",
++        "extern void (*guest_gl_before_call)(void);",
++        "#define GUEST_GL_CALL() do { if (guest_gl_before_call) guest_gl_before_call(); } while (0)",
++        "",
+     ]
+     table = []
+     import_names = []
+@@ -85,6 +90,7 @@ def main():
+                 "\tstatic __thread int next;",
+                 "\tchar *result = buffer[next++ & 3];",
+                 "",
++                "\tGUEST_GL_CALL();",
+                 "\thost_gl_get_string(name, -1, result, sizeof(buffer[0]));",
+                 "\treturn (const GLubyte *)result;",
+                 "}",
+@@ -108,6 +114,7 @@ def main():
+                 "\t\tcount = 16;",
+                 "\tfor (index = 0; index < count; index++)",
+                 "\t\twide[index] = (unsigned long long)(unsigned int)strings[index];",
++                "\tGUEST_GL_CALL();",
+                 "\thostgl_glShaderSource(shader, count, wide, lengths);",
+                 "}",
+                 "",
+@@ -150,6 +157,7 @@ def main():
+         out.append(f"{ret} {host_name}({', '.join(host_params) or 'void'});")
+         out.append(f"static {ret} GL_APIENTRY guest_{name}({', '.join(decl_params) or 'void'})")
+         out.append("{")
++        out.append("\tGUEST_GL_CALL();")
+         call = f"{host_name}({', '.join(call_args)})"
+         out.append(f"\t{'return ' if ret != 'void' else ''}{call};")
+         out.append("}")

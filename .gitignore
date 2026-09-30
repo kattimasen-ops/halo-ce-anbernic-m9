@@ -1,0 +1,15 @@
+# build output and inputs (never commit game files or device libraries)
+work/
+dist/
+/dist/halo
+sysroot/
+*.iso
+*.ISO
+*.xiso
+maps/
+*.elf
+__pycache__/
+# benchmark results from tools/bench.sh
+bench/
+# local publishing notes
+PUBLISH_NOTES.md
