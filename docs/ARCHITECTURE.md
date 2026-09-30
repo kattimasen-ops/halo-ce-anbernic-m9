@@ -627,7 +627,7 @@ they are once sorted) writes its nodes once a frame. With `debug.gpu_stats`, the
 counts both cases:
 
 ```
-W halo: halo-linux: high constants: 45 found again, 113 written (a frame)
+W halo: halo-linux: high constants: 8 found again, 31 written; 57 instanced draws of 250 draws (a frame)
 ```
 
 Block offsets are aligned to `GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT`, and
@@ -805,6 +805,65 @@ fares, every 600 phases:
 ```
 W halo: halo-linux: sorted models: 112 kept draws, 7 flushes, drawn in place for a transparent part 15, for a decal 3 (a phase)
 ```
+
+The sorted draws come in runs: the same part of several objects. A
+two-sided part (a model shader with `_shader_model_two_sided_bit`) is drawn
+by the game as two draws, the front faces with counter-clockwise culling
+and then the back faces with clockwise culling and flipped normals. Drawn
+object by object, the cull mode would change between every two draws of
+the run. `models_flush` draws such a run a side at a time instead
+(`deferred_run_by_sides`, `model_draw_sides`): the front faces of every
+object, then the back faces of every object, so that the renderer sees the
+same draw several times in a row. The parts are opaque and depth-tested, so
+the order does not change the picture. A run is drawn this way only when
+every object in it has no special effect.
+
+### Instanced model draws
+
+`port/linux/src/d3d8_gl.c` (`instance_add`, `instance_flush`),
+`nv2a_vsh.c` (`XGPU_OUTPUT_INSTANCED`). In the a30 opening, 134 indexed
+draws a frame repeated the draw just before them with other constants (the
+same program, textures, vertices and indices; `HALO_DEBUG_DRAW_CALLERS=3`),
+all of them skinned models' parts with their indices in the mirror. Each
+costs the Mali driver about 17 µs. With `debug.instance_models` (the
+default), such draws are drawn as instances of one draw:
+
+- A draw of a two-block program (`XGPU_CONSTANT_SPLIT`) whose indices are
+  in the mirror is held instead of drawn. `prepare_draw` binds nothing of
+  its program's for it: not the program, not its constant blocks, not its
+  uniforms.
+- The next draws that are the same draw join it: the same program and
+  index range, the same number of node registers, and the same uniforms
+  except the pixel shader's constants. Each joining draw's constants are
+  copied: its 60 low registers, its node registers, and its 18 pixel
+  constants (`ps_c0[8]`, `ps_c1[8]`, the final combiner's two).
+- As with the quad batch, any GL call draws the held draws first
+  (`guest_gl_before_call`). A draw that joins has made none, so the GL state
+  is still theirs. A draw of other geometry draws them before it is
+  prepared (`instance_may_join`).
+- They are drawn with `glDrawElementsInstancedBaseVertex` and the
+  program's instanced variant. Its vertex shader reads the node registers
+  of instance `gl_InstanceID` from a block of 1024 registers (16 KB, the
+  most Mali allows a block; `XGPU_INSTANCE_HIGH_REGISTERS`), packed as far
+  apart as the draws' nodes go (`xgpu_high_stride`). It reads the low
+  registers that differ between the held draws from a block of the
+  instances' own (binding 3), and the others from the shared low block,
+  which the compiler can keep in uniform registers. The mask of differing
+  registers is found as draws join, and a variant is made for each mask a
+  program meets (up to four; beyond that the variant with all of them).
+  The pixel shader's constants come from a block of the instances' copies
+  (binding 2), at the instance the vertex shader passes on (`xInstance`;
+  `fragment_instanced_shader` rewrites the pixel shader).
+- A held draw left by itself between draws is drawn with its own program,
+  whose shaders are cheaper for the GPU. Drawn from within a GL call (in
+  the middle of preparing the next draw), it uses the instanced variant,
+  which touches none of the regular program's uniforms, and the program and
+  constant ranges the next draw had bound are put back.
+
+With `debug.gpu_stats`, the `high constants` line also counts the
+instanced draws and the draws they drew. In the a30 opening, 250 held draws
+a frame are drawn by 57 instanced draws, and the GL thread's draw calls
+take 5.3 ms a frame instead of 7.8 ms.
 
 ### Shadows in two passes
 

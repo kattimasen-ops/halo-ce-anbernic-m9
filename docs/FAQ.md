@@ -11,8 +11,8 @@ the halo-ce-universal decompilation; you supply the Xbox game's data.
 ## What frame rate does Halo CE get on the RG35XX H?
 
 At the default render scale of 0.75: 60 fps in the menus, about 44 fps on
-343 Guilty Spark (c10), about 41 fps in the beach battle of The Silent
-Cartographer (b30), and about 54 fps at the opening of Halo (a30). At
+343 Guilty Spark (c10), about 40 fps in the beach battle of The Silent
+Cartographer (b30), and about 55 fps at the opening of Halo (a30). At
 the full 640x480 it is 20 to 26 fps. The numbers are improving; see the
 [performance table](../README.md#performance).
 

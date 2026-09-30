@@ -94,6 +94,7 @@ little difference to the frame rate.
 | Skinned models' constants in two blocks (per part, and per object's nodes, written only as far as the nodes go); streaming buffers mapped as cached memory | a30, 0.75 | 49 | 49–51 (buffer writes 2.9 ms to 1.9 ms a frame) |
 | The guest's `memcmp` and `memcpy` eight bytes at a time; the GL queue published in 4 KB steps, not after every call | a30, 0.75 | 49.5–50 (with the GL timer on) | 51.5–52 with the GL timer on, 52–54 with it off |
 | The skinned-constant cache searched through a compact array of keys; a per-write `getenv` removed from the GL thread | a30, 0.75 | 52–54 | 54–55 |
+| Repeated skinned-model draws drawn as instances; two-sided parts sorted a side at a time | a30, 0.75 | 54–55 | 53–57 (GL thread's draw calls 7.8 to 5.3 ms; the GPU is now the limit) |
 
 Notes on the steps:
 
@@ -236,7 +237,35 @@ Notes on the steps:
   draws, dynamic geometry). Programs that read at most 64 registers without
   `a0` still take their constants as uniform arrays (`glUniform4fv`).
 
+- **Instancing.** 134 draws a frame in a30 repeated the draw just before
+  them with other constants, all skinned models' parts. They were
+  separated by the cull mode (two-sided parts are drawn front, then back,
+  object by object), and by the pixel shader's constants (the change
+  colours differ from marine to marine; 70% of the repeats). The model
+  sorting now draws a run of two-sided parts a side at a time, and the
+  renderer draws consecutive same draws as instances of a variant that
+  reads each instance's constants from uniform blocks
+  ([Architecture](ARCHITECTURE.md#instanced-model-draws)): 250 draws a
+  frame become 57. Reading every low register per instance doubled the
+  vertex shaders' load/store work, and a30 fell to 46 fps; reading only
+  those that differ, and drawing a draw left alone with its own program,
+  brought it to 53–57 fps. The GL thread's draw calls went from 7.8 to 5.3
+  ms a frame and the GPU is now the limit. b30 (35–46 fps) and c10 (about
+  44) are GPU-bound and did not change.
+- **Where the GPU's time goes in a30.** Without the environment shadows,
+  a30 holds 57.5–59.9 fps with every frame at 16.7 ms; without their blur or
+  without the motion sensor, nothing changes. The shadows' textures are
+  drawn in the middle of the primary target's pass, which splits it: Mali
+  writes the whole target out and reads it back in.
+
 ## What did not help, or was not the limit
+
+- **The shadows' textures at the start of the window.** Drawing every
+  shadow's texture before the primary target's first pass (with the
+  first-person weapon's update, the scene's lights and the object list done
+  first) left the primary target in one pass, as intended, but a30 fell to
+  40 fps: every other frame took about 30 ms of GPU time, with or without
+  vsync and with three framebuffers. Not yet understood; reverted.
 
 - **Texture bandwidth.** Sampling mip levels 16 times smaller
   (`HALO_DEBUG_LOD_BIAS=4`) changed the GPU-timed b30 run from about 12.5 to
@@ -284,5 +313,5 @@ of them have to come down. The ideas with the most expected payoff:
    upstream's x86 Linux profile).
 
 Since then the game's thread has become cheaper (see the last notes in the
-history above), and a30 runs at 54 to 55 fps.
+history above), and a30 runs at 53 to 57 fps, limited by the GPU.
 [Roadmap](ROADMAP.md) keeps the current list of limits and planned work.

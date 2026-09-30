@@ -66,7 +66,7 @@ HOOKS = {
 OFFSETS = {
     ("glVertexAttribPointer", "pointer"), ("glVertexAttribIPointer", "pointer"),
     ("glDrawElements", "indices"), ("glDrawElementsBaseVertex", "indices"),
-    ("glDrawRangeElementsBaseVertex", "indices"),
+    ("glDrawRangeElementsBaseVertex", "indices"), ("glDrawElementsInstancedBaseVertex", "indices"),
 }
 
 
@@ -185,13 +185,15 @@ def main():
     emit("\t((void (GL_APIENTRY *)(GLenum, GLint *))driver[glthread_glGetIntegerv])(name, &value);")
     emit("\treturn value;\n}\n")
     emit("int glthread_draw_count(uint32_t function, const void *data)\n{\n\tswitch (function)\n\t{")
-    for name in ("glDrawArrays", "glDrawElements", "glDrawElementsBaseVertex", "glDrawRangeElementsBaseVertex"):
+    for name in ("glDrawArrays", "glDrawElements", "glDrawElementsBaseVertex", "glDrawRangeElementsBaseVertex",
+                 "glDrawElementsInstancedBaseVertex"):
         if name in names:
             emit(f"\tcase glthread_{name}:\n\t\treturn (int)((const struct queued_{name} *)data)->count;")
     emit("\tdefault:\n\t\treturn 0;\n\t}\n}\n")
     emit("int glthread_call_kind(uint32_t function)\n{\n\tswitch (function)\n\t{")
     emit("\tcase glthread_glBindFramebuffer:\n\t\treturn _glthread_call_bind_framebuffer;")
-    for name in ("glDrawArrays", "glDrawElements", "glDrawElementsBaseVertex", "glDrawRangeElementsBaseVertex"):
+    for name in ("glDrawArrays", "glDrawElements", "glDrawElementsBaseVertex", "glDrawRangeElementsBaseVertex",
+                 "glDrawElementsInstancedBaseVertex"):
         if name in names:
             emit(f"\tcase glthread_{name}:")
     emit("\t\treturn _glthread_call_draw;\n\tcase glthread_glClear:\n\t\treturn _glthread_call_clear;")

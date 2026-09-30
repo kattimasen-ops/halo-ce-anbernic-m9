@@ -98,6 +98,7 @@ launcher writes another value, the table says so.
 | [`display.vsync`](#displayvsync) | boolean | `true` | | `HALO_NO_VSYNC` (set is false) |
 | [`display.interpolation`](#displayinterpolation) | boolean | `true` | `true` | `HALO_INTERPOLATION` (value) |
 | [`debug.sort_models`](#debugsort_models) | boolean | `true` | | `HALO_SORT_MODELS` (value) |
+| [`debug.instance_models`](#debuginstance_models) | boolean | `true` | | `HALO_INSTANCE_MODELS` (value) |
 | [`debug.alpha_test_elision`](#debugalpha_test_elision) | boolean | `true` | | `HALO_ALPHA_TEST_ELISION` (value) |
 | [`debug.batch_quads`](#debugbatch_quads) | boolean | `true` | | `HALO_BATCH_QUADS` (value) |
 | [`debug.stable_streams`](#debugstable_streams) | boolean | `true` | | `HALO_STABLE_STREAMS` (value) |
@@ -257,6 +258,18 @@ begin and end and their parts drawn sorted by shader, permutation and
 geometry, which spares the GPU driver most of its changes of program. In
 the a30 opening it cut the program switches from about 190 to 109 a frame
 and the texture binds from 594 to 393.
+
+### `debug.instance_models`
+
+| Type | Default | Variable |
+| --- | --- | --- |
+| boolean | `true` | `HALO_INSTANCE_MODELS` |
+
+Draws consecutive draws of the same skinned model part that differ only in
+their constants (several marines' same part) as one instanced draw
+(`d3d8_gl.c`, [Architecture](ARCHITECTURE.md#instanced-model-draws)). In
+the a30 opening, 250 draws a frame become 57 instanced draws. `false` draws
+each by itself.
 
 ### `debug.alpha_test_elision`
 

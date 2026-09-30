@@ -260,6 +260,35 @@ the frame that last used it.
   (and batching the blur passes) made no measurable difference (25.7 fps
   either way): the target switches themselves were the cost.
 
+## Instancing and uniform blocks
+
+**A uniform block holds at most 16 KB.** Linking a program whose block was
+larger failed with `L0005 Max uniform block size exceeded`: 16 KB is the
+least `GL_MAX_UNIFORM_BLOCK_SIZE` OpenGL ES allows, and Mali's limit. The
+instanced skinned models' node registers (132 a draw) therefore share one
+block of 1024 registers, packed as far apart as each group's nodes go.
+
+**Constants read at a fixed index are free; at a varying index they are
+loads.** The Mali Offline Compiler shows it for a skinned model's vertex
+shader: with its low registers read at fixed indices, the compiler keeps
+them in 128 uniform registers, and the shader costs 9 load/store cycles for
+the position and 25 for the varyings. The instanced variant that reads
+every low register at `gl_InstanceID * 60 + k` costs 16 and 49: twice the
+work per vertex, and a30 fell from about 54 to 46 fps, GPU-bound. Reading
+only the registers that differ between the instances from their own block
+(five to seven in the a30 opening) and the rest at fixed indices brings it
+back to 9 and 27 to 34.
+
+**The pixel shader's per-instance constants are cheap.** Read from a block
+at the instance's index, they add 1 to 7 load/store cycles per pixel, but
+the model shaders stay arithmetic-bound (for example 3.1 against 2.6 cycles
+a pixel).
+
+**Fewer draws help only while the driver is the limit.** Instancing cut the
+GL thread's draw calls from 7.8 to 5.3 ms a frame in a30, and the GPU
+became the limit: the GL thread then waits in `glClear` and
+`glBindFramebuffer`. In b30 and c10, already GPU-bound, it changed nothing.
+
 ## What was not the limit
 
 | Hypothesis | Test | Result |
@@ -270,6 +299,7 @@ the frame that last used it.
 | Three framebuffers instead of two | a30, render scale 0.75 | 24.0 and 23.9 fps: no change. |
 | The game two frames ahead of the GL thread | a30, render scale 0.75 | 25.7 fps either way. |
 | One expensive render feature | Features turned off one at a time in b30 (fog, decals, specular lights, reflections, detail objects, lens flares, bump mapping, the motion sensor, screen effects), an earlier build | About 2 fps or less each: the cost is spread over many draws. |
+| The shadows' blur and the motion sensor in a30 | `rasterizer_shadows_convolution false`, `rasterizer_hud_motion_sensor false`, instanced build | 52–57 and 50–58 fps against 50–56 in the same session: no change. Without the environment shadows (`rasterizer_environment_shadows false`) a30 holds 57.5–59.9 fps, every frame at 16.7 ms. |
 
 ## Shader programs
 

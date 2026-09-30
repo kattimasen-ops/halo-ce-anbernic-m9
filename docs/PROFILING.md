@@ -143,7 +143,7 @@ The first interval includes the level's loading; read the later ones.
 
 ```
 W halo: halo-linux: frame 900: 421 draws, 20 immediate, 2 clears, 9 target changes; skipped 0 no program, 0 no target, 0 link; 2278 KB mirrored, 50 KB streamed
-W halo: halo-linux: high constants: 59 found again, 106 written (a frame)
+W halo: halo-linux: high constants: 8 found again, 31 written; 57 instanced draws of 250 draws (a frame)
 W halo: halo-linux: buffer writes: 625 a frame, 894 KB (vertex constants 337 KB, mirror pages 0 KB)
 W halo: halo-linux: quad batches: 105 quad draws in 34 draws
 ```
@@ -155,6 +155,8 @@ W halo: halo-linux: quad batches: 105 quad draws in 34 draws
 - `high constants`: for programs with two constant blocks, how often an
   object's node matrices were found already written this frame, and how
   often they were written ([Architecture](ARCHITECTURE.md#vertex-constants)).
+  Then the instanced draws a frame and the draws they drew
+  ([Architecture](ARCHITECTURE.md#instanced-model-draws)).
 - `buffer writes`: the writes into the GL buffers a frame (the stream and
   index buffers, and pages of the mirror) and their bytes, with the vertex
   constants' and the mirror pages' share. Each is a host operation on the GL
