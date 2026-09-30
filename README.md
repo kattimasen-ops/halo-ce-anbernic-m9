@@ -1,7 +1,7 @@
 # Halo: Combat Evolved on Anbernic RG35XX H — native port for Knulli (Allwinner H700)
 
 Yes — Halo CE runs natively on the Anbernic RG35XX H (RG35XXH) under Knulli:
-60 fps in the menus and about 31 to 41 fps in campaign levels at the default
+60 fps in the menus and about 35 to 41 fps in campaign levels at the default
 render scale. This repository is a native ARM64 (AArch64) port of the Halo:
 Combat Evolved decompilation, [halo-ce-universal](https://github.com/cybersecurity/halo-ce-universal),
 to the Allwinner H700 and its Mali-G31 GPU. There is no emulation: no xemu,
@@ -71,8 +71,10 @@ Last updated: 2026-09-30.
 | Main menu | 60 | 60 |
 | c10, 343 Guilty Spark (swamp) | about 41 | 26 |
 | b30, The Silent Cartographer (beach battle) | about 35–38 | 26 |
-| a30, Halo (level opening) | about 31–33 | 20 |
+| a30, Halo (level opening) | about 36 | 20 |
 <!-- end of performance table -->
+
+The 640x480 column was measured on an earlier build and is being re-measured.
 
 At 640x480 the GPU's pixel and vertex work is the limit. At 0.75 the limit is
 the Mali driver's CPU time for each draw call on the GL thread. The kernel's
@@ -274,7 +276,7 @@ the halo-ce-universal decompilation; you supply the Xbox game's data.
 
 At the default render scale of 0.75: 60 fps in the menus, about 41 fps on
 343 Guilty Spark (c10), about 35 to 38 fps in the beach battle of The Silent
-Cartographer (b30), and about 31 to 33 fps at the opening of Halo (a30). At
+Cartographer (b30), and about 36 fps at the opening of Halo (a30). At
 the full 640x480 it is 20 to 26 fps. The numbers are improving; see the
 [performance table](#performance).
 

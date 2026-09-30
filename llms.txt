@@ -18,7 +18,7 @@
 
 ## Frame rates (RG35XX H, last updated 2026-09-30)
 
-- Render scale 0.75 (default): main menu 60 fps; c10, 343 Guilty Spark, about 41; b30, The Silent Cartographer beach battle, about 35 to 38; a30, Halo level opening, about 31 to 33.
+- Render scale 0.75 (default): main menu 60 fps; c10, 343 Guilty Spark, about 41; b30, The Silent Cartographer beach battle, about 35 to 38; a30, Halo level opening, about 36.
 - Render scale 1.0 (640x480): main menu 60; c10 26; b30 26; a30 20.
 
 ## Install

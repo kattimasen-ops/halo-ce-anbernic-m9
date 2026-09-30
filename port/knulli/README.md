@@ -100,21 +100,34 @@ These are in `port/linux/src`, for `HALO_ANDROID` builds:
 - The attributes of indexed draws from the mirror point at the base vertex,
   so draws from the same vertex buffer share them (`debug.stable_streams =
   false` turns this off).
+- Each program's vertex shader writes only the outputs its pixel shader
+  reads, and the point size only for points (`nv2a_vertex_shader_to_glsl`).
+  Mali then shades each vertex's position first and the rest only for the
+  triangles it keeps; the translated shaders are bound by their outputs'
+  stores, not their arithmetic.
+- Objects' shadows are drawn in two passes over the objects
+  (`rasterizer_xbox_shadows.c`): every shadow's texture first, each into
+  targets of its own, then every shadow onto the environment without
+  leaving the primary target, blurred as it is read rather than in a pass
+  of its own. Switching the primary target out and back for each shadow
+  stalled the driver.
+- `display.model_detail` (default 0.5): objects switch to their simpler
+  models sooner, relative to the rendered resolution.
 
 ### Frame rates
 
 Anbernic RG35XX H, Knulli Gladiator II, stock thermal limits, frames per
 second over the last 40 to 60 seconds of a level's opening:
 
-| Level | 640x480 (`render_scale = 1.0`) | 480x360 (`render_scale = 0.75`, the default) |
+| Level | 640x480 (`render_scale = 1.0`, an earlier build) | 480x360 (`render_scale = 0.75`, the default) |
 | --- | --- | --- |
 | Main menu | 60 | 60 |
 | c10 (swamp) | 26 | 41 |
-| b30 (beach, battle) | 26 | 32 |
-| a30 (drop pod) | 20 | 24 |
+| b30 (beach, battle) | 26 | 35–38 |
+| a30 (level opening) | 20 | 36 |
 
-At 640x480 the GPU is the limit; at lower resolutions, the driver's time
-for each draw call on the GL thread.
+The tools below (`HALO_GPU_PASS_TIMING`, `HALO_GL_TIMING`) show which of the
+GPU, the GL thread and the game's thread limits a scene.
 
 ### Clocks
 
@@ -128,9 +141,10 @@ kernel's thermal governor still lowers both at 70 °C.
 | --- | --- |
 | `HALO_FPS_LOG=<seconds>` | The frame rate, the longest frame, memory, temperature and clocks in the log. |
 | `HALO_GL_TIMING=1` | Each GL function's calls and time per frame (on the GL thread). |
-| `HALO_GPU_PASS_TIMING=1` | Finishes the GPU at each change of render target and logs the time of each target's passes. |
+| `HALO_GPU_PASS_TIMING=1` | Finishes the GPU at each change of render target and logs the time of each target's passes, split into the calls that made them and the GPU's work. `2` also logs one frame's passes in order; `3` also the GPU's time for each draw of that frame. |
 | `HALO_PROFILE_HZ=<rate>`, `HALO_PROFILE_DELAY=<seconds>` | Samples every thread; `profile.py` reports the result. |
-| `HALO_DEBUG_DRAW_CALLERS=1` | The draws each caller of the draw functions makes, per frame. |
+| `HALO_DEBUG_DRAW_CALLERS=1` | The draws each caller of the draw functions makes, per frame (`2`: their callers' callers). |
+| `HALO_GPU_DUMP_SHADERS=<folder>` | Writes the generated GLSL, to analyse with Arm's Mali Offline Compiler (`malioc -c Mali-G31`). |
 | `HALO_DEBUG_FREEZE=textures,program,raster` | Draws keep the state they find, to measure what setting it costs. |
 | `HALO_DEBUG_LOD_BIAS=<levels>` | Samples smaller mip levels, to measure what texture bandwidth costs. |
 | `HALO_DEBUG_SKIP_GL=glA,glB` | The GL thread does not make these calls, to measure their cost. |

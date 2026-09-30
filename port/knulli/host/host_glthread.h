@@ -48,11 +48,14 @@ enum
 	_glthread_call_clear,
 	_glthread_call_geometry,
 	_glthread_call_uniform,
+	_glthread_call_copy,        /* copies, blits, mipmaps, invalidations */
 };
 
 /* generated (glthread_gen.py) */
 void glthread_driver_finish(void);
 void glthread_driver_flush(void);
+GLint glthread_driver_integer(GLenum name);
+int glthread_draw_count(uint32_t function, const void *data);
 int glthread_call_kind(uint32_t function);
 void glthread_replay(uint32_t function, const void *data);
 void *glthread_record_function(const char *name, void *function);

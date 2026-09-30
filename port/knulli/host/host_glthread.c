@@ -151,6 +151,13 @@ static int pass_count;
 static GLuint pass_framebuffer;
 static uint64_t pass_start;
 static uint32_t pass_draws, pass_clears, pass_frames;
+/* HALO_GPU_PASS_TIMING=2: one frame's passes in order, each logged as it
+ends (pass_trace_frame: after the report's frames, a frame in the middle) */
+static int pass_trace;
+/* HALO_GPU_PASS_TIMING=3: in that frame, the GPU's time for each draw (each
+drawn by itself: the time includes a load and store of the target's tiles) */
+static int draw_trace;
+static uint32_t pass_copies, pass_frames_total, pass_index;
 
 static uint64_t monotonic_ns(void)
 {
@@ -176,6 +183,14 @@ static void pass_end(void)
 		passes[pass_count].framebuffer = pass_framebuffer;
 		pass_count++;
 	}
+	if (pass_trace && pass_frames_total == PASS_REPORT_FRAMES * 5 && pass_start)
+	{
+		host_logf(HOST_LOG_INFO, "trace: pass %2u framebuffer %3u %4u draws %u clears %u copies, issue %6.2f ms, gpu %6.2f ms",
+			pass_index, pass_framebuffer, pass_draws, pass_clears, pass_copies, (flushed - pass_start) / 1e6,
+			(now - flushed) / 1e6);
+	}
+	pass_index++;
+	pass_copies = 0;
 	if (index < pass_count)
 	{
 		if (pass_start)
@@ -212,6 +227,9 @@ static void pass_call(const struct command *command)
 	case _glthread_call_clear:
 		pass_clears++;
 		break;
+	case _glthread_call_copy:
+		pass_copies++;
+		break;
 	}
 }
 
@@ -223,12 +241,33 @@ static int pass_compare(const void *a, const void *b)
 	return first < second ? 1 : first > second ? -1 : 0;
 }
 
+/* after a draw of the traced frame (HALO_GPU_PASS_TIMING=3) */
+static void draw_traced(const struct command *command)
+{
+	uint64_t flushed, now;
+
+	if (!draw_trace || pass_frames_total != PASS_REPORT_FRAMES * 5 ||
+		glthread_call_kind(command->function) != _glthread_call_draw)
+	{
+		return;
+	}
+	glthread_driver_flush();
+	flushed = monotonic_ns();
+	glthread_driver_finish();
+	now = monotonic_ns();
+	host_logf(HOST_LOG_INFO, "draw: pass %2u framebuffer %3u program %4d count %6d gpu %7.3f ms",
+		pass_index, pass_framebuffer, glthread_driver_integer(GL_CURRENT_PROGRAM),
+		glthread_draw_count(command->function, command + 1), (now - flushed) / 1e6);
+}
+
 static void pass_frame(void)
 {
 	uint64_t total = 0, gpu = 0;
 	int index;
 
 	pass_end();
+	pass_frames_total++;
+	pass_index = 0;
 	if (++pass_frames < PASS_REPORT_FRAMES)
 		return;
 	for (index = 0; index < pass_count; index++)
@@ -404,6 +443,8 @@ static void *gl_thread_main(void *unused)
 				if (pass_timing)
 					pass_call(command);
 				glthread_replay(command->function, command + 1);
+				if (pass_timing)
+					draw_traced(command);
 				if (command->flags & COMMAND_EXTERNAL)
 				{
 					/* the pointer follows the arguments, the command's last 8 bytes */
@@ -968,6 +1009,8 @@ static int glthread_enabled(void)
 
 		enabled = !(setting && *setting == '0');
 		pass_timing = timing && *timing && *timing != '0';
+		pass_trace = timing && (*timing == '2' || *timing == '3');
+		draw_trace = timing && *timing == '3';
 		if (frames && *frames)
 			frames_ahead = (uint32_t)atoi(frames);
 	}

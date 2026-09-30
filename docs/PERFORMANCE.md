@@ -82,6 +82,7 @@ little difference to the frame rate.
 | Model LOD scaling (`display.model_detail` 0.5) | a30, 0.75 | 24.0 | 25.3 |
 | Shadows in two passes | a30, 0.75 | 25.3 | 25.7 |
 | Shadow blur folded into the projection shader | a30, 0.75 | 25.7 | 31–32 |
+| Vertex shaders write only what the pixel shader reads, point size only for points | a30, 0.75 | 31–32 | 36 |
 
 Notes on the steps:
 
@@ -118,6 +119,20 @@ Notes on the steps:
   that projects the shadow removed those passes, which took a30 from 25.7 to
   31–32 fps. For comparison, turning the blur off entirely gave about 34 to
   35 fps, and turning the shadows off about 38.
+- **Vertex shaders sized to their pixel shaders.** Arm's Mali Offline
+  Compiler (`malioc -c Mali-G31`) showed every translated vertex shader bound
+  by load/store (21 to 33 cycles a vertex) rather than arithmetic (3 to 24).
+  The translator wrote every Xbox output register (four texture coordinates,
+  four colours, fog) and the point size for every vertex. Writing
+  `gl_PointSize` stops the Mali compiler from splitting the shader into a
+  position shader and a varying shader, so every vertex paid the full cost,
+  including those of triangles culled as back-facing or off screen. Now each
+  program's vertex shader writes only the outputs its pixel shader reads, and
+  the point size only for point draws. One shader went from 22 load/store
+  cycles a vertex to 1 for the position shader and 7 for the rest. The GPU's
+  vertex and tiler time in a30 fell from about 23 to 13.5 ms a frame, the
+  driver's CPU time a draw from 26 to 19 µs, and a30 rose from 31–32 to 36
+  fps.
 
 ## What did not help, or was not the limit
 
@@ -149,9 +164,11 @@ Notes on the steps:
 
 ## Where the time goes now
 
-At the default render scale of 0.75 the GL thread's time in the driver, 23
-to 28 ms a frame, is the limit in busy scenes. The ideas with the most
-expected payoff:
+The goal is 60 fps (16.7 ms a frame) in the a30 opening. Measured there at
+the default render scale of 0.75, the GPU's vertex and tiler work is about
+13.5 ms a frame and its pixel work about 16 ms; the GL thread's driver time
+is about 16 ms plus waits for the GPU; the game's own thread about 19 ms. All
+of them have to come down. The ideas with the most expected payoff:
 
 1. Draw the HUD at full resolution when the render scale is below 1.
 2. Cut the driver's per-draw cost further: merge uniform uploads into one
