@@ -827,6 +827,7 @@ int host_gl_has_extension(const char *name);
 uint32_t host_gl_read_buffer_word(uint32_t buffer, uint32_t offset);
 void host_gl_buffer_write(uint32_t target, uint32_t offset, uint32_t size, const void *data);
 void host_gl_buffer_persistent(uint32_t target, uint32_t size);
+void host_gl_buffer_write_to(uint32_t buffer, uint32_t target, uint32_t offset, uint32_t size, const void *data);
 void host_gl_fence_frame(uint32_t slot);
 void host_gl_wait_frame(uint32_t slot);
 uint32_t host_sdl_gl_create_context(uint32_t window);
@@ -850,6 +851,31 @@ static void queued_gl_buffer_write(uint32_t target, uint32_t offset, uint32_t si
 {
 	struct buffer_write *write = host_begin(run_buffer_write, sizeof(*write) + size);
 
+	write->target = target;
+	write->offset = offset;
+	write->size = size;
+	memcpy(write + 1, data, size);
+	glthread_end();
+}
+
+struct buffer_write_to
+{
+	uint32_t buffer, target, offset, size;
+};
+
+static void run_buffer_write_to(const void *data)
+{
+	const struct buffer_write_to *write = data;
+
+	host_gl_buffer_write_to(write->buffer, write->target, write->offset, write->size, write + 1);
+}
+
+static void queued_gl_buffer_write_to(uint32_t buffer, uint32_t target, uint32_t offset, uint32_t size,
+	const void *data)
+{
+	struct buffer_write_to *write = host_begin(run_buffer_write_to, sizeof(*write) + size);
+
+	write->buffer = buffer;
 	write->target = target;
 	write->offset = offset;
 	write->size = size;
@@ -1007,6 +1033,8 @@ static const char *host_operation_name(void (*run)(const void *))
 {
 	if (run == run_buffer_write)
 		return "buffer write";
+	if (run == run_buffer_write_to)
+		return "buffer write (named)";
 	if (run == run_fence_frame)
 		return "fence";
 	if (run == run_wait_frame)
@@ -1157,6 +1185,7 @@ void *host_import_wrap(const char *name, void *function)
 		{ "host_gl_read_buffer_word", (void *)synced_gl_read_buffer_word },
 		{ "host_gl_buffer_write", (void *)queued_gl_buffer_write },
 		{ "host_gl_buffer_persistent", (void *)queued_gl_buffer_persistent },
+		{ "host_gl_buffer_write_to", (void *)queued_gl_buffer_write_to },
 		{ "host_gl_fence_frame", (void *)queued_gl_fence_frame },
 		{ "host_gl_wait_frame", (void *)queued_gl_wait_frame },
 		{ "host_gl_visibility_frame", (void *)queued_gl_visibility_frame },

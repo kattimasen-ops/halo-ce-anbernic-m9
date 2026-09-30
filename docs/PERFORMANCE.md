@@ -87,6 +87,7 @@ little difference to the frame rate.
 | Skinned models' constants in a uniform block; streaming buffers mapped for good | a30, 0.75 | 40 | 40 (GL thread time down, GPU now close to the limit) |
 | Opaque models drawn sorted by shader | a30, 0.75 | 40 | 40 (program switches 190 to 109 a frame) |
 | Water bump map levels drawn into the sampled texture, not copied | a30, 0.75 | 40 | 49 |
+| Skinned models' constants in two blocks (per part, and per object's nodes, written only as far as the nodes go); streaming buffers mapped as cached memory | a30, 0.75 | 49 | 49–51 (buffer writes 2.9 ms to 1.9 ms a frame) |
 
 Notes on the steps:
 
@@ -179,6 +180,20 @@ Notes on the steps:
   and the texture binds from 594 to 393; on its own the frame rate stayed
   at 40, because the water's stall was the limit. Both the game's thread and
   the GL thread are now busy all of the frame, at about 20 ms each.
+
+- **Writing to the GPU's buffers.** Skipping the copies into the streaming
+  buffers (a wrong picture) took the buffer writes from 2.7 ms to 0.09 ms a
+  frame: the time was the copying itself, into memory the CPU does not cache
+  (about 370 MB/s), some 1 MB a frame of vertex constants. A mapping that may
+  also be read is cached memory on Mali: writes then cost about 3 µs instead
+  of 6. The skinned models' constants are now two blocks: the registers below
+  60 (per part) and the object's nodes from 60, written only as far as its
+  nodes go and found again when the same nodes are bound again.
+- **Where a30 stands.** At about 50 fps the game's thread and the GL thread
+  are both busy all the frame (about 20 ms each). The GL thread's time is
+  the driver's (about 17 µs a draw, some 460 draws), the buffer writes, and
+  waits at changes of render target; the game's thread spends about a
+  quarter of its time in the renderer's per-draw work (`prepare_draw`).
 
 ## What did not help, or was not the limit
 
