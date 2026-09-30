@@ -85,6 +85,8 @@ little difference to the frame rate.
 | Vertex shaders write only what the pixel shader reads, point size only for points | a30, 0.75 | 31–32 | 36 |
 | Water bump map at the frame's start, alpha test dropped where it cannot fail, depth not written out | a30, 0.75 | 36 | 40 |
 | Skinned models' constants in a uniform block; streaming buffers mapped for good | a30, 0.75 | 40 | 40 (GL thread time down, GPU now close to the limit) |
+| Opaque models drawn sorted by shader | a30, 0.75 | 40 | 40 (program switches 190 to 109 a frame) |
+| Water bump map levels drawn into the sampled texture, not copied | a30, 0.75 | 40 | 49 |
 
 Notes on the steps:
 
@@ -160,6 +162,23 @@ Notes on the steps:
   finds, a wrong picture) took the frame rate to 53–55 fps: program switches
   are the driver's biggest cost per draw. Drawing the models sorted by
   shader is the next step.
+
+- **A stall hidden in the water.** Turning the water off took a30 from 40 to
+  52 fps, though its drawing costs the GPU about 1 ms. The game draws the
+  water's bump map one mip level at a time into four render targets, and
+  the port copied them into one mipmapped texture (`glCopyImageSubData`)
+  whenever the water was drawn, twice a frame: copies between render targets
+  made Mali's driver wait for the GPU in the middle of the frame, taking the
+  overlap of the CPU and the GPU away. The levels are now drawn into the
+  sampled texture's own levels, and the copies are gone: 49 fps. Copying by
+  blits instead was worse (30 fps).
+- **Models sorted by shader.** Objects are kept between the model phase's
+  begin and end and their parts drawn sorted by shader, permutation and
+  geometry; objects with transparent parts or decals (drawn at once) are
+  drawn in place. It cut the program switches from about 190 to 109 a frame
+  and the texture binds from 594 to 393; on its own the frame rate stayed
+  at 40, because the water's stall was the limit. Both the game's thread and
+  the GL thread are now busy all of the frame, at about 20 ms each.
 
 ## What did not help, or was not the limit
 

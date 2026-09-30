@@ -130,6 +130,16 @@ These are in `port/linux/src`, for `HALO_ANDROID` builds:
   (`GL_EXT_buffer_storage`, `host_gl_buffer_persistent`): a write is a copy
   rather than a map and an unmap.
 
+- Opaque models are drawn sorted by shader rather than object by object
+  (`debug.sort_models`, `rasterizer_xbox_models.c`): the objects that can be
+  drawn in any order are kept between `rasterizer_models_begin` and `_end`
+  and drawn together, which spares the driver most of its changes of
+  program and textures.
+- A texture whose mip levels the game draws one by one (the water's bump
+  map) has them drawn into its own levels (`mip_composite_get`): copying
+  them from separate targets made the driver wait for the GPU in the middle
+  of the frame, some 6 ms a frame where water was in view.
+
 ### Frame rates
 
 Anbernic RG35XX H, Knulli Gladiator II, stock thermal limits, frames per
@@ -140,7 +150,7 @@ second over the last 40 to 60 seconds of a level's opening:
 | Main menu | 60 | 60 |
 | c10 (swamp) | 26 | 44 |
 | b30 (beach, battle) | 26 | 34–42 |
-| a30 (level opening) | 20 | 40 |
+| a30 (level opening) | 20 | 49 |
 
 The tools below (`HALO_GPU_PASS_TIMING`, `HALO_GL_TIMING`) show which of the
 GPU, the GL thread and the game's thread limits a scene.

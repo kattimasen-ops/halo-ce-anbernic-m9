@@ -368,7 +368,7 @@ index baa28789..f1d55fcf 100644
  #define HALO_GUEST_ABI_VERSION 1
  
 diff --git a/port/linux/src/d3d8_gl.c b/port/linux/src/d3d8_gl.c
-index 36c5f238..07b55c08 100644
+index 36c5f238..25339b97 100644
 --- a/port/linux/src/d3d8_gl.c
 +++ b/port/linux/src/d3d8_gl.c
 @@ -25,8 +25,10 @@ Conventions carried over from the Xbox:
@@ -457,7 +457,15 @@ index 36c5f238..07b55c08 100644
  	GLint viewport_scale;
  	GLint viewport_offset;
  	GLint point_size;
-@@ -323,6 +352,10 @@ struct gl_device
+@@ -258,6 +287,7 @@ struct framebuffer_entry
+ {
+ 	struct framebuffer_entry *next;
+ 	GLuint color;
++	GLint color_level;
+ 	GLuint depth;
+ 	GLuint framebuffer;
+ };
+@@ -323,6 +353,10 @@ struct gl_device
  	float attributes[XGPU_VERTEX_ATTRIBUTE_COUNT][4];
  	BOOL immediate_active;
  	D3DPRIMITIVETYPE immediate_type;
@@ -468,7 +476,7 @@ index 36c5f238..07b55c08 100644
  	float *immediate_vertices;
  	unsigned long immediate_count;
  	unsigned long immediate_capacity;
-@@ -333,6 +366,10 @@ struct gl_device
+@@ -333,6 +367,10 @@ struct gl_device
  	GLuint stream_buffers[STREAM_BUFFER_RING];
  	GLuint index_buffers[STREAM_BUFFER_RING];
  	unsigned long buffer_ring;
@@ -479,7 +487,7 @@ index 36c5f238..07b55c08 100644
  #endif
  	unsigned long stream_offset;
  	GLuint index_buffer;
-@@ -347,12 +384,14 @@ struct gl_device
+@@ -347,12 +385,14 @@ struct gl_device
  	GLuint active_query;
  	BOOL visibility_test_active;
  #ifdef HALO_ANDROID
@@ -497,7 +505,7 @@ index 36c5f238..07b55c08 100644
  #else
  	/* each test's latest result, which the GPU writes (as a query buffer)
  	when the test's draws are done: the game waits for results at the start
-@@ -410,6 +449,16 @@ static struct
+@@ -410,6 +450,17 @@ static struct
  	const char *skip_vertex_shaders;
  	const char *dump_shaders;
  	BOOL statistics;
@@ -510,11 +518,12 @@ index 36c5f238..07b55c08 100644
 +	float lod_bias;
 +	long draw_callers;
 +	BOOL alpha_test_elision;
++	BOOL sort_models;
 +#endif
  } debug_settings;
  
  /* ---------- GL state cache
-@@ -468,6 +517,12 @@ static struct
+@@ -468,6 +519,12 @@ static struct
  	float attribute_values[XGPU_VERTEX_ATTRIBUTE_COUNT][4];
  } gl_state;
  
@@ -527,7 +536,7 @@ index 36c5f238..07b55c08 100644
  void xgpu_gl_state_invalidate(void)
  {
  	memset(&gl_state, 0xff, sizeof(gl_state));
-@@ -528,12 +583,15 @@ static void state_sampler(int unit, GLuint sampler)
+@@ -528,12 +585,15 @@ static void state_sampler(int unit, GLuint sampler)
  	}
  }
  
@@ -544,7 +553,7 @@ index 36c5f238..07b55c08 100644
  	}
  }
  
-@@ -541,8 +599,8 @@ static void state_element_array_buffer(GLuint buffer)
+@@ -541,8 +601,8 @@ static void state_element_array_buffer(GLuint buffer)
  {
  	if (gl_state.element_array_buffer != buffer)
  	{
@@ -554,7 +563,7 @@ index 36c5f238..07b55c08 100644
  	}
  }
  
-@@ -553,8 +611,8 @@ static void state_attribute_pointer(GLuint index, GLuint buffer, GLint size, GLe
+@@ -553,8 +613,8 @@ static void state_attribute_pointer(GLuint index, GLuint buffer, GLint size, GLe
  
  	if (gl_state.attribute_enabled[index] != 1)
  	{
@@ -564,7 +573,7 @@ index 36c5f238..07b55c08 100644
  	}
  	if (pointer->buffer == buffer && pointer->size == size && pointer->type == type &&
  		pointer->normalized == normalized && pointer->integer == (integer ? GL_TRUE : GL_FALSE) &&
-@@ -583,24 +641,24 @@ static void state_attribute_value(GLuint index, const float *value)
+@@ -583,24 +643,24 @@ static void state_attribute_value(GLuint index, const float *value)
  
  	if (gl_state.attribute_enabled[index] != 0)
  	{
@@ -592,7 +601,7 @@ index 36c5f238..07b55c08 100644
  }
  
  /* ---------- vertical blank emulation */
-@@ -700,7 +758,7 @@ void WINAPI D3DDevice_BlockUntilVerticalBlank(void)
+@@ -700,7 +760,7 @@ void WINAPI D3DDevice_BlockUntilVerticalBlank(void)
  
  /* ---------- GL helpers */
  
@@ -601,7 +610,7 @@ index 36c5f238..07b55c08 100644
  {
  	GLuint shader = glCreateShader(type);
  	GLint status = 0;
-@@ -720,6 +778,191 @@ static GLuint compile_shader(GLenum type, const char *source, const char *what)
+@@ -720,6 +780,191 @@ static GLuint compile_shader(GLenum type, const char *source, const char *what)
  	return shader;
  }
  
@@ -793,7 +802,55 @@ index 36c5f238..07b55c08 100644
  #ifndef HALO_ANDROID
  static void GLAPIENTRY gl_debug_callback(GLenum source, GLenum type, GLuint id, GLenum severity,
  	GLsizei length, const GLchar *message, const void *user)
-@@ -923,10 +1166,12 @@ static void gl_initialize(void)
+@@ -809,23 +1054,24 @@ struct xgpu_render_target *xgpu_render_target_find(unsigned long data)
+ 	return best ? &best->target : NULL;
+ }
+ 
+-static GLuint framebuffer_get(GLuint color, GLuint depth)
++static GLuint framebuffer_get(GLuint color, GLint color_level, GLuint depth)
+ {
+ 	struct framebuffer_entry *entry;
+ 	GLenum draw_buffer = color ? GL_COLOR_ATTACHMENT0 : GL_NONE;
+ 
+ 	for (entry = framebuffers; entry; entry = entry->next)
+ 	{
+-		if (entry->color == color && entry->depth == depth)
++		if (entry->color == color && entry->color_level == color_level && entry->depth == depth)
+ 			return entry->framebuffer;
+ 	}
+ 	entry = calloc(1, sizeof(*entry));
+ 	entry->color = color;
++	entry->color_level = color_level;
+ 	entry->depth = depth;
+ 	glGenFramebuffers(1, &entry->framebuffer);
+ 	glBindFramebuffer(GL_FRAMEBUFFER, entry->framebuffer);
+ 	if (color)
+-		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color, 0);
++		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color, color_level);
+ 	if (depth)
+ 		glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, depth, 0);
+ 	glDrawBuffers(1, &draw_buffer);
+@@ -862,7 +1108,8 @@ static BOOL bind_targets(BOOL *has_depth)
+ 	/* viewports and clears are in the targets' units (render_target_get) */
+ 	target_scale[0] = color ? color->target.scale[0] : depth->target.scale[0];
+ 	target_scale[1] = color ? color->target.scale[1] : depth->target.scale[1];
+-	state_framebuffer(framebuffer_get(color ? color->target.texture : 0, depth ? depth->target.texture : 0));
++	state_framebuffer(framebuffer_get(color ? color->target.texture : 0, color ? color->target.level : 0,
++		depth ? depth->target.texture : 0));
+ 	*has_depth = depth != NULL;
+ 	return TRUE;
+ }
+@@ -883,6 +1130,9 @@ static void gl_initialize(void)
+ 		/* clip control is emulated in the vertex shader (nv2a_vsh.c) */
+ 		xgpu_capabilities.copy_image = es32 || host_gl_has_extension("GL_EXT_copy_image") ||
+ 			host_gl_has_extension("GL_OES_copy_image");
++		/* HALO_DEBUG_COPY_BY_BLIT: copies of render targets by blits, to measure them */
++		if (getenv("HALO_DEBUG_COPY_BY_BLIT"))
++			xgpu_capabilities.copy_image = FALSE;
+ 		xgpu_capabilities.border_clamp = es32 || host_gl_has_extension("GL_EXT_texture_border_clamp") ||
+ 			host_gl_has_extension("GL_OES_texture_border_clamp");
+ 		xgpu_capabilities.anisotropy = host_gl_has_extension("GL_EXT_texture_filter_anisotropic");
+@@ -923,10 +1173,12 @@ static void gl_initialize(void)
  		glGenBuffers(STREAM_BUFFER_RING, device.index_buffers);
  		for (ring = 0; ring < STREAM_BUFFER_RING; ring++)
  		{
@@ -808,7 +865,7 @@ index 36c5f238..07b55c08 100644
  		}
  		device.stream_buffer = device.stream_buffers[0];
  		device.index_buffer = device.index_buffers[0];
-@@ -971,6 +1216,24 @@ static void gl_initialize(void)
+@@ -971,6 +1223,25 @@ static void gl_initialize(void)
  	debug_settings.dump_shaders = *config_string("debug.gpu_dump_shaders") ?
  		config_string("debug.gpu_dump_shaders") : NULL;
  	debug_settings.statistics = config_boolean("debug.gpu_stats");
@@ -829,11 +886,12 @@ index 36c5f238..07b55c08 100644
 +	debug_settings.lod_bias = (float)config_real("debug.lod_bias");
 +	debug_settings.draw_callers = config_integer("debug.draw_callers");
 +	debug_settings.alpha_test_elision = config_boolean("debug.alpha_test_elision");
++	debug_settings.sort_models = config_boolean("debug.sort_models");
 +#endif
  	xgpu_gl_state_invalidate();
  	device.gl_ready = TRUE;
  }
-@@ -1378,8 +1641,13 @@ HRESULT WINAPI D3DDevice_EndVisibilityTest(DWORD index)
+@@ -1378,8 +1649,13 @@ HRESULT WINAPI D3DDevice_EndVisibilityTest(DWORD index)
  #ifdef HALO_ANDROID
  	if (xgpu_capabilities.atomic_counters)
  	{
@@ -848,7 +906,7 @@ index 36c5f238..07b55c08 100644
  		return S_OK;
  	}
  #endif
-@@ -1434,9 +1702,10 @@ HRESULT WINAPI D3DDevice_GetVisibilityTestResult(DWORD index, UINT *result, ULON
+@@ -1434,9 +1710,10 @@ HRESULT WINAPI D3DDevice_GetVisibilityTestResult(DWORD index, UINT *result, ULON
  #ifdef HALO_ANDROID
  	if (xgpu_capabilities.atomic_counters)
  	{
@@ -862,7 +920,7 @@ index 36c5f238..07b55c08 100644
  		if (result)
  			*result = samples;
  		return S_OK;
-@@ -1791,36 +2060,92 @@ static unsigned long hash_words(const void *data, unsigned long size)
+@@ -1791,36 +2068,92 @@ static unsigned long hash_words(const void *data, unsigned long size)
  	return hash;
  }
  
@@ -973,7 +1031,7 @@ index 36c5f238..07b55c08 100644
  {
  	/* consecutive draws mostly use the same pixel shader */
  	static struct fragment_entry *last;
-@@ -1830,7 +2155,7 @@ static GLuint fragment_shader_get(const struct nv2a_pixel_shader_key *key)
+@@ -1830,7 +2163,7 @@ static GLuint fragment_shader_get(const struct nv2a_pixel_shader_key *key)
  	char *source;
  
  	if (last && !memcmp(&last->key, key, sizeof(*key)))
@@ -982,7 +1040,7 @@ index 36c5f238..07b55c08 100644
  	hash = hash_words(key, sizeof(*key));
  	bucket = &fragment_buckets[hash % FRAGMENT_BUCKETS];
  	for (entry = *bucket; entry; entry = entry->next)
-@@ -1838,7 +2163,7 @@ static GLuint fragment_shader_get(const struct nv2a_pixel_shader_key *key)
+@@ -1838,7 +2171,7 @@ static GLuint fragment_shader_get(const struct nv2a_pixel_shader_key *key)
  		if (entry->hash == hash && !memcmp(&entry->key, key, sizeof(*key)))
  		{
  			last = entry;
@@ -991,7 +1049,7 @@ index 36c5f238..07b55c08 100644
  		}
  	}
  	entry = calloc(1, sizeof(*entry));
-@@ -1846,6 +2171,7 @@ static GLuint fragment_shader_get(const struct nv2a_pixel_shader_key *key)
+@@ -1846,6 +2179,7 @@ static GLuint fragment_shader_get(const struct nv2a_pixel_shader_key *key)
  	entry->key = *key;
  	source = nv2a_pixel_shader_to_glsl(key);
  	entry->shader = compile_shader(GL_FRAGMENT_SHADER, source, "pixel");
@@ -999,7 +1057,7 @@ index 36c5f238..07b55c08 100644
  	if (debug_settings.dump_shaders)
  	{
  		char path[512];
-@@ -1857,12 +2183,13 @@ static GLuint fragment_shader_get(const struct nv2a_pixel_shader_key *key)
+@@ -1857,12 +2191,13 @@ static GLuint fragment_shader_get(const struct nv2a_pixel_shader_key *key)
  			fputs(source, file);
  			fclose(file);
  		}
@@ -1014,7 +1072,7 @@ index 36c5f238..07b55c08 100644
  }
  
  static struct program_entry *program_get(GLuint vertex_shader, GLuint fragment_shader)
-@@ -1895,11 +2222,39 @@ static struct program_entry *program_get(GLuint vertex_shader, GLuint fragment_s
+@@ -1895,11 +2230,39 @@ static struct program_entry *program_get(GLuint vertex_shader, GLuint fragment_s
  	if (!vertex_shader || !fragment_shader)
  		return NULL;
  
@@ -1054,7 +1112,7 @@ index 36c5f238..07b55c08 100644
  	if (!status)
  	{
  		char log[4096];
-@@ -1912,6 +2267,21 @@ static struct program_entry *program_get(GLuint vertex_shader, GLuint fragment_s
+@@ -1912,6 +2275,21 @@ static struct program_entry *program_get(GLuint vertex_shader, GLuint fragment_s
  	state_program(entry->program);
  	entry->constants = glGetUniformLocation(entry->program, "c");
  	entry->constant_count = XGPU_VERTEX_CONSTANT_COUNT;
@@ -1076,7 +1134,7 @@ index 36c5f238..07b55c08 100644
  	if (entry->constants >= 0)
  	{
  		unsigned long index;
-@@ -1962,6 +2332,8 @@ static struct program_entry *program_get(GLuint vertex_shader, GLuint fragment_s
+@@ -1962,6 +2340,8 @@ static struct program_entry *program_get(GLuint vertex_shader, GLuint fragment_s
  		glUniform1i(glGetUniformLocation(entry->program, name), stage);
  	}
  	last = entry;
@@ -1085,7 +1143,7 @@ index 36c5f238..07b55c08 100644
  	return entry;
  }
  
-@@ -1988,11 +2360,51 @@ static GLenum address_mode(DWORD mode)
+@@ -1988,11 +2368,51 @@ static GLenum address_mode(DWORD mode)
  	}
  }
  
@@ -1138,7 +1196,7 @@ index 36c5f238..07b55c08 100644
  	GLuint sampler = device.samplers[stage];
  	DWORD *state = D3D__TextureState[stage];
  	DWORD min_filter = state[D3DTSS_MINFILTER];
-@@ -2012,9 +2424,23 @@ static void configure_sampler(int stage, BOOL mipmapped)
+@@ -2012,9 +2432,23 @@ static void configure_sampler(int stage, BOOL mipmapped)
  	inputs[8] = state[D3DTSS_MAXANISOTROPY];
  	inputs[9] = state[D3DTSS_BORDERCOLOR];
  	if (configured_valid[stage] && !memcmp(configured[stage], inputs, sizeof(inputs)))
@@ -1163,7 +1221,7 @@ index 36c5f238..07b55c08 100644
  
  	if (min_filter == D3DTEXF_POINT)
  		minification = mip_filter == D3DTEXF_NONE ? GL_NEAREST :
-@@ -2047,6 +2473,7 @@ static void configure_sampler(int stage, BOOL mipmapped)
+@@ -2047,6 +2481,7 @@ static void configure_sampler(int stage, BOOL mipmapped)
  	color_to_vec4(state[D3DTSS_BORDERCOLOR], border);
  	glSamplerParameterfv(sampler, GL_TEXTURE_BORDER_COLOR, border);
  #endif
@@ -1171,10 +1229,91 @@ index 36c5f238..07b55c08 100644
  }
  
  
-@@ -2154,6 +2581,47 @@ static GLuint mip_composite_get(const struct xgpu_texture_description *descripti
+@@ -2062,12 +2497,14 @@ struct mip_composite
+ 	struct mip_composite *next;
+ 	unsigned long data, width, height, levels;
+ 	GLuint texture;
++	/* the frame it was last brought up to date in, plus one */
++	unsigned long frame;
+ };
+ 
+ static struct mip_composite *mip_composites;
+ 
+ #ifdef HALO_ANDROID
+-static GLuint framebuffer_get(GLuint color, GLuint depth);
++static GLuint framebuffer_get(GLuint color, GLint color_level, GLuint depth);
+ 
+ /* glCopyImageSubData for ES 3.0/3.1 contexts without the extension */
+ static void copy_level_by_blit(GLuint source, GLuint destination, GLint level, GLsizei width, GLsizei height)
+@@ -2076,7 +2513,7 @@ static void copy_level_by_blit(GLuint source, GLuint destination, GLint level, G
+ 
+ 	if (!draw_framebuffer)
+ 		glGenFramebuffers(1, &draw_framebuffer);
+-	glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer_get(source, 0));
++	glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer_get(source, 0, 0));
+ 	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw_framebuffer);
+ 	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, destination, level);
+ 	glDisable(GL_SCISSOR_TEST);
+@@ -2121,6 +2558,11 @@ static GLuint mip_composite_get(const struct xgpu_texture_description *descripti
+ 		composite->next = mip_composites;
+ 		mip_composites = composite;
+ 	}
++	/* the game draws its levels once a frame, and a frame binds it more than
++	once (the water's two draws) */
++	if (composite->frame == device.frame + 1)
++		return composite->texture;
++	composite->frame = device.frame + 1;
+ 	for (level = 0; level < description->levels; level++)
+ 	{
+ 		unsigned long width = description->width >> level ? description->width >> level : 1;
+@@ -2131,6 +2573,12 @@ static GLuint mip_composite_get(const struct xgpu_texture_description *descripti
+ 		if (!target || target->width != width || target->height != height ||
+ 			target->gl_width != width || target->gl_height != height)
+ 			break;
++		if (target->texture == composite->texture && target->level == (GLint)level)
++		{
++			/* drawn into the composite itself */
++			rendered_levels++;
++			continue;
++		}
+ #ifdef HALO_ANDROID
+ 		if (!xgpu_capabilities.copy_image)
+ 		{
+@@ -2138,9 +2586,15 @@ static GLuint mip_composite_get(const struct xgpu_texture_description *descripti
+ 		}
+ 		else
+ #endif
+-		glCopyImageSubData(target->texture, GL_TEXTURE_2D, 0, 0, 0, 0,
++		glCopyImageSubData(target->texture, GL_TEXTURE_2D, (GLint)target->level, 0, 0, 0,
+ 			composite->texture, GL_TEXTURE_2D, (GLint)level, 0, 0, 0, (GLsizei)width, (GLsizei)height, 1);
+ 		rendered_levels++;
++		/* from the next frame the game draws this level into the composite
++		itself: copies between render targets made the driver wait for the
++		GPU in the middle of the frame. The target's own texture is left be
++		(a framebuffer may still name it). */
++		target->texture = composite->texture;
++		target->level = (GLint)level;
+ 	}
+ 	glBindTexture(GL_TEXTURE_2D, composite->texture);
+ 	/* levels the game did not render come from the ones it did */
+@@ -2154,6 +2608,61 @@ static GLuint mip_composite_get(const struct xgpu_texture_description *descripti
  	return composite->texture;
  }
  
++#ifdef HALO_ANDROID
++/* debug.draw_callers, for the sorting's statistics */
++int xgpu_debug_draw_callers(void)
++{
++	return (int)debug_settings.draw_callers;
++}
++
++/* debug.sort_models (source/rasterizer/xbox/rasterizer_xbox_models.c) */
++int xgpu_sort_models(void)
++{
++	return debug_settings.sort_models;
++}
++#endif
++
 +#ifdef HALO_ANDROID
 +/* xgpu_sample_blurred: the pixel shaders read stage 0 blurred */
 +static int sample_blurred;
@@ -1219,7 +1358,7 @@ index 36c5f238..07b55c08 100644
  static void bind_textures(struct nv2a_pixel_shader_key *key, float texture_scale[4][4])
  {
  	int stage;
-@@ -2165,6 +2633,7 @@ static void bind_textures(struct nv2a_pixel_shader_key *key, float texture_scale
+@@ -2165,6 +2674,7 @@ static void bind_textures(struct nv2a_pixel_shader_key *key, float texture_scale
  
  		texture_scale[stage][0] = texture_scale[stage][1] = 1.0f;
  		texture_scale[stage][2] = texture_scale[stage][3] = 1.0f;
@@ -1227,7 +1366,7 @@ index 36c5f238..07b55c08 100644
  		if (!texture || !texture->Data || mode == 0 || mode == 0x04 || mode == 0x05 || mode == 0x11)
  		{
  			state_texture(stage, GL_TEXTURE_2D, 0);
-@@ -2199,21 +2668,70 @@ static void bind_textures(struct nv2a_pixel_shader_key *key, float texture_scale
+@@ -2199,21 +2709,70 @@ static void bind_textures(struct nv2a_pixel_shader_key *key, float texture_scale
  					(const D3DCOLOR *)PLATFORM_PHYSICAL_TO_VIRTUAL(device.palettes[stage]->Data) : NULL;
  
  				gl_texture = xgpu_texture_get((const DWORD *)texture, palette, &gl_target, &description);
@@ -1301,7 +1440,7 @@ index 36c5f238..07b55c08 100644
  static GLenum stencil_operation(DWORD operation)
  {
  	/* Xbox stencil operations are the GL enumerants, plus 0 for ZERO */
-@@ -2257,6 +2775,12 @@ static void apply_raster_state(BOOL has_depth)
+@@ -2257,6 +2816,12 @@ static void apply_raster_state(BOOL has_depth)
  	what keeps a split-screen window's geometry from bleeding across the divider */
  	/* (glScissor takes the corner and the size, as glViewport does) */
  	memcpy(scissor, viewport, sizeof(scissor));
@@ -1314,7 +1453,7 @@ index 36c5f238..07b55c08 100644
  	if (memcmp(gl_state.scissor, scissor, sizeof(scissor)))
  	{
  		memcpy(gl_state.scissor, scissor, sizeof(scissor));
-@@ -2443,6 +2967,43 @@ static DWORD draw_uniform_inputs[DRAW_UNIFORM_INPUT_COUNT];
+@@ -2443,6 +3008,43 @@ static DWORD draw_uniform_inputs[DRAW_UNIFORM_INPUT_COUNT];
  static struct draw_uniforms draw_uniforms;
  static unsigned long draw_uniforms_serial;
  
@@ -1358,7 +1497,7 @@ index 36c5f238..07b55c08 100644
  /* sets a program's uniform unless it already holds value */
  static void uniform_vec4(GLint location, float *shadow, const float *value, int count)
  {
-@@ -2468,6 +3029,8 @@ static struct program_entry *prepare_draw(BOOL immediate)
+@@ -2468,6 +3070,8 @@ static struct program_entry *prepare_draw(BOOL immediate)
  	struct draw_uniforms uniforms;
  	BOOL has_depth = FALSE;
  	int stage;
@@ -1367,7 +1506,7 @@ index 36c5f238..07b55c08 100644
  
  	if (!device.gl_ready || !program || !device.vertex_shader || !program->instructions)
  	{
-@@ -2491,7 +3054,8 @@ static struct program_entry *prepare_draw(BOOL immediate)
+@@ -2491,7 +3095,8 @@ static struct program_entry *prepare_draw(BOOL immediate)
  		stats.skipped_no_target++;
  		return NULL;
  	}
@@ -1377,7 +1516,7 @@ index 36c5f238..07b55c08 100644
  
  	memset(&key, 0, sizeof(key));
  	memcpy(key.combiner_state, D3D__RenderState, sizeof(key.combiner_state));
-@@ -2511,9 +3075,18 @@ static struct program_entry *prepare_draw(BOOL immediate)
+@@ -2511,9 +3116,18 @@ static struct program_entry *prepare_draw(BOOL immediate)
  	key.fog_table_mode = (unsigned char)D3D__RenderState[D3DRS_FOGTABLEMODE];
  #ifdef HALO_ANDROID
  	key.count_samples = device.visibility_test_active && xgpu_capabilities.atomic_counters;
@@ -1397,7 +1536,7 @@ index 36c5f238..07b55c08 100644
  	if (!entry)
  	{
  		stats.skipped_link++;
-@@ -2525,13 +3098,18 @@ static struct program_entry *prepare_draw(BOOL immediate)
+@@ -2525,13 +3139,18 @@ static struct program_entry *prepare_draw(BOOL immediate)
  		stats.immediate_draws++;
  	else
  		stats.draws++;
@@ -1417,7 +1556,7 @@ index 36c5f238..07b55c08 100644
  	if (entry->constants >= 0 && entry->constants_serial != constants_serial)
  	{
  		unsigned long first = entry->constant_count, last = 0, index;
-@@ -2646,7 +3224,12 @@ static struct program_entry *prepare_draw(BOOL immediate)
+@@ -2646,7 +3265,12 @@ static struct program_entry *prepare_draw(BOOL immediate)
  				converted->bump_luminance[stage][0] = dword_to_float(state[D3DTSS_BUMPENVLSCALE]);
  				converted->bump_luminance[stage][1] = dword_to_float(state[D3DTSS_BUMPENVLOFFSET]);
  				converted->bump_luminance[stage][2] = converted->bump_luminance[stage][3] = 0.0f;
@@ -1431,7 +1570,7 @@ index 36c5f238..07b55c08 100644
  			}
  			converted->screen_offset = (float)UI_OFFSET;
  		}
-@@ -3024,8 +3607,16 @@ static void stream_reserve(unsigned long size)
+@@ -3024,8 +3648,16 @@ static void stream_reserve(unsigned long size)
  	{
  		/* orphan the buffer and start again */
  		state_array_buffer(device.stream_buffer);
@@ -1448,7 +1587,7 @@ index 36c5f238..07b55c08 100644
  	}
  }
  
-@@ -3047,24 +3638,51 @@ static unsigned long stream_upload(const void *data, unsigned long size)
+@@ -3047,24 +3679,51 @@ static unsigned long stream_upload(const void *data, unsigned long size)
  }
  
  #ifdef HALO_ANDROID
@@ -1511,7 +1650,7 @@ index 36c5f238..07b55c08 100644
  		return stream_upload(data, size);
  	if (scratch_size < size)
  	{
-@@ -3073,17 +3691,7 @@ static unsigned long stream_upload_swizzled(const struct vertex_shader_object *d
+@@ -3073,17 +3732,7 @@ static unsigned long stream_upload_swizzled(const struct vertex_shader_object *d
  		scratch = malloc(scratch_size);
  	}
  	memcpy(scratch, data, size);
@@ -1530,7 +1669,7 @@ index 36c5f238..07b55c08 100644
  	return stream_upload(scratch, size);
  }
  #endif
-@@ -3096,7 +3704,12 @@ static unsigned long index_upload(const void *data, unsigned long size)
+@@ -3096,7 +3745,12 @@ static unsigned long index_upload(const void *data, unsigned long size)
  	state_element_array_buffer(device.index_buffer);
  	if (device.index_offset + size > INDEX_BUFFER_SIZE)
  	{
@@ -1543,7 +1682,7 @@ index 36c5f238..07b55c08 100644
  		device.index_offset = 0;
  	}
  	offset = device.index_offset;
-@@ -3143,24 +3756,22 @@ static void attribute_format(const struct vertex_element *element, GLint *size,
+@@ -3143,24 +3797,22 @@ static void attribute_format(const struct vertex_element *element, GLint *size,
  /* upload vertices [first, first + count) of every stream the declaration
  uses and point the attributes at them; attribute data then starts at
  vertex 0 of the uploaded range */
@@ -1580,7 +1719,7 @@ index 36c5f238..07b55c08 100644
  	struct vertex_shader_object *declaration = device.vertex_shader;
  	GLuint stream_buffers[16];
  	unsigned long stream_offsets[16];
-@@ -3190,6 +3801,21 @@ static void setup_streams(unsigned long first, unsigned long count)
+@@ -3190,6 +3842,21 @@ static void setup_streams(unsigned long first, unsigned long count)
  		stream_buffers[stream] = 0;
  		total += (bytes + 15) & ~15UL;
  	}
@@ -1602,7 +1741,7 @@ index 36c5f238..07b55c08 100644
  	stream_reserve(total);
  	for (index = 0; index < declaration->element_count; index++)
  	{
-@@ -3233,6 +3859,7 @@ static void setup_streams(unsigned long first, unsigned long count)
+@@ -3233,6 +3900,7 @@ static void setup_streams(unsigned long first, unsigned long count)
  		if (!enabled[index])
  			state_attribute_value(index, declaration->packed_mask & (1UL << index) ? NULL : device.attributes[index]);
  	}
@@ -1610,7 +1749,7 @@ index 36c5f238..07b55c08 100644
  }
  
  static GLenum primitive_mode(D3DPRIMITIVETYPE type)
-@@ -3290,13 +3917,273 @@ void WINAPI D3DDevice_SetIndices(D3DIndexBuffer *index_data, UINT base_vertex_in
+@@ -3290,13 +3958,273 @@ void WINAPI D3DDevice_SetIndices(D3DIndexBuffer *index_data, UINT base_vertex_in
  	D3D__IndexData = index_data ? (WORD *)index_data->Data : NULL;
  }
  
@@ -1630,8 +1769,7 @@ index 36c5f238..07b55c08 100644
 +#define QUAD_INDEX_VERTICES 8192
 +
 +static GLuint quad_index_buffer(void)
- {
--	if (!vertex_count || !prepare_draw(FALSE))
++{
 +	static GLuint buffer;
 +
 +	if (!buffer)
@@ -1683,7 +1821,8 @@ index 36c5f238..07b55c08 100644
 +};
 +
 +static struct
-+{
+ {
+-	if (!vertex_count || !prepare_draw(FALSE))
 +	BOOL pending;
 +	const struct vertex_shader_object *declaration;
 +	unsigned long stream_stride[BATCH_STREAMS];
@@ -1887,7 +2026,7 @@ index 36c5f238..07b55c08 100644
  	{
  		unsigned long count;
  		WORD *indices = quad_indices(NULL, vertex_count, &count);
-@@ -3318,8 +4205,17 @@ void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type, UINT
+@@ -3318,8 +4246,17 @@ void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type, UINT
  	WORD *indices = NULL;
  	const WORD *source = index_data;
  	GLuint index_buffer = 0;
@@ -1905,7 +2044,7 @@ index 36c5f238..07b55c08 100644
  	if (!vertex_count || !index_data || !prepare_draw(FALSE))
  		return;
  	/* quads are drawn as triangles, from indices made for the draw */
-@@ -3331,13 +4227,22 @@ void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type, UINT
+@@ -3331,13 +4268,22 @@ void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type, UINT
  	index_extent(index_data, vertex_count, generation, mirrored, &minimum, &maximum);
  	trace_draw("indexed", primitive_type, vertex_count, NULL);
  	/* (the streams from the base vertex on: index i is vertex base + i) */
@@ -1931,7 +2070,7 @@ index 36c5f238..07b55c08 100644
  		return;
  	}
  	stats.streamed_bytes += vertex_count * sizeof(WORD);
-@@ -3363,11 +4268,147 @@ void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type, UINT
+@@ -3363,11 +4309,147 @@ void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type, UINT
  	}
  #endif
  	(void)index;
@@ -2081,7 +2220,7 @@ index 36c5f238..07b55c08 100644
  /* ---------- immediate mode */
  
  void WINAPI D3DDevice_Begin(D3DPRIMITIVETYPE primitive_type)
-@@ -3397,7 +4438,10 @@ void WINAPI D3DDevice_End(void)
+@@ -3397,7 +4479,10 @@ void WINAPI D3DDevice_End(void)
  	unsigned long offset, index, count = device.immediate_count;
  	D3DPRIMITIVETYPE type = device.immediate_type;
  
@@ -2092,7 +2231,16 @@ index 36c5f238..07b55c08 100644
  	if (!count || !prepare_draw(TRUE))
  		return;
  	trace_draw("immediate", type, count, device.immediate_vertices);
-@@ -3613,6 +4657,7 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
+@@ -3567,7 +4652,7 @@ static void write_screenshot(struct render_target_entry *target)
+ 	if (!directory)
+ 		return;
+ 	pixels = malloc(image_size);
+-	glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer_get(target->target.texture, 0));
++	glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer_get(target->target.texture, target->target.level, 0));
+ 	glReadPixels(0, 0, (GLsizei)width, (GLsizei)height, GL_BGRA, GL_UNSIGNED_BYTE, pixels);
+ 	/* the display ignores destination alpha, which the game uses as scratch;
+ 	image viewers would show it as transparency */
+@@ -3613,6 +4698,7 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
  	if (screenshot_every < 0)
  		screenshot_every = config_integer("debug.screenshot_every");
  
@@ -2100,7 +2248,7 @@ index 36c5f238..07b55c08 100644
  	if (device.gl_ready)
  	{
  		struct render_target_entry *back_buffer = render_target_get(&device.back_buffer);
-@@ -3635,6 +4680,15 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
+@@ -3635,12 +4721,21 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
  		}
  		x = (window_width - width) / 2;
  		y = (window_height - height) / 2;
@@ -2116,7 +2264,14 @@ index 36c5f238..07b55c08 100644
  		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
  		glDisable(GL_SCISSOR_TEST);
  		glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-@@ -3648,12 +4702,19 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
+ 		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+ 		glClear(GL_COLOR_BUFFER_BIT);
+-		glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer_get(back_buffer->target.texture, 0));
++		glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer_get(back_buffer->target.texture, back_buffer->target.level, 0));
+ 		/* row 0 of the render target is the top of the picture */
+ 		glBlitFramebuffer(0, 0, (GLint)back_buffer->target.gl_width, (GLint)back_buffer->target.gl_height,
+ 			x, y + height, x + width, y, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+@@ -3648,12 +4743,19 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
  		xgpu_gl_state_invalidate();
  		xgpu_texture_cache_begin_frame();
  #ifdef HALO_ANDROID
@@ -2136,7 +2291,7 @@ index 36c5f238..07b55c08 100644
  		device.index_offset = 0;
  #else
  		device.stream_offset = STREAM_BUFFER_SIZE; /* orphan next frame */
-@@ -3670,6 +4731,10 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
+@@ -3670,6 +4772,10 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
  			stats.target_changes / stats.presents, stats.skipped_no_program, stats.skipped_no_target, stats.skipped_link,
  			stats.mirrored_bytes / stats.presents / 1024, stats.streamed_bytes / stats.presents / 1024);
  		memset(&stats, 0, sizeof(stats));
@@ -2450,10 +2605,10 @@ index bfb1a7b1..e123196d 100644
  	return text.buffer;
  }
 diff --git a/port/linux/src/port_config.c b/port/linux/src/port_config.c
-index 004871e3..fa6b35bc 100644
+index 004871e3..9e845eab 100644
 --- a/port/linux/src/port_config.c
 +++ b/port/linux/src/port_config.c
-@@ -73,6 +73,44 @@ static const struct config_setting config_settings[] =
+@@ -73,6 +73,47 @@ static const struct config_setting config_settings[] =
  	{ "display.screen_width", _config_integer, "0", "HALO_SCREEN_WIDTH", _environment_value, _platform_android,
  		"Columns of the 480-line picture: 0 for the display's shape, 640 for the\n"
  		"Xbox's 4:3." },
@@ -2470,6 +2625,9 @@ index 004871e3..fa6b35bc 100644
 +		"How early objects switch to their simpler models, as a fraction of the\n"
 +		"size the game switches at (1.0), times render_scale. Models are most of\n"
 +		"the GPU's vertex work, which limits large scenes on this GPU." },
++	{ "debug.sort_models", _config_boolean, "true", "HALO_SORT_MODELS", _environment_value, _platform_android,
++		"Draw the objects' models sorted by shader, rather than object by object,\n"
++		"which spares the GPU driver most of its changes of program." },
 +	{ "debug.alpha_test_elision", _config_boolean, "true", "HALO_ALPHA_TEST_ELISION", _environment_value,
 +		_platform_android,
 +		"Draw without the alpha test when it cannot fail (the alpha tested is\n"
@@ -2687,7 +2845,7 @@ index 9bdcdc99..4f975e2c 100644
  	}
  	entry->last_used_frame = texture_frame;
 diff --git a/port/linux/src/xgpu.h b/port/linux/src/xgpu.h
-index 7d276da8..1062ff38 100644
+index 7d276da8..60d0a388 100644
 --- a/port/linux/src/xgpu.h
 +++ b/port/linux/src/xgpu.h
 @@ -14,6 +14,7 @@ device itself (d3d8_gl.c).
@@ -2792,6 +2950,16 @@ index 7d276da8..1062ff38 100644
  };
  
  void xgpu_texture_describe(DWORD format_word, DWORD size_word, struct xgpu_texture_description *description);
+@@ -159,6 +197,9 @@ struct xgpu_render_target
+ 	unsigned long width, height;
+ 	BOOL depth;
+ 	GLuint texture;
++	/* the mip level of texture drawn into: 0, or the level of a texture
++	whose levels the game draws one by one (mip_composite_get) */
++	GLint level;
+ 	/* pixels per unit of width and height: more than 1 for the screen's
+ 	targets when the game draws at the display's resolution (d3d8_gl.c) */
+ 	float scale[2];
 diff --git a/source/models/models.c b/source/models/models.c
 index ebaeaccc..2d69abf2 100644
 --- a/source/models/models.c
@@ -3005,6 +3173,383 @@ index 410140b9..75ca8708 100644
  	}
  
  	return;
+diff --git a/source/rasterizer/xbox/rasterizer_xbox_models.c b/source/rasterizer/xbox/rasterizer_xbox_models.c
+index ef1545e6..f61014c8 100644
+--- a/source/rasterizer/xbox/rasterizer_xbox_models.c
++++ b/source/rasterizer/xbox/rasterizer_xbox_models.c
+@@ -661,6 +661,266 @@ void rasterizer_model_ambient_reflection_tint(
+ 
+ /* ---------- private code */
+ 
++#ifdef HALO_ANDROID
++/* ---------- models drawn sorted by shader (the Mali port)
++
++The game draws each object's parts in turn, so that consecutive draws mostly
++change shader program, textures and vertex format: on Mali-G31 a draw after a
++change of program costs the driver several times one that changes only
++constants, and a frame of a busy scene is some 300 model draws, many of them
++the same parts of the same models (a squad of marines). Between
++_rasterizer_models_begin and _rasterizer_models_end, the objects that can be
++drawn in any order (opaque, not the sky, the first-person weapon or an
++effect) are kept instead of drawn: their parameters, their node matrices
++copied, and their parts' draws. At the end, or before an object that must be
++drawn in place, the kept draws are sorted by shader, permutation and
++geometry and drawn through the same functions (debug.sort_models). */
++
++#include <stdlib.h>
++
++int xgpu_sort_models(void); /* port/linux/src/d3d8_gl.c */
++
++#define DEFERRED_MODEL_OBJECTS 512
++#define DEFERRED_MODEL_DRAWS 2048
++#define DEFERRED_MODEL_NODES 8192
++
++static void model_begin_now(struct rasterizer_model_begin_parameters const *parameters,
++	boolean do_not_change_z_stencil_states);
++static void model_end_now(void);
++static void model_draw_now(struct shader *shader, short shader_permutation_index,
++	struct triangle_buffer const *triangle_buffer, long dynamic_triangle_buffer_index, long triangle_count,
++	struct vertex_buffer const *vertex_buffer, long dynamic_vertex_buffer_index);
++
++static struct
++{
++	struct rasterizer_model_begin_parameters parameters;
++	boolean do_not_change_z_stencil_states;
++} deferred_objects[DEFERRED_MODEL_OBJECTS];
++
++static struct deferred_model_draw
++{
++	struct shader *shader;
++	struct triangle_buffer const *triangle_buffer;
++	struct vertex_buffer const *vertex_buffer;
++	long dynamic_triangle_buffer_index;
++	long triangle_count;
++	long dynamic_vertex_buffer_index;
++	long order;
++	short object;
++	short shader_permutation_index;
++} deferred_draws[DEFERRED_MODEL_DRAWS];
++
++static real_matrix4x3 deferred_nodes[DEFERRED_MODEL_NODES];
++static long deferred_draw_count = 0;
++static long deferred_node_count = 0;
++static short deferred_object_count = 0;
++static short current_deferred_object = NONE;
++static boolean models_deferring = FALSE;
++/* the kept object's parameters as its caller passed them, valid until its end */
++static struct rasterizer_model_begin_parameters const *deferred_object_source = NULL;
++/* debug.draw_callers >= 3: how the sorting fares */
++static unsigned long sort_statistics[5]; /* phases, kept draws, flushes, drawn in place: transparent, decal */
++void platform_log(const char *format, ...);
++int xgpu_debug_draw_callers(void);
++static boolean deferred_object_do_not_change_z_stencil_states = FALSE;
++
++static struct transparent_geometry_group *model_transparent_submit_now(struct shader *shader,
++	short shader_permutation_index, struct triangle_buffer const *triangle_buffer,
++	long dynamic_triangle_buffer_index, long triangle_count, struct vertex_buffer const *vertex_buffer,
++	long dynamic_vertex_buffer_index, real_point3d const *centroid, struct render_sort_filth *sort_filth);
++
++static int deferred_draw_compare(
++	void const *a,
++	void const *b)
++{
++	struct deferred_model_draw const *first = a, *second = b;
++
++	if (first->shader != second->shader)
++		return (unsigned long)first->shader < (unsigned long)second->shader ? -1 : 1;
++	if (first->shader_permutation_index != second->shader_permutation_index)
++		return first->shader_permutation_index < second->shader_permutation_index ? -1 : 1;
++	if (first->vertex_buffer != second->vertex_buffer)
++		return (unsigned long)first->vertex_buffer < (unsigned long)second->vertex_buffer ? -1 : 1;
++	if (first->triangle_buffer != second->triangle_buffer)
++		return (unsigned long)first->triangle_buffer < (unsigned long)second->triangle_buffer ? -1 : 1;
++	return first->order < second->order ? -1 : first->order > second->order ? 1 : 0;
++}
++
++/* draws the kept draws, sorted */
++static void models_flush(
++	void)
++{
++	long index;
++	short drawn_object = NONE;
++
++	current_deferred_object = NONE;
++	sort_statistics[1] += deferred_draw_count;
++	if (deferred_draw_count)
++	{
++		sort_statistics[2]++;
++		qsort(deferred_draws, (size_t)deferred_draw_count, sizeof(deferred_draws[0]), deferred_draw_compare);
++		for (index = 0; index < deferred_draw_count; index++)
++		{
++			struct deferred_model_draw const *draw = &deferred_draws[index];
++
++			if (draw->object != drawn_object)
++			{
++				if (drawn_object != NONE)
++				{
++					model_end_now();
++				}
++				model_begin_now(&deferred_objects[draw->object].parameters,
++					deferred_objects[draw->object].do_not_change_z_stencil_states);
++				drawn_object = draw->object;
++			}
++			model_draw_now(draw->shader, draw->shader_permutation_index, draw->triangle_buffer,
++				draw->dynamic_triangle_buffer_index, draw->triangle_count, draw->vertex_buffer,
++				draw->dynamic_vertex_buffer_index);
++		}
++		if (drawn_object != NONE)
++		{
++			model_end_now();
++		}
++	}
++	deferred_draw_count = 0;
++	deferred_node_count = 0;
++	deferred_object_count = 0;
++	current_deferred_object = NONE;
++
++	return;
++}
++
++/* whether an object can be drawn in any order among the others */
++static boolean model_deferrable(
++	struct rasterizer_model_begin_parameters const *parameters)
++{
++	return models_deferring && !local_sky_flag &&
++		!TEST_FLAG(parameters->geometry_flags, _rasterizer_geometry_first_person_bit) &&
++		parameters->effect.type != _render_model_effect_type_modifier &&
++		!(parameters->effect.type == _render_model_effect_type_active_camouflage &&
++			parameters->effect.intensity > 0.0f);
++}
++
++void _rasterizer_model_begin(
++	struct rasterizer_model_begin_parameters const *parameters,
++	boolean do_not_change_z_stencil_states)
++{
++	if (rasterizer_debug_options.draw_models && model_deferrable(parameters) &&
++		parameters->skinning.node_matrix_count >= 0 &&
++		parameters->skinning.node_matrix_count <= DEFERRED_MODEL_NODES)
++	{
++		short node_count = parameters->skinning.node_matrices ? parameters->skinning.node_matrix_count : 0;
++
++		if (deferred_object_count == DEFERRED_MODEL_OBJECTS ||
++			deferred_node_count + node_count > DEFERRED_MODEL_NODES)
++		{
++			models_flush();
++		}
++		current_deferred_object = deferred_object_count++;
++		deferred_object_source = parameters;
++		deferred_object_do_not_change_z_stencil_states = do_not_change_z_stencil_states;
++		deferred_objects[current_deferred_object].parameters = *parameters;
++		deferred_objects[current_deferred_object].do_not_change_z_stencil_states = do_not_change_z_stencil_states;
++		if (node_count)
++		{
++			csmemcpy(&deferred_nodes[deferred_node_count], parameters->skinning.node_matrices,
++				node_count * sizeof(real_matrix4x3));
++			deferred_objects[current_deferred_object].parameters.skinning.node_matrices =
++				&deferred_nodes[deferred_node_count];
++			deferred_node_count += node_count;
++		}
++		local_parameters = &deferred_objects[current_deferred_object].parameters;
++		local_model_effect_type = _render_model_effect_type_none;
++		return;
++	}
++	/* drawn in place: after the kept draws */
++	models_flush();
++	model_begin_now(parameters, do_not_change_z_stencil_states);
++
++	return;
++}
++
++/* the kept object is drawn in place after all, from here to its end: what is
++kept first, its own draws so far among them */
++static void model_undefer(
++	void)
++{
++	models_flush();
++	model_begin_now(deferred_object_source, deferred_object_do_not_change_z_stencil_states);
++
++	return;
++}
++
++void _rasterizer_model_end(
++	void)
++{
++	if (current_deferred_object != NONE)
++	{
++		current_deferred_object = NONE;
++		local_parameters = NULL;
++		return;
++	}
++	model_end_now();
++
++	return;
++}
++
++void _rasterizer_model_draw(
++	struct shader *shader,
++	short shader_permutation_index,
++	struct triangle_buffer const *triangle_buffer,
++	long dynamic_triangle_buffer_index,
++	long triangle_count,
++	struct vertex_buffer const *vertex_buffer,
++	long dynamic_vertex_buffer_index)
++{
++	if (current_deferred_object != NONE &&
++		shader && shader->base.type == _shader_type_model &&
++		TEST_FLAG(((struct shader_model_definition *)shader_get_and_verify_type(shader, _shader_type_model))->model.flags,
++			_shader_model_alpha_blended_decal_bit))
++	{
++		/* a decal on the object's own parts: drawn after them, in place */
++		sort_statistics[4]++;
++		model_undefer();
++	}
++	if (current_deferred_object != NONE)
++	{
++		struct deferred_model_draw *draw;
++
++		if (deferred_draw_count == DEFERRED_MODEL_DRAWS)
++		{
++			/* full: draw what is kept, and keep this object's draws from here */
++			short object = current_deferred_object;
++			struct rasterizer_model_begin_parameters parameters = deferred_objects[object].parameters;
++			boolean do_not_change = deferred_objects[object].do_not_change_z_stencil_states;
++
++			models_flush();
++			model_begin_now(&parameters, do_not_change);
++			model_draw_now(shader, shader_permutation_index, triangle_buffer, dynamic_triangle_buffer_index,
++				triangle_count, vertex_buffer, dynamic_vertex_buffer_index);
++			model_end_now();
++			return;
++		}
++		draw = &deferred_draws[deferred_draw_count];
++		draw->shader = shader;
++		draw->shader_permutation_index = shader_permutation_index;
++		draw->triangle_buffer = triangle_buffer;
++		draw->dynamic_triangle_buffer_index = dynamic_triangle_buffer_index;
++		draw->triangle_count = triangle_count;
++		draw->vertex_buffer = vertex_buffer;
++		draw->dynamic_vertex_buffer_index = dynamic_vertex_buffer_index;
++		draw->object = current_deferred_object;
++		draw->order = deferred_draw_count;
++		deferred_draw_count++;
++		return;
++	}
++	model_draw_now(shader, shader_permutation_index, triangle_buffer, dynamic_triangle_buffer_index,
++		triangle_count, vertex_buffer, dynamic_vertex_buffer_index);
++
++	return;
++}
++#endif
++
+ void _rasterizer_models_begin(
+ 	boolean sky)
+ {
+@@ -668,6 +928,10 @@ void _rasterizer_models_begin(
+ 	{
+ 		local_pixel_shader_dirty_flag = TRUE;
+ 		local_sky_flag = sky;
++#ifdef HALO_ANDROID
++		models_deferring = !sky && xgpu_sort_models();
++		models_flush();
++#endif
+ 		if (sky)
+ 		{
+ 			rasterizer_profile_begin(_rasterizer_profile_model_sky);
+@@ -686,6 +950,17 @@ void _rasterizer_models_end(
+ {
+ 	if (rasterizer_debug_options.draw_models)
+ 	{
++#ifdef HALO_ANDROID
++		models_flush();
++		models_deferring = FALSE;
++		if (xgpu_debug_draw_callers() >= 3 && ++sort_statistics[0] == 600)
++		{
++			platform_log("sorted models: %lu kept draws, %lu flushes, drawn in place for a transparent part %lu, "
++				"for a decal %lu (a phase)", sort_statistics[1] / 600, sort_statistics[2] / 600,
++				sort_statistics[3] / 600, sort_statistics[4] / 600);
++			csmemset(sort_statistics, 0, sizeof(sort_statistics));
++		}
++#endif
+ 		if (local_sky_flag)
+ 		{
+ 			rasterizer_profile_end(_rasterizer_profile_model_sky);
+@@ -699,8 +974,13 @@ void _rasterizer_models_end(
+ 	return;
+ }
+ 
++#ifdef HALO_ANDROID
++static void model_end_now(
++	void)
++#else
+ void _rasterizer_model_end(
+ 	void)
++#endif
+ {
+ 	if (rasterizer_debug_options.draw_models)
+ 	{
+@@ -726,9 +1006,15 @@ void _rasterizer_model_end(
+ 	return;
+ }
+ 
++#ifdef HALO_ANDROID
++static void model_begin_now(
++	struct rasterizer_model_begin_parameters const *parameters,
++	boolean do_not_change_z_stencil_states)
++#else
+ void _rasterizer_model_begin(
+ 	struct rasterizer_model_begin_parameters const *parameters,
+ 	boolean do_not_change_z_stencil_states)
++#endif
+ {
+ 	unsigned long skinning_work;
+ 	unsigned long lighting_work;
+@@ -1695,7 +1981,11 @@ void rasterizer_model_draw_environment_shader(
+ 	return;
+ }
+ 
++#ifdef HALO_ANDROID
++static void model_draw_now(
++#else
+ void _rasterizer_model_draw(
++#endif
+ 	struct shader *shader,
+ 	short shader_permutation_index,
+ 	struct triangle_buffer const *triangle_buffer,
+@@ -2538,7 +2828,34 @@ void _rasterizer_model_draw(
+ 	return;
+ }
+ 
++#ifdef HALO_ANDROID
++struct transparent_geometry_group *_rasterizer_model_transparent_geometry_submit(
++	struct shader *shader,
++	short shader_permutation_index,
++	struct triangle_buffer const *triangle_buffer,
++	long dynamic_triangle_buffer_index,
++	long triangle_count,
++	struct vertex_buffer const *vertex_buffer,
++	long dynamic_vertex_buffer_index,
++	real_point3d const *centroid,
++	struct render_sort_filth *sort_filth)
++{
++	/* some transparent parts are drawn at once (decals): after the object's
++	own parts, so the object is drawn in place */
++	if (current_deferred_object != NONE)
++	{
++		sort_statistics[3]++;
++		model_undefer();
++	}
++	return model_transparent_submit_now(shader, shader_permutation_index, triangle_buffer,
++		dynamic_triangle_buffer_index, triangle_count, vertex_buffer, dynamic_vertex_buffer_index, centroid,
++		sort_filth);
++}
++
++static struct transparent_geometry_group *model_transparent_submit_now(
++#else
+ struct transparent_geometry_group *_rasterizer_model_transparent_geometry_submit(
++#endif
+ 	struct shader *shader,
+ 	short shader_permutation_index,
+ 	struct triangle_buffer const *triangle_buffer,
 diff --git a/source/rasterizer/xbox/rasterizer_xbox_shadows.c b/source/rasterizer/xbox/rasterizer_xbox_shadows.c
 index 35dbdf72..38080fe8 100644
 --- a/source/rasterizer/xbox/rasterizer_xbox_shadows.c
