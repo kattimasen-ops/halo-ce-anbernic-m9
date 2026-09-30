@@ -27,6 +27,7 @@ from android_gl_stubs import prototypes, split_parameter  # noqa: E402
 
 # functions the calling thread waits for
 SYNC = {
+    "glGetUniformBlockIndex", "glGetActiveUniformBlockiv",
     "glGetIntegerv", "glGetError", "glReadPixels", "glFinish", "glCheckFramebufferStatus",
     "glGenVertexArrays", "glCreateShader", "glGetShaderiv", "glGetShaderInfoLog", "glCreateProgram",
     "glGetProgramiv", "glGetProgramInfoLog", "glGetUniformLocation", "glGenQueries",

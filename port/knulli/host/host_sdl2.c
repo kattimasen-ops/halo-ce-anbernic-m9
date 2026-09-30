@@ -255,7 +255,7 @@ static void frame_statistics(void)
 	static double interval = -1.0;
 	static uint64_t start, previous;
 	static uint64_t longest;
-	static uint32_t frames;
+	static uint32_t frames, frame_buckets[6];
 	uint64_t now;
 
 	if (interval < 0.0)
@@ -275,6 +275,15 @@ static void frame_statistics(void)
 	frames++;
 	if (now - previous > longest)
 		longest = now - previous;
+	{
+		/* how the frames' times spread: vsync puts them on multiples of
+		16.7 ms, a slower thread or the GPU anywhere */
+		double milliseconds = (double)(now - previous) * 1000.0 / (double)SDL_GetPerformanceFrequency();
+		int bucket = milliseconds < 15.0 ? 0 : milliseconds < 18.0 ? 1 : milliseconds < 22.0 ? 2 :
+			milliseconds < 28.0 ? 3 : milliseconds < 35.0 ? 4 : 5;
+
+		frame_buckets[bucket]++;
+	}
 	previous = now;
 	if (now - start >= (uint64_t)(interval * (double)SDL_GetPerformanceFrequency()))
 	{
@@ -296,6 +305,9 @@ static void frame_statistics(void)
 			sysfs_number("/sys/class/thermal/thermal_zone0/temp") / 1000,
 			sysfs_number("/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq") / 1000,
 			sysfs_number("/sys/class/devfreq/gpu/cur_freq") / 1000000);
+		host_logf(HOST_LOG_INFO, "frame times: %u under 15 ms, %u 15-18, %u 18-22, %u 22-28, %u 28-35, %u over 35",
+			frame_buckets[0], frame_buckets[1], frame_buckets[2], frame_buckets[3], frame_buckets[4], frame_buckets[5]);
+		memset(frame_buckets, 0, sizeof(frame_buckets));
 		host_gl_timing_report(frames);
 		start = now;
 		frames = 0;

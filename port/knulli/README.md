@@ -113,6 +113,22 @@ These are in `port/linux/src`, for `HALO_ANDROID` builds:
   stalled the driver.
 - `display.model_detail` (default 0.5): objects switch to their simpler
   models sooner, relative to the rendered resolution.
+- The water's bump map is built at the start of the frame, before the
+  primary target's first pass (`rasterizer_xbox_water.c`), rather than at
+  the first water draw, where it split that pass in two.
+- A draw whose alpha test cannot fail (the alpha tested is an opaque
+  texture's) is drawn without it (`debug.alpha_test_elision`): a shader that
+  can discard loses Mali's hidden surface removal. Textures are known to be
+  opaque from their texels, as they are decoded.
+- The frame's depth and stencil are invalidated before the picture is
+  scaled to the screen, so the GPU does not write them out.
+- Programs that read more than 64 vertex constant registers (the skinned
+  models, which index them) read them from a uniform block, whose range is
+  bound per draw, rather than a uniform array the driver copies whole at
+  every change.
+- The streaming vertex, index and constant buffers are mapped for good
+  (`GL_EXT_buffer_storage`, `host_gl_buffer_persistent`): a write is a copy
+  rather than a map and an unmap.
 
 ### Frame rates
 
@@ -122,9 +138,9 @@ second over the last 40 to 60 seconds of a level's opening:
 | Level | 640x480 (`render_scale = 1.0`, an earlier build) | 480x360 (`render_scale = 0.75`, the default) |
 | --- | --- | --- |
 | Main menu | 60 | 60 |
-| c10 (swamp) | 26 | 41 |
-| b30 (beach, battle) | 26 | 35–38 |
-| a30 (level opening) | 20 | 36 |
+| c10 (swamp) | 26 | 44 |
+| b30 (beach, battle) | 26 | 34–42 |
+| a30 (level opening) | 20 | 40 |
 
 The tools below (`HALO_GPU_PASS_TIMING`, `HALO_GL_TIMING`) show which of the
 GPU, the GL thread and the game's thread limits a scene.

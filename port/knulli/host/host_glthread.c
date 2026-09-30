@@ -157,6 +157,11 @@ static int pass_trace;
 /* HALO_GPU_PASS_TIMING=3: in that frame, the GPU's time for each draw (each
 drawn by itself: the time includes a load and store of the target's tiles) */
 static int draw_trace;
+/* HALO_GPU_PASS_TIMING=4: in that frame, how long each change of render target
+waited in the driver, with the GPU running as it does (nothing finished) */
+static int bind_trace;
+static uint32_t bind_frames;
+static uint64_t bind_frame_start;
 static uint32_t pass_copies, pass_frames_total, pass_index;
 
 static uint64_t monotonic_ns(void)
@@ -300,6 +305,15 @@ swaps) call the driver directly, and are timed here. */
 #define HOST_OPERATION_SLOTS 8
 
 static int timing;                 /* HALO_GL_TIMING, read as the thread starts */
+/* the game's thread's waits for the GL thread (HALO_GL_TIMING): calls that
+wait for their result, room in the queue, and the frame pacing */
+static struct
+{
+	uint64_t syncs, sync_ns;
+	uint64_t room_waits, room_ns;
+	uint64_t frame_waits, frame_ns;
+} producer_waits;
+
 static void adjacency_call(uint32_t kind);
 static void run_buffer_write(const void *data);
 static struct
@@ -369,6 +383,11 @@ void glthread_timing_report(uint32_t frames)
 		"and uniforms %.1f, other state %.1f", (double)draws_after[0] / frames, (double)draws_after[1] / frames,
 		(double)draws_after[2] / frames, (double)draws_after[3] / frames);
 	memset(draws_after, 0, sizeof(draws_after));
+	host_logf(HOST_LOG_INFO, "gl:   the game's thread waited: %.1f synchronous calls %.2f ms, %.1f times for room %.2f ms, "
+		"for the frame before %.2f ms (a frame)", (double)producer_waits.syncs / frames,
+		producer_waits.sync_ns / 1e6 / frames, (double)producer_waits.room_waits / frames,
+		producer_waits.room_ns / 1e6 / frames, producer_waits.frame_ns / 1e6 / frames);
+	memset(&producer_waits, 0, sizeof(producer_waits));
 	frequency = host_tick_frequency();
 	for (index = 0; index < HOST_OPERATION_SLOTS && host_operations[index].run; index++)
 	{
@@ -442,6 +461,22 @@ static void *gl_thread_main(void *unused)
 					adjacency_call((uint32_t)glthread_call_kind(command->function));
 				if (pass_timing)
 					pass_call(command);
+				if (bind_trace && bind_frames >= 1500 && bind_frames < 1503)
+				{
+					const GLuint *arguments = (const GLuint *)(command + 1);
+					uint64_t start = monotonic_ns(), spent;
+
+					glthread_replay(command->function, command + 1);
+					spent = monotonic_ns() - start;
+					if (spent > 300000 ||
+						glthread_call_kind(command->function) == _glthread_call_bind_framebuffer)
+					{
+						host_logf(HOST_LOG_INFO, "call: at %6.2f ms function %3u kind %d (%u %u) %7.3f ms",
+							(start - bind_frame_start) / 1e6, command->function,
+							glthread_call_kind(command->function), arguments[0], arguments[1], spent / 1e6);
+					}
+				}
+				else
 				glthread_replay(command->function, command + 1);
 				if (pass_timing)
 					draw_traced(command);
@@ -467,7 +502,18 @@ static void *gl_thread_main(void *unused)
 			{
 				const struct host_call *call = (const struct host_call *)(command + 1);
 
-				host_operation_run(call);
+				if (bind_trace && bind_frames >= 1500 && bind_frames < 1503)
+				{
+					uint64_t start = monotonic_ns(), spent;
+
+					host_operation_run(call);
+					spent = monotonic_ns() - start;
+					if (spent > 300000)
+						host_logf(HOST_LOG_INFO, "call: at %6.2f ms host %s %7.3f ms", (start - bind_frame_start) / 1e6,
+							host_operation_name(call->run), spent / 1e6);
+				}
+				else
+					host_operation_run(call);
 				break;
 			}
 			default:
@@ -548,7 +594,18 @@ static struct command *reserve(uint32_t type, uint32_t size)
 	}
 	else
 	{
-		PRODUCER_WAIT(has_room(size));
+		if (timing && !has_room(size))
+		{
+			uint64_t start = monotonic_ns();
+
+			PRODUCER_WAIT(has_room(size));
+			producer_waits.room_waits++;
+			producer_waits.room_ns += monotonic_ns() - start;
+		}
+		else
+		{
+			PRODUCER_WAIT(has_room(size));
+		}
 	}
 	command = (struct command *)(ring + offset);
 	command->type = type;
@@ -606,7 +663,18 @@ void glthread_sync(void (*run)(void *), void *context)
 	call->done = &done;
 	producer.head += command->size;
 	publish();
-	wait_while_equal(&done, 0, SPIN_LIMIT * 4);
+	if (timing)
+	{
+		uint64_t start = monotonic_ns();
+
+		wait_while_equal(&done, 0, SPIN_LIMIT * 4);
+		producer_waits.syncs++;
+		producer_waits.sync_ns += monotonic_ns() - start;
+	}
+	else
+	{
+		wait_while_equal(&done, 0, SPIN_LIMIT * 4);
+	}
 }
 
 /* starts recording run(data), with room for size bytes of data (what it
@@ -758,6 +826,7 @@ void host_gl_get_string(uint32_t name, int index, char *buffer, uint32_t size);
 int host_gl_has_extension(const char *name);
 uint32_t host_gl_read_buffer_word(uint32_t buffer, uint32_t offset);
 void host_gl_buffer_write(uint32_t target, uint32_t offset, uint32_t size, const void *data);
+void host_gl_buffer_persistent(uint32_t target, uint32_t size);
 void host_gl_fence_frame(uint32_t slot);
 void host_gl_wait_frame(uint32_t slot);
 uint32_t host_sdl_gl_create_context(uint32_t window);
@@ -786,6 +855,25 @@ static void queued_gl_buffer_write(uint32_t target, uint32_t offset, uint32_t si
 	write->size = size;
 	memcpy(write + 1, data, size);
 	glthread_end();
+}
+
+struct buffer_persistent
+{
+	uint32_t target, size;
+};
+
+static void run_buffer_persistent(const void *data)
+{
+	const struct buffer_persistent *call = data;
+
+	host_gl_buffer_persistent(call->target, call->size);
+}
+
+static void queued_gl_buffer_persistent(uint32_t target, uint32_t size)
+{
+	struct buffer_persistent call = { target, size };
+
+	glthread_host(run_buffer_persistent, &call, sizeof(call));
 }
 
 static void run_fence_frame(const void *data)
@@ -971,6 +1059,15 @@ static int synced_sdl_gl_set_swap_interval(int interval)
 
 static void run_swap(const void *data)
 {
+	if (bind_trace)
+	{
+		uint64_t start = monotonic_ns();
+
+		if (bind_frames >= 1500 && bind_frames < 1503)
+			host_logf(HOST_LOG_INFO, "call: at %6.2f ms the swap", (start - bind_frame_start) / 1e6);
+		bind_frames++;
+		bind_frame_start = start;
+	}
 	if (pass_timing)
 		pass_frame();
 	host_sdl_gl_swap_window(*(const uint32_t *)data);
@@ -986,13 +1083,22 @@ static int queued_sdl_gl_swap_window(uint32_t window)
 	/* at most frames_ahead frames queued behind the one on screen: the
 	counter is the futex, so that only swaps wake the game, not every
 	command the GL thread makes */
-	for (;;)
 	{
-		uint32_t done = __atomic_load_n(&consumer.frames_done, __ATOMIC_ACQUIRE);
+		uint64_t start = timing ? monotonic_ns() : 0;
 
-		if (submitted - done <= frames_ahead)
-			break;
-		wait_while_equal(&consumer.frames_done, done, SPIN_LIMIT);
+		for (;;)
+		{
+			uint32_t done = __atomic_load_n(&consumer.frames_done, __ATOMIC_ACQUIRE);
+
+			if (submitted - done <= frames_ahead)
+				break;
+			wait_while_equal(&consumer.frames_done, done, SPIN_LIMIT);
+		}
+		if (timing)
+		{
+			producer_waits.frame_waits++;
+			producer_waits.frame_ns += monotonic_ns() - start;
+		}
 	}
 	return 1;
 }
@@ -1011,6 +1117,9 @@ static int glthread_enabled(void)
 		pass_timing = timing && *timing && *timing != '0';
 		pass_trace = timing && (*timing == '2' || *timing == '3');
 		draw_trace = timing && *timing == '3';
+		bind_trace = timing && *timing == '4';
+		if (bind_trace)
+			pass_timing = 0;
 		if (frames && *frames)
 			frames_ahead = (uint32_t)atoi(frames);
 	}
@@ -1047,6 +1156,7 @@ void *host_import_wrap(const char *name, void *function)
 		{ "host_gl_has_extension", (void *)synced_gl_has_extension },
 		{ "host_gl_read_buffer_word", (void *)synced_gl_read_buffer_word },
 		{ "host_gl_buffer_write", (void *)queued_gl_buffer_write },
+		{ "host_gl_buffer_persistent", (void *)queued_gl_buffer_persistent },
 		{ "host_gl_fence_frame", (void *)queued_gl_fence_frame },
 		{ "host_gl_wait_frame", (void *)queued_gl_wait_frame },
 		{ "host_gl_visibility_frame", (void *)queued_gl_visibility_frame },

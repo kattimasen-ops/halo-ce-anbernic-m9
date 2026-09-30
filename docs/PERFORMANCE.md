@@ -83,6 +83,8 @@ little difference to the frame rate.
 | Shadows in two passes | a30, 0.75 | 25.3 | 25.7 |
 | Shadow blur folded into the projection shader | a30, 0.75 | 25.7 | 31–32 |
 | Vertex shaders write only what the pixel shader reads, point size only for points | a30, 0.75 | 31–32 | 36 |
+| Water bump map at the frame's start, alpha test dropped where it cannot fail, depth not written out | a30, 0.75 | 36 | 40 |
+| Skinned models' constants in a uniform block; streaming buffers mapped for good | a30, 0.75 | 40 | 40 (GL thread time down, GPU now close to the limit) |
 
 Notes on the steps:
 
@@ -133,6 +135,31 @@ Notes on the steps:
   vertex and tiler time in a30 fell from about 23 to 13.5 ms a frame, the
   driver's CPU time a draw from 26 to 19 µs, and a30 rose from 31–32 to 36
   fps.
+
+- **Alpha test that cannot fail.** Most model pixel shaders ended in an alpha
+  test (`discard`) of an opaque texture's alpha, which can never discard but
+  makes Mali give up its hidden surface removal (forward pixel kill), so
+  every overlapping layer of the Pelican's parts was shaded. Textures are
+  now known to be opaque from their texels as they are decoded, and such
+  draws use a shader without the test: a30 went from 36 to 40 fps with it,
+  and stays at 36 without it (`HALO_ALPHA_TEST_ELISION=0`). It costs program
+  switches (about 85 a frame became about 190), which the driver pays for.
+- **Uniform arrays against uniform blocks.** A microbenchmark on the
+  handheld (`glbench`): a draw costs the driver about 6.5 µs to submit; 17.6
+  µs when a constant of a 192-register array changed (it copies the array
+  whole), 7.0 µs with a 16-register array, and 9.6 µs with the constants in a
+  uniform block whose range is bound per draw. The skinned models index their
+  constants and so declare all 192; they now read them from a block.
+- **What limits the a30 opening now.** A frame-time histogram (every frame
+  22 to 28 ms, with and without vsync) and the game's thread's waits (none
+  for results or room, about 5.7 ms a frame for the GL thread to finish the
+  frame before) show the GL thread limits it, at about 25 ms a frame. Of 423
+  indexed draws a frame, 244 draw the same geometry with the same shaders and
+  textures as another draw of the frame (six marines, repeated parts).
+  Freezing the textures and the program (every draw keeping the state it
+  finds, a wrong picture) took the frame rate to 53–55 fps: program switches
+  are the driver's biggest cost per draw. Drawing the models sorted by
+  shader is the next step.
 
 ## What did not help, or was not the limit
 
