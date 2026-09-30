@@ -3,7 +3,10 @@
 This page records how the port got from its first working build to the
 current frame rates, what was measured along the way, and what turned out not
 to matter. The current numbers are in the [README's performance
-table](../README.md#performance).
+table](../README.md#performance). The tools behind the measurements are
+described in [Profiling](PROFILING.md), the lessons drawn from them in
+[Mali-G31 notes](MALI-G31-NOTES.md), and the work still to do in
+[Roadmap](ROADMAP.md).
 
 All measurements are on an Anbernic RG35XX H (Allwinner H700: 4x Cortex-A53
 at 1.5 GHz, Mali-G31 MP2, 1 GB RAM) with Knulli Gladiator II and stock
@@ -27,7 +30,8 @@ thermal limits.
   down, so only its relative numbers count), `HALO_DEBUG_TINY_SCISSOR` (each
   draw writes one pixel), `HALO_DEBUG_LOD_BIAS`, `HALO_DEBUG_FREEZE` and
   `HALO_DEBUG_SKIP_GL`, and a sampling profiler (`HALO_PROFILE_HZ`). They are
-  listed in [port/knulli/README.md](../port/knulli/README.md#tools-for-performance-work).
+  listed in [port/knulli/README.md](../port/knulli/README.md#tools-for-performance-work)
+  and explained, with examples of their output, in [Profiling](PROFILING.md).
 
 ## The two limits of this platform
 
@@ -88,6 +92,8 @@ little difference to the frame rate.
 | Opaque models drawn sorted by shader | a30, 0.75 | 40 | 40 (program switches 190 to 109 a frame) |
 | Water bump map levels drawn into the sampled texture, not copied | a30, 0.75 | 40 | 49 |
 | Skinned models' constants in two blocks (per part, and per object's nodes, written only as far as the nodes go); streaming buffers mapped as cached memory | a30, 0.75 | 49 | 49–51 (buffer writes 2.9 ms to 1.9 ms a frame) |
+| The guest's `memcmp` and `memcpy` eight bytes at a time; the GL queue published in 4 KB steps, not after every call | a30, 0.75 | 49.5–50 (with the GL timer on) | 51.5–52 with the GL timer on, 52–54 with it off |
+| The skinned-constant cache searched through a compact array of keys; a per-write `getenv` removed from the GL thread | a30, 0.75 | 52–54 | 54–55 |
 
 Notes on the steps:
 
@@ -184,9 +190,10 @@ Notes on the steps:
 - **Writing to the GPU's buffers.** Skipping the copies into the streaming
   buffers (a wrong picture) took the buffer writes from 2.7 ms to 0.09 ms a
   frame: the time was the copying itself, into memory the CPU does not cache
-  (about 370 MB/s), some 1 MB a frame of vertex constants. A mapping that may
-  also be read is cached memory on Mali: writes then cost about 3 µs instead
-  of 6. The skinned models' constants are now two blocks: the registers below
+  (about 370 MB/s), some 1 MB a frame of vertex constants. (A later
+  microbenchmark showed every mapping mode is write-combined; the gain of
+  this step came from writing less.) The skinned models' constants are now
+  two blocks: the registers below
   60 (per part) and the object's nodes from 60, written only as far as its
   nodes go and found again when the same nodes are bound again.
 - **Where a30 stands.** At about 50 fps the game's thread and the GL thread
@@ -194,6 +201,40 @@ Notes on the steps:
   the driver's (about 17 µs a draw, some 460 draws), the buffer writes, and
   waits at changes of render target; the game's thread spends about a
   quarter of its time in the renderer's per-draw work (`prepare_draw`).
+- **The game's thread's own overheads.** The profiler showed musl's
+  `memcmp` at 6.2% of the game's thread: the guest's musl has no assembly
+  version for `arm64_32`, its C version compares a byte at a time, and
+  `prepare_draw` compares the 252-byte pixel shader key, 308 bytes of
+  per-draw uniform inputs and uniform shadows of up to 128 bytes on every
+  draw. Publishing each queued GL call to the GL thread (an ordered store
+  and load on a shared cache line, some 5000 times a frame) took another
+  4.4% or so. The guest now has its own `memcmp` and `memcpy` working eight
+  bytes at a time (`guest_string.c`), and the queue is published every
+  4 KB and before any wait. a30 went from 49.5–50 to 51.5–52 fps with the
+  GL timer on, and runs at 52–54 fps with it off. The game's thread now
+  waits 1.5 to 1.9 ms a frame for the GL thread, which is the limit: 15.2 ms
+  a frame in the driver's functions (of which `glDrawRangeElementsBaseVertex`
+  7.8 ms for 456 calls, 17.2 µs each; `glBindFramebuffer` 2.6 ms for 25
+  calls; `glUniform4fv` 1.3 ms), and 1.9 to 2.4 ms of buffer writes.
+
+- **A cache search that missed the CPU's cache.** The cache of skinned
+  models' node constants (128 entries of about 2 KB) was searched by reading
+  each entry's key inside the entry: 128 cache misses per search, and about
+  170 of the 233 searches a frame find nothing. That loop was 2.7% of the
+  game's thread. The keys (stream generation, extent and first register) now
+  sit in an array of their own, 3 KB that stays in the cache. A leftover
+  debug switch also called `getenv` on every buffer write on the GL thread
+  (1.8% of it with `strncmp`). a30 went from 52–54 to 54–55 fps. On the same
+  build c10 holds 44.4 fps and the b30 beach battle runs at 36 to 46 fps.
+- **What the buffer writes are.** Timing the copy and the flush apart in the
+  game: about 620 writes a frame of 1.46 KB on average, 2.84 µs for the copy
+  (about 500 MB/s into write-combined memory while the GPU runs) and 0.42 µs
+  for the flush. New counters (`HALO_GPU_STATS`) split them: 625 writes and
+  894 KB a frame in a30, of which 337 KB are vertex constants (the skinned
+  models' blocks), none are pages of the mirror (its data stays put), and
+  the rest are streamed vertices and indices (quad batches, immediate
+  draws, dynamic geometry). Programs that read at most 64 registers without
+  `a0` still take their constants as uniform arrays (`glUniform4fv`).
 
 ## What did not help, or was not the limit
 
@@ -222,6 +263,10 @@ Notes on the steps:
   black, invalid frames, so the numbers were meaningless. Freezing the state
   (`HALO_DEBUG_FREEZE`) was used instead to estimate the cost of each kind of
   state change.
+- **Deferring the buffer flushes.** Calling `glFlushMappedBufferRange` only
+  at changes of render target, fences and the swap, rather than after each
+  write, left the buffer writes at about 1.85 ms a frame and the frame rate
+  unchanged: their cost is the copy itself. The change was reverted.
 
 ## Where the time goes now
 
@@ -237,3 +282,7 @@ of them have to come down. The ideas with the most expected payoff:
    diffuse passes (a large engine change).
 3. Train a profile-guided optimisation profile on the device (the guest uses
    upstream's x86 Linux profile).
+
+Since then the game's thread has become cheaper (see the last notes in the
+history above), and a30 runs at 54 to 55 fps.
+[Roadmap](ROADMAP.md) keeps the current list of limits and planned work.

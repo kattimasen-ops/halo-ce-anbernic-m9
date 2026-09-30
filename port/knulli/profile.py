@@ -93,7 +93,7 @@ class Symbols:
         tool = symbolizer()
         for path, entries in pending.items():
             text = "\n".join(f"0x{relative:x}" for _, relative in entries) + "\n"
-            result = subprocess.run([tool, f"--obj={path}", "--output-style=GNU"],
+            result = subprocess.run([tool, f"--obj={path}", "--output-style=GNU", "--no-inlines"],
                                     input=text, capture_output=True, text=True)
             lines = result.stdout.split("\n")
             # GNU style: function, then file:line, per address

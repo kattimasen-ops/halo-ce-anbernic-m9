@@ -1,7 +1,7 @@
 # Knulli (Allwinner H700 handhelds)
 
 `port/knulli` runs the Android port's guest image (the game as ILP32 AArch64
-code, [port/android/README.md](../android/README.md)) as an ordinary aarch64
+code, [port/android/README.md](https://github.com/cybersecurity/halo-ce-universal/blob/fd8fc72693bff0d2d7b4af56aab54b566a93eebb/port/android/README.md)) as an ordinary aarch64
 Linux program on handhelds with the Allwinner H700 under Knulli: the Anbernic
 RG35XX H, Plus, SP, 2024, RG40XX H/V, RG CubeXX and others. Their GPU, a
 Mali-G31, has only Arm's OpenGL ES driver for the framebuffer (no X11,
@@ -167,9 +167,9 @@ kernel's thermal governor still lowers both at 70 °C.
 | --- | --- |
 | `HALO_FPS_LOG=<seconds>` | The frame rate, the longest frame, memory, temperature and clocks in the log. |
 | `HALO_GL_TIMING=1` | Each GL function's calls and time per frame (on the GL thread). |
-| `HALO_GPU_PASS_TIMING=1` | Finishes the GPU at each change of render target and logs the time of each target's passes, split into the calls that made them and the GPU's work. `2` also logs one frame's passes in order; `3` also the GPU's time for each draw of that frame. |
+| `HALO_GPU_PASS_TIMING=1` | Finishes the GPU at each change of render target and logs the time of each target's passes, split into the calls that made them and the GPU's work. `2` also logs one frame's passes in order; `3` also the GPU's time for each draw of that frame; `4` logs, for one frame, how long each change of render target waited in the driver, with the GPU running as it does (nothing finished). |
 | `HALO_PROFILE_HZ=<rate>`, `HALO_PROFILE_DELAY=<seconds>` | Samples every thread; `profile.py` reports the result. |
-| `HALO_DEBUG_DRAW_CALLERS=1` | The draws each caller of the draw functions makes, per frame (`2`: their callers' callers). |
+| `HALO_DEBUG_DRAW_CALLERS=1` | The draws each caller of the draw functions makes, per frame (`2`: their callers' callers; `3` also counts the indexed draws that repeat another draw's geometry and state; `4` skips those, a wrong picture). |
 | `HALO_GPU_DUMP_SHADERS=<folder>` | Writes the generated GLSL, to analyse with Arm's Mali Offline Compiler (`malioc -c Mali-G31`). |
 | `HALO_DEBUG_FREEZE=textures,program,raster` | Draws keep the state they find, to measure what setting it costs. |
 | `HALO_DEBUG_LOD_BIAS=<levels>` | Samples smaller mip levels, to measure what texture bandwidth costs. |

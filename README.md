@@ -1,7 +1,7 @@
 # Halo: Combat Evolved on Anbernic RG35XX H — native port for Knulli (Allwinner H700)
 
 Yes — Halo CE runs natively on the Anbernic RG35XX H (RG35XXH) under Knulli:
-60 fps in the menus and about 38 to 49 fps in campaign levels at the default
+60 fps in the menus and about 41 to 54 fps in campaign levels at the default
 render scale. This repository is a native ARM64 (AArch64) port of the Halo:
 Combat Evolved decompilation, [halo-ce-universal](https://github.com/cybersecurity/halo-ce-universal),
 to the Allwinner H700 and its Mali-G31 GPU. There is no emulation: no xemu,
@@ -25,6 +25,7 @@ repository contains source code and documentation only.
 - [Install](#install)
 - [Build from source](#build-from-source)
 - [How it works](#how-it-works)
+- [Documentation](#documentation)
 - [Configuration](#configuration)
 - [Troubleshooting](#troubleshooting)
 - [FAQ](#faq)
@@ -46,7 +47,7 @@ Captured on an Anbernic RG35XX H (640x480 screen).
 - Uses the firmware's own SDL2 and Arm's Mali-G31 OpenGL ES driver on the
   framebuffer, so it runs on stock Knulli with no extra libraries.
 - A dedicated GL thread takes the Mali driver's per-draw CPU cost (about
-  28 µs a draw call) off the game's core.
+  17 µs a draw call) off the game's core.
 - Renderer changes for a tile-based mobile GPU: program binary cache, fp16
   shaders, 16-bit textures, asynchronous occlusion readback, quad batching and
   decal ordering, model LOD scaling, and shadows restructured to avoid
@@ -70,8 +71,8 @@ Last updated: 2026-09-30.
 | --- | --- | --- |
 | Main menu | 60 | 60 |
 | c10, 343 Guilty Spark (swamp) | about 44 | 26 |
-| b30, The Silent Cartographer (beach battle) | about 38 (34–42) | 26 |
-| a30, Halo (level opening) | about 49 | 20 |
+| b30, The Silent Cartographer (beach battle) | about 41 (36–46) | 26 |
+| a30, Halo (level opening) | about 54 | 20 |
 <!-- end of performance table -->
 
 The 640x480 column was measured on an earlier build and is being re-measured.
@@ -221,6 +222,30 @@ upstream (`port/linux/src` and `source/`).
 Details: [docs/HOW-IT-WORKS.md](docs/HOW-IT-WORKS.md) and
 [port/knulli/README.md](port/knulli/README.md).
 
+## Documentation
+
+The [documentation index](docs/README.md) describes each document and
+suggests a reading order for players, builders and developers.
+
+- [Install](docs/INSTALL.md): the player's guide, from copying the files to
+  the controls, the saves and what the launcher does to the clocks.
+- [Configuration](docs/CONFIGURATION.md): every setting and `HALO_*`
+  variable, with its default and effect.
+- [Building](docs/BUILDING.md): building from source, step by step, with the
+  common build errors.
+- [How it works](docs/HOW-IT-WORKS.md): the architecture in brief.
+- [Architecture](docs/ARCHITECTURE.md): the guest and the host, the GL
+  thread, the renderer and the rasterizer changes in depth.
+- [Performance](docs/PERFORMANCE.md): the optimisation history and its
+  measurements.
+- [Profiling](docs/PROFILING.md): the measuring tools and how to read them.
+- [Mali-G31 notes](docs/MALI-G31-NOTES.md): lessons for porting a
+  Direct3D-era renderer to this GPU.
+- [Contributing](docs/CONTRIBUTING-DEV.md): how to change the code and
+  benchmark a change.
+- [Roadmap](docs/ROADMAP.md): current limits and planned work.
+- [FAQ](docs/FAQ.md) and [legal notice](docs/LEGAL.md).
+
 ## Configuration
 
 The settings are in `halo/config.toml`, written at the first launch. The
@@ -239,7 +264,9 @@ launcher's defaults for the handheld:
 | `network.online` | `false` | Internet play through invite links; off. |
 
 Environment variables such as `HALO_RENDER_SCALE=0.6` override a setting for
-one run. The `debug.*` settings and the profiling variables are described in
+one run. Every setting is described in
+[docs/CONFIGURATION.md](docs/CONFIGURATION.md), and the `debug.*` settings and
+the profiling variables also in
 [port/knulli/README.md](port/knulli/README.md#tools-for-performance-work).
 
 A file `halo/init.txt` runs console commands at start-up, for example
@@ -275,8 +302,8 @@ the halo-ce-universal decompilation; you supply the Xbox game's data.
 ### What frame rate does Halo CE get on the RG35XX H?
 
 At the default render scale of 0.75: 60 fps in the menus, about 44 fps on
-343 Guilty Spark (c10), about 38 fps in the beach battle of The Silent
-Cartographer (b30), and about 49 fps at the opening of Halo (a30). At
+343 Guilty Spark (c10), about 41 fps in the beach battle of The Silent
+Cartographer (b30), and about 54 fps at the opening of Halo (a30). At
 the full 640x480 it is 20 to 26 fps. The numbers are improving; see the
 [performance table](#performance).
 

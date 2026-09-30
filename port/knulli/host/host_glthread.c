@@ -79,16 +79,21 @@ static unsigned char *ring;
 static uint32_t frames_ahead = 1;
 static pthread_t thread;
 /* what each thread writes, on cache lines of its own: a write to a line the
-other thread reads takes it from that core's cache */
+other thread reads takes it from that core's cache. The producer's own
+state, written with every command, is on a line the consumer never reads. */
 static struct
 {
 	uint64_t head;              /* the end of what it wrote */
-	uint64_t published;         /* the end of what the consumer may read */
+	uint64_t published;         /* producer_shared.published, as last stored */
 	uint64_t consumed;          /* consumer.consumed, when last read */
 	struct command *pending;
-	uint32_t sleeping;
 	uint32_t frames_submitted;
 } __attribute__((aligned(64))) producer;
+static struct
+{
+	uint64_t published;         /* the end of what the consumer may read */
+	uint32_t sleeping;
+} __attribute__((aligned(64))) producer_shared;
 static struct
 {
 	uint64_t consumed;          /* the end of what it has done */
@@ -403,10 +408,10 @@ void glthread_timing_report(uint32_t frames)
 
 static void wake_producer(void)
 {
-	if (__atomic_load_n(&producer.sleeping, __ATOMIC_SEQ_CST))
+	if (__atomic_load_n(&producer_shared.sleeping, __ATOMIC_SEQ_CST))
 	{
-		__atomic_store_n(&producer.sleeping, 0, __ATOMIC_SEQ_CST);
-		futex_wake(&producer.sleeping);
+		__atomic_store_n(&producer_shared.sleeping, 0, __ATOMIC_SEQ_CST);
+		futex_wake(&producer_shared.sleeping);
 	}
 }
 
@@ -417,7 +422,7 @@ static uint64_t wait_for_work(uint64_t position)
 
 	for (spin = 0; spin < SPIN_LIMIT; spin++)
 	{
-		end = __atomic_load_n(&producer.published, __ATOMIC_ACQUIRE);
+		end = __atomic_load_n(&producer_shared.published, __ATOMIC_ACQUIRE);
 		if (end != position)
 			return end;
 		relax();
@@ -425,7 +430,7 @@ static uint64_t wait_for_work(uint64_t position)
 	for (;;)
 	{
 		__atomic_store_n(&consumer.sleeping, 1, __ATOMIC_SEQ_CST);
-		end = __atomic_load_n(&producer.published, __ATOMIC_SEQ_CST);
+		end = __atomic_load_n(&producer_shared.published, __ATOMIC_SEQ_CST);
 		if (end != position)
 		{
 			__atomic_store_n(&consumer.sleeping, 0, __ATOMIC_SEQ_CST);
@@ -532,9 +537,17 @@ static void *gl_thread_main(void *unused)
 
 /* ---------- the producer */
 
+/* the commands the producer queues before it tells the consumer of them,
+in bytes. Each telling is a write to a line the consumer reads, and an
+ordered one (the consumer may have gone to sleep): some 5000 calls a frame
+told one by one took the game's thread about 4% of a frame. It tells the
+consumer of everything before it waits for it. */
+#define PUBLISH_INTERVAL 4096
+
 static void publish(void)
 {
-	__atomic_store_n(&producer.published, producer.head, __ATOMIC_SEQ_CST);
+	producer.published = producer.head;
+	__atomic_store_n(&producer_shared.published, producer.head, __ATOMIC_SEQ_CST);
 	if (__atomic_load_n(&consumer.sleeping, __ATOMIC_SEQ_CST))
 	{
 		__atomic_store_n(&consumer.sleeping, 0, __ATOMIC_SEQ_CST);
@@ -547,17 +560,19 @@ static void publish(void)
 	do \
 	{ \
 		int spin_; \
+		if (!(condition)) \
+			publish(); \
 		for (spin_ = 0; spin_ < SPIN_LIMIT && !(condition); spin_++) \
 			relax(); \
 		while (!(condition)) \
 		{ \
-			__atomic_store_n(&producer.sleeping, 1, __ATOMIC_SEQ_CST); \
+			__atomic_store_n(&producer_shared.sleeping, 1, __ATOMIC_SEQ_CST); \
 			if (condition) \
 			{ \
-				__atomic_store_n(&producer.sleeping, 0, __ATOMIC_SEQ_CST); \
+				__atomic_store_n(&producer_shared.sleeping, 0, __ATOMIC_SEQ_CST); \
 				break; \
 			} \
-			futex_wait(&producer.sleeping, 1); \
+			futex_wait(&producer_shared.sleeping, 1); \
 		} \
 	} while (0)
 
@@ -649,7 +664,8 @@ void glthread_end(void)
 {
 	producer.head += producer.pending->size;
 	producer.pending = NULL;
-	publish();
+	if (producer.head - producer.published >= PUBLISH_INTERVAL)
+		publish();
 }
 
 void glthread_sync(void (*run)(void *), void *context)
@@ -1108,6 +1124,7 @@ static int queued_sdl_gl_swap_window(uint32_t window)
 	uint32_t submitted = ++producer.frames_submitted;
 
 	glthread_host(run_swap, &window, sizeof(window));
+	publish();
 	/* at most frames_ahead frames queued behind the one on screen: the
 	counter is the futex, so that only swaps wake the game, not every
 	command the GL thread makes */

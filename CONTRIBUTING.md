@@ -1,7 +1,9 @@
 # Contributing
 
 Contributions are welcome: performance work, fixes, and reports from other
-H700 devices and firmware.
+H700 devices and firmware. For changes to the code, see
+[docs/CONTRIBUTING-DEV.md](docs/CONTRIBUTING-DEV.md): where each change goes,
+the patch workflow, benchmarking and the coding style.
 
 - **Test on hardware.** Changes to the host or the renderer need a run on a
   real H700 handheld. Say which device and which Knulli release you used.
@@ -17,8 +19,10 @@ H700 devices and firmware.
 - **Upstream changes go in the patch.** Changes to upstream files belong in
   `patches/halo-ce-universal-knulli.patch`: make them in
   `work/halo-ce-universal` after a `./build.sh`, then regenerate the patch
-  with `git -C work/halo-ce-universal diff > patches/halo-ce-universal-knulli.patch`.
-  New files for the Knulli host go in `port/knulli/` in this repository.
+  with `git -C work/halo-ce-universal diff > patches/halo-ce-universal-knulli.patch`
+  (mark a new file with `git -C work/halo-ce-universal add -N <file>` first,
+  or `git diff` leaves it out). New files for the Knulli host go in
+  `port/knulli/` in this repository.
   Generic fixes are better sent to
   [halo-ce-universal](https://github.com/cybersecurity/halo-ce-universal)
   as well.

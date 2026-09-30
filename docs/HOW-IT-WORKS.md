@@ -1,10 +1,14 @@
 # How the Halo CE port for the RG35XX H works
 
-This document describes the architecture of the native port of Halo: Combat
-Evolved to the Anbernic RG35XX H and the other Allwinner H700 handhelds that
-run Knulli. The port's own technical README,
-[port/knulli/README.md](../port/knulli/README.md), is the reference for file
-names and settings; this page gives the overview.
+This document is the short overview of the architecture of the native port
+of Halo: Combat Evolved to the Anbernic RG35XX H and the other Allwinner
+H700 handhelds that run Knulli: what the pieces are, why the game runs as a
+guest image, what the Knulli host does, why a GL thread, and what changed in
+the renderer for the Mali-G31. The in-depth version, with the data flow, the
+memory layout and every renderer change explained, is
+[Architecture](ARCHITECTURE.md). The port's own technical README,
+[port/knulli/README.md](../port/knulli/README.md), lists its files, and
+[Configuration](CONFIGURATION.md) lists the settings.
 
 ## The pieces
 
@@ -26,6 +30,8 @@ The build produces two files:
 - `halo`: the host, an ordinary aarch64 glibc Linux executable that loads the
   image, links it to the firmware's SDL2 and Mali driver, and runs it.
 
+[Building](BUILDING.md) describes how.
+
 ## Why a guest image
 
 Halo's data has the layout of the Xbox's memory: its map (cache) files, its
@@ -41,6 +47,8 @@ that ABI, and its system calls go to the host.
 
 This is native code. The Cortex-A53 cores execute the game's instructions
 directly; there is no instruction translation or emulation of the Xbox.
+[Architecture: the guest and the host](ARCHITECTURE.md#the-guest-and-the-host)
+covers the import table, what crosses the boundary and the memory layout.
 
 ## The Knulli host
 
@@ -54,8 +62,8 @@ replaces the Android-specific parts of the host:
 | SDL bridge | `host/host_sdl2.c`, `host/host_sdl3_events.c` | The guest was built against SDL3. These answer its SDL3 calls with the firmware's SDL2, which has the only video driver for the Mali framebuffer. SDL objects are 64-bit pointers, so the guest holds small handles instead. Event layouts, GL attributes and gamepad types are translated. |
 | GL thread | `host/host_glthread.c`, `glthread_gen.py` | Records the guest's OpenGL ES calls into a queue that another thread replays into the driver (below). |
 | Logging | `compat/android/log.h` | The NDK's log functions, written to the standard error stream (`halo/log.txt`). |
-| Profiling | `host/host_profile.c`, `host/host_gl_timing.c`, `profile.py` | A sampling profiler and a per-function timer of the driver's calls. |
-| Launcher | `Halo.sh`, `halo_extract.py`, `sdl_mapping.py` | Extracts `maps/` from the disc image on the first launch, writes the handheld's defaults to `config.toml`, maps the controls, pins the clocks and restores them on exit. |
+| Profiling | `host/host_profile.c`, `host/host_gl_timing.c`, `profile.py` | A sampling profiler and a per-function timer of the driver's calls ([Profiling](PROFILING.md)). |
+| Launcher | `Halo.sh`, `halo_extract.py`, `sdl_mapping.py` | Extracts `maps/` from the disc image on the first launch, writes the handheld's defaults to `config.toml`, maps the controls, pins the clocks and restores them on exit ([Install](INSTALL.md)). |
 
 The loader, memory manager, thread and system-call code are the Android
 host's (`port/android/host`), compiled with the aarch64 glibc cross compiler
@@ -69,12 +77,16 @@ X11, Wayland, DRM/KMS or Vulkan path. Two properties of this platform shape
 the port:
 
 1. **The driver's CPU cost per draw call is high.** On the Cortex-A53 the
-   driver spends about 28 µs of CPU time on each draw call (validating state,
-   building descriptors and job chains). A battle frame has several hundred
-   draws, so the driver alone can take most of a frame.
+   driver spent about 28 µs of CPU time on each draw call (validating state,
+   building descriptors and job chains) in the first builds; the changes
+   below brought an indexed draw to about 17 µs. A battle frame has several
+   hundred draws, so the driver alone can take most of a frame.
 2. **Switching render targets is expensive.** A tile-based GPU keeps the
    current target in on-chip tile memory. Switching to another target and
    back makes it write the whole target out to memory and read it back in.
+
+[Mali-G31 notes](MALI-G31-NOTES.md) gives the measurements behind these and
+the other lessons.
 
 ## The GL thread
 
@@ -89,10 +101,14 @@ while the game prepares the next frame.
 - Calls that return a value wait for the GL thread. None occurs in a normal
   frame: `glGen*` names come from a reserve the GL thread keeps filled.
 - The game can be at most one frame ahead (`HALO_GL_THREAD_FRAMES`).
+- The game's thread tells the GL thread of new calls in 4 KB steps, and
+  before it waits for anything, rather than after every call.
 - Each side spins briefly before sleeping on a futex; long spinning heats the
   handheld towards its throttling temperature.
 
 `HALO_GL_THREAD=0` turns the thread off.
+[Architecture: the GL thread](ARCHITECTURE.md#the-gl-thread) describes the
+queue, the kinds of call and the frame pacing.
 
 ## Renderer changes
 
@@ -114,10 +130,17 @@ and NV2A register combiners on OpenGL ES 3. The patch adds these changes for
 - **Smaller uniform arrays**: vertex programs declare only the constant
   registers they read, since Mali processes a uniform array whole whenever
   one element changes.
+- **Constants in uniform blocks**: programs that read more than 64 constant
+  registers (the skinned models, which index them) read them from uniform
+  blocks whose range is bound per draw; the skinned models use two, split at
+  register 60, so an object's node matrices are written once a frame.
 - **Sampler objects**: one per sampler configuration, bound rather than
   reconfigured.
 - **Ranged draws**: `glDrawRangeElementsBaseVertex` with the index range the
   renderer already knows, which spares the driver a scan of the indices.
+- **Streaming buffers mapped for good**: with `GL_EXT_buffer_storage`, a
+  write into the frame's vertex, index and constant buffers is a copy into
+  a persistently mapped (write-combined) buffer, not a map and an unmap.
 - **Asynchronous occlusion readback**: the visibility tests (lens flares,
   lights) count samples with an atomic counter. The counters are copied at
   the end of each frame into three read-back buffers, and the game reads a
@@ -130,9 +153,21 @@ and NV2A register combiners on OpenGL ES 3. The patch adds these changes for
   become about 20.
 - **Stable streams**: indexed draws point their attributes at the base
   vertex, so draws from the same vertex buffer share the attribute setup.
+- **Vertex shaders sized to their pixel shaders**: each program's vertex
+  shader writes only the outputs its pixel shader reads, and the point size
+  only for points, which lets the Mali compiler shade positions first and
+  the rest only for the triangles it keeps.
+- **Alpha test dropped where it cannot fail**: a draw whose alpha test is of
+  an opaque texture's alpha uses a shader without it, which keeps Mali's
+  hidden surface removal.
+- **Depth not written out**: the frame's depth and stencil are invalidated
+  before the picture is scaled to the screen.
 - **Model LOD scaling** (`display.model_detail`): objects switch to their
   simpler models sooner, by a factor times the render scale
   (`source/models/models.c`). Models are most of the GPU's vertex work.
+- **Models sorted by shader** (`rasterizer_xbox_models.c`): the opaque
+  objects of a frame are kept and their parts drawn sorted by shader, which
+  spares the driver most of its program changes.
 - **Shadows for a tile-based GPU** (`rasterizer_xbox_shadows.c`,
   `render_objects.c`): on the Xbox each object's shadow switches to the
   shadow targets, draws the silhouette, blurs it in extra passes, and
@@ -141,8 +176,19 @@ and NV2A register combiners on OpenGL ES 3. The patch adds these changes for
   silhouette into a texture of its own, and the second projects them all
   without leaving the main target. The blur is folded into the projection
   shader, which removes the blur passes and their target switches.
+- **The water's bump map** (`rasterizer_xbox_water.c`): built at the start
+  of the frame rather than in the middle of the main pass, and its mip levels
+  drawn straight into the texture the water samples rather than copied there,
+  which made the driver wait for the GPU mid-frame.
 - **vDSO clock**: the guest's clock reads go through the C library's vDSO
   instead of a system call.
+- **Faster `memcmp` and `memcpy`** in the guest
+  (`port/android/guest/runtime/guest_string.c`): eight bytes at a time, as
+  the renderer compares a few hundred bytes of state on every draw.
+
+[Architecture: the renderer](ARCHITECTURE.md#the-direct3d-8-renderer-on-opengl-es)
+and [the rasterizer changes](ARCHITECTURE.md#changes-to-the-games-rasterizer)
+explain each; [Performance](PERFORMANCE.md) gives what each gained.
 
 ## Clocks
 
@@ -158,3 +204,12 @@ the same generic GUID) for another pad, with the wrong buttons.
 `sdl_mapping.py` reads EmulationStation's controller configuration and prints
 an `SDL_GAMECONTROLLERCONFIG` mapping for each connected device, converting
 EmulationStation's Nintendo-style button names to SDL's Xbox-style ones.
+[Install: controls](INSTALL.md#controls) shows the resulting layout.
+
+## Further reading
+
+- [Architecture](ARCHITECTURE.md): the in-depth version of this page.
+- [Performance](PERFORMANCE.md): the optimisation history and measurements.
+- [Mali-G31 notes](MALI-G31-NOTES.md): lessons for porting to this GPU.
+- [Roadmap](ROADMAP.md): what limits the port now, and what is planned.
+- [Documentation index](README.md): every document, and where to start.

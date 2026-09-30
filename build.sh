@@ -100,6 +100,11 @@ if ! tree_is_patched; then
 	git -C "$SRC" reset -q --hard
 	git -C "$SRC" clean -q -fd
 	git -C "$SRC" apply "$PATCH"
+	# the files the patch creates as intent-to-add, so that git diff
+	# (tree_is_patched) sees them (git apply --intent-to-add drops the rest of
+	# the index in git 2.43)
+	git -C "$SRC" apply --summary "$PATCH" | awk '$1 == "create" { print $4 }' |
+		xargs -r git -C "$SRC" add -N --
 fi
 rm -rf "$SRC/port/knulli"
 cp -a "$HERE/port/knulli" "$SRC/port/knulli"

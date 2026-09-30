@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Halo CE on Anbernic RG35XX H: native Knulli port for the H700</title>
-<meta name="description" content="Halo: Combat Evolved runs natively on the Anbernic RG35XX H and other Allwinner H700 handhelds under Knulli: 60 fps menus, about 38 to 49 fps in the campaign. Open-source ARM64 port of the halo-ce-universal decompilation. Bring your own Xbox disc.">
+<meta name="description" content="Halo: Combat Evolved runs natively on the Anbernic RG35XX H and other Allwinner H700 handhelds under Knulli: 60 fps menus, about 41 to 54 fps in the campaign. Open-source ARM64 port of the halo-ce-universal decompilation. Bring your own Xbox disc.">
 <meta name="keywords" content="Halo CE, Halo Combat Evolved, Anbernic, RG35XX H, RG35XXH, Knulli, Batocera, H700, Mali-G31, retro handheld, ARM64, native port, decompilation">
 <meta name="robots" content="index, follow">
 <link rel="canonical" href="https://kirklandsig.github.io/halo-ce-anbernic-rg35xx/">
@@ -15,7 +15,7 @@
 <meta property="og:type" content="website">
 <meta property="og:site_name" content="Halo CE for Anbernic RG35XX H">
 <meta property="og:title" content="Halo: Combat Evolved on Anbernic RG35XX H: native port for Knulli">
-<meta property="og:description" content="A native ARM64 port of the Halo CE decompilation to the Allwinner H700 handhelds under Knulli. 60 fps menus, about 38 to 49 fps in the campaign. No emulation.">
+<meta property="og:description" content="A native ARM64 port of the Halo CE decompilation to the Allwinner H700 handhelds under Knulli. 60 fps menus, about 41 to 54 fps in the campaign. No emulation.">
 <meta property="og:url" content="https://kirklandsig.github.io/halo-ce-anbernic-rg35xx/">
 <meta property="og:image" content="https://kirklandsig.github.io/halo-ce-anbernic-rg35xx/screenshots/b30-beach.png">
 <meta property="og:image:width" content="640">
@@ -23,7 +23,7 @@
 <meta property="og:image:alt" content="Halo CE beach battle on The Silent Cartographer running on an Anbernic RG35XX H">
 <meta name="twitter:card" content="summary_large_image">
 <meta name="twitter:title" content="Halo: Combat Evolved on Anbernic RG35XX H: native port for Knulli">
-<meta name="twitter:description" content="A native ARM64 port of the Halo CE decompilation to the Allwinner H700 handhelds under Knulli. 60 fps menus, about 38 to 49 fps in the campaign. No emulation.">
+<meta name="twitter:description" content="A native ARM64 port of the Halo CE decompilation to the Allwinner H700 handhelds under Knulli. 60 fps menus, about 41 to 54 fps in the campaign. No emulation.">
 <meta name="twitter:image" content="https://kirklandsig.github.io/halo-ce-anbernic-rg35xx/screenshots/b30-beach.png">
 <meta name="twitter:image:alt" content="Halo CE beach battle on The Silent Cartographer running on an Anbernic RG35XX H">
 <script type="application/ld+json">
@@ -97,7 +97,7 @@
       "name": "What frame rate does Halo CE get on the RG35XX H?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "At the default render scale of 0.75: 60 fps in the menus, about 44 fps on 343 Guilty Spark (c10), about 38 fps in the beach battle of The Silent Cartographer (b30), and about 49 fps at the opening of Halo (a30). At the full 640x480 it is 20 to 26 fps. The numbers are improving; see the performance table."
+        "text": "At the default render scale of 0.75: 60 fps in the menus, about 44 fps on 343 Guilty Spark (c10), about 41 fps in the beach battle of The Silent Cartographer (b30), and about 54 fps at the opening of Halo (a30). At the full 640x480 it is 20 to 26 fps. The numbers are improving; see the performance table."
       }
     },
     {
@@ -319,7 +319,7 @@ footer p { margin: 0 0 10px; }
   <div class="hero">
     <h1>Halo: Combat Evolved on the Anbernic RG35XX H</h1>
     <p class="subtitle">A native ARM64 port for Knulli on the Allwinner H700 and its Mali-G31 GPU.</p>
-    <p class="lead">Yes, Halo CE runs natively on the Anbernic RG35XX H (RG35XXH) under Knulli: 60 fps in the menus and about 38 to 49 fps in campaign levels at the default render scale. The port builds the <a href="https://github.com/cybersecurity/halo-ce-universal">halo-ce-universal</a> decompilation of the Xbox game as AArch64 code, with no emulation, no Box64, no Wine and no xemu. You need your own copy of the original Xbox game; the project is source code and documentation only.</p>
+    <p class="lead">Yes, Halo CE runs natively on the Anbernic RG35XX H (RG35XXH) under Knulli: 60 fps in the menus and about 41 to 54 fps in campaign levels at the default render scale. The port builds the <a href="https://github.com/cybersecurity/halo-ce-universal">halo-ce-universal</a> decompilation of the Xbox game as AArch64 code, with no emulation, no Box64, no Wine and no xemu. You need your own copy of the original Xbox game; the project is source code and documentation only.</p>
     <p class="buttons">
       <a class="button primary" href="https://github.com/kirklandsig/halo-ce-anbernic-rg35xx">Source on GitHub</a>
       <a class="button secondary" href="#install">How to install</a>
@@ -328,8 +328,8 @@ footer p { margin: 0 0 10px; }
     <ul class="stats" aria-label="Frame rates at render scale 0.75">
       <li><strong>60 fps</strong><span>Main menu</span></li>
       <li><strong>~44 fps</strong><span>343 Guilty Spark (c10)</span></li>
-      <li><strong>~38 fps</strong><span>The Silent Cartographer battle (b30)</span></li>
-      <li><strong>~49 fps</strong><span>Halo, level opening (a30)</span></li>
+      <li><strong>~41 fps</strong><span>The Silent Cartographer battle (b30)</span></li>
+      <li><strong>~54 fps</strong><span>Halo, level opening (a30)</span></li>
     </ul>
   </div>
 
@@ -352,7 +352,7 @@ footer p { margin: 0 0 10px; }
     <ul class="features">
       <li>Native AArch64 code for the game and the host: the Cortex-A53 cores run the game's own logic, nothing is translated or emulated.</li>
       <li>Runs on stock Knulli with the firmware's own SDL2 and Arm's Mali-G31 OpenGL ES driver on the framebuffer.</li>
-      <li>A GL thread moves the Mali driver's per-draw CPU cost, about 28 µs a draw call, onto another core.</li>
+      <li>A GL thread moves the Mali driver's per-draw CPU cost, about 17 µs a draw call, onto another core.</li>
       <li>Renderer changes for a tile-based GPU: program binary cache, fp16 shaders, 16-bit textures, asynchronous occlusion readback, quad batching and decal ordering (about 700 decal draws become about 20), model LOD scaling, and shadows drawn without render-target switches.</li>
       <li>Adjustable render scale, CPU and GPU clocks pinned while playing, and the handheld's own controls.</li>
       <li>The first launch extracts <code>maps/</code> from your Xbox disc image on the handheld.</li>
@@ -369,8 +369,8 @@ footer p { margin: 0 0 10px; }
         <tbody>
           <tr><td>Main menu</td><td class="num">60</td><td class="num">60</td></tr>
           <tr><td>c10, 343 Guilty Spark (swamp)</td><td class="num">about 44</td><td class="num">26</td></tr>
-          <tr><td>b30, The Silent Cartographer (beach battle)</td><td class="num">about 38</td><td class="num">26</td></tr>
-          <tr><td>a30, Halo (level opening)</td><td class="num">about 49</td><td class="num">20</td></tr>
+          <tr><td>b30, The Silent Cartographer (beach battle)</td><td class="num">about 41</td><td class="num">26</td></tr>
+          <tr><td>a30, Halo (level opening)</td><td class="num">about 54</td><td class="num">20</td></tr>
         </tbody>
       </table>
     </div>
@@ -432,7 +432,7 @@ ls dist/           # halo  halo_guest.elf  Halo.sh  halo_extract.py  sdl_mapping
     <h3>Can the Anbernic RG35XX H run Halo: Combat Evolved?</h3>
     <p>Yes. This port runs Halo CE natively on the RG35XX H under Knulli, as AArch64 code on the H700's Cortex-A53 cores with the Mali-G31 GPU. It is built from the halo-ce-universal decompilation; you supply the Xbox game's data.</p>
     <h3>What frame rate does Halo CE get on the RG35XX H?</h3>
-    <p>At the default render scale of 0.75: 60 fps in the menus, about 44 fps on 343 Guilty Spark (c10), about 38 fps in the beach battle of The Silent Cartographer (b30), and about 49 fps at the opening of Halo (a30). At the full 640x480 it is 20 to 26 fps. The numbers are improving; see the <a href="#performance">performance table</a>.</p>
+    <p>At the default render scale of 0.75: 60 fps in the menus, about 44 fps on 343 Guilty Spark (c10), about 41 fps in the beach battle of The Silent Cartographer (b30), and about 54 fps at the opening of Halo (a30). At the full 640x480 it is 20 to 26 fps. The numbers are improving; see the <a href="#performance">performance table</a>.</p>
     <h3>Does it work with the Xbox version or the PC version of Halo?</h3>
     <p>The Xbox version. The decompilation is of the Xbox build, and it reads the Xbox maps. The PC version (Gearbox's port) has different map files that this code cannot load. Use a disc image of the original Xbox game.</p>
     <h3>Is this legal?</h3>

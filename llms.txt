@@ -18,7 +18,7 @@
 
 ## Frame rates (RG35XX H, last updated 2026-09-30)
 
-- Render scale 0.75 (default): main menu 60 fps; c10, 343 Guilty Spark, about 44; b30, The Silent Cartographer beach battle, about 38; a30, Halo level opening, about 49.
+- Render scale 0.75 (default): main menu 60 fps; c10, 343 Guilty Spark, about 44; b30, The Silent Cartographer beach battle, about 41; a30, Halo level opening, about 54.
 - Render scale 1.0 (640x480): main menu 60; c10 26; b30 26; a30 20.
 
 ## Install
@@ -39,7 +39,7 @@
 ## How it works
 
 - The upstream Android port compiles the game as an ILP32 AArch64 guest image (32-bit pointers, as the game's data requires). This port adds a glibc aarch64 host for Knulli that bridges the guest's SDL3 calls to the firmware's SDL2 and runs OpenGL ES on a dedicated GL thread.
-- Optimisations for the Mali-G31: the GL thread (the driver costs about 28 µs of CPU per draw call), program binary cache, fp16 shaders, 16-bit textures, asynchronous occlusion readback, quad batching and decal ordering (about 700 decal draws become about 20), model LOD scaling, shadows restructured to avoid render-target switches on the tile-based GPU, render scale, and CPU/GPU clock pinning.
+- Optimisations for the Mali-G31: the GL thread (the driver costs about 17 µs of CPU per draw call, 28 µs before the renderer's changes), program binary cache, fp16 shaders, 16-bit textures, asynchronous occlusion readback, quad batching and decal ordering (about 700 decal draws become about 20), model LOD scaling, shadows restructured to avoid render-target switches on the tile-based GPU, render scale, and CPU/GPU clock pinning.
 
 ## Legal
 
@@ -52,6 +52,14 @@
 - [How it works](https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/blob/main/docs/HOW-IT-WORKS.md): architecture
 - [Performance](https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/blob/main/docs/PERFORMANCE.md): optimisation history and measurements
 - [FAQ](https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/blob/main/docs/FAQ.md)
+- [Documentation index](https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/blob/main/docs/README.md): every document and a reading order for players, builders and developers
+- [Install guide](https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/blob/main/docs/INSTALL.md): copying the game and port to the SD card, first launch, controls, updating, uninstalling
+- [Building from source](https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/blob/main/docs/BUILDING.md): toolchain, Android NDK, device libraries, build.sh stages, build errors
+- [Configuration reference](https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/blob/main/docs/CONFIGURATION.md): every config.toml setting and HALO_* environment variable
+- [Architecture](https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/blob/main/docs/ARCHITECTURE.md): guest image, Knulli host, GL thread, Direct3D 8 on OpenGL ES renderer, engine changes
+- [Profiling guide](https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/blob/main/docs/PROFILING.md): frame-time, GL, GPU-pass and sampling tools and how to read them
+- [Mali-G31 porting notes](https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/blob/main/docs/MALI-G31-NOTES.md): measured costs of the Mali-G31 driver and GPU for a D3D-era renderer
+- [Roadmap](https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/blob/main/docs/ROADMAP.md): current limits and planned work toward 60 fps
 - [Legal notice](https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/blob/main/docs/LEGAL.md)
 - [Port technical README](https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/blob/main/port/knulli/README.md)
 - [Project site](https://kirklandsig.github.io/halo-ce-anbernic-rg35xx/)
