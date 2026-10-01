@@ -35,6 +35,9 @@ struct profile_sample
 {
 	int32_t tid;
 	int32_t depth;
+	/* set last, once the sample is whole (one being written as the profile
+	is saved is left out) */
+	uint32_t whole;
 	uint64_t pc;
 	uint64_t lr;
 	uint64_t frames[PROFILE_DEPTH];
@@ -75,7 +78,7 @@ static void profile_handler(int signal_number, siginfo_t *information, void *con
 	4 GB); other stacks are not followed. The bounds come from TLS: a lock
 	here would deadlock against a thread interrupted while holding it */
 	for (depth = 0; depth < PROFILE_DEPTH && fp && !(fp & 7) && fp >= host_thread_stack_low &&
-		fp + 16 <= host_thread_stack_high; depth++)
+		host_thread_stack_high >= 16 && fp <= host_thread_stack_high - 16; depth++)
 	{
 		const uint64_t *frame = (const uint64_t *)fp;
 
@@ -88,6 +91,7 @@ static void profile_handler(int signal_number, siginfo_t *information, void *con
 		fp = frame[0];
 	}
 	sample->depth = depth;
+	__atomic_store_n(&sample->whole, 1, __ATOMIC_RELEASE);
 }
 
 static void *profile_thread(void *context)
@@ -186,6 +190,7 @@ void host_profile_mark(uint32_t frame, uint32_t microseconds)
 	samples[index].depth = 0;
 	samples[index].pc = frame;
 	samples[index].lr = microseconds;
+	__atomic_store_n(&samples[index].whole, 1, __ATOMIC_RELEASE);
 }
 
 static void copy_file(FILE *output, const char *path)
@@ -211,7 +216,10 @@ void host_profile_write(void)
 		return;
 	profiling = 0;
 	signal(PROFILE_SIGNAL, SIG_IGN);
-	count = sample_count < capacity ? sample_count : capacity;
+	/* (read once: handlers still running can raise it past the capacity) */
+	count = __atomic_load_n(&sample_count, __ATOMIC_ACQUIRE);
+	if (count > capacity)
+		count = capacity;
 	output = fopen(profile_path, "w");
 	if (!output)
 		return;
@@ -258,6 +266,8 @@ void host_profile_write(void)
 		const struct profile_sample *sample = &samples[index];
 		int depth;
 
+		if (!__atomic_load_n(&sample->whole, __ATOMIC_ACQUIRE))
+			continue;
 		fprintf(output, "%d %llx %llx", sample->tid, (unsigned long long)sample->pc, (unsigned long long)sample->lr);
 		for (depth = 0; depth < sample->depth; depth++)
 			fprintf(output, " %llx", (unsigned long long)sample->frames[depth]);

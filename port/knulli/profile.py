@@ -23,13 +23,16 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+
+
+def llvm_tool(tool):
+    """an LLVM tool by its versioned name or its plain one, or None"""
+    return next((name for name in (f"{tool}-22", tool) if shutil.which(name)), None)
 
 
 def symbolizer():
-    for name in ("llvm-symbolizer-22", "llvm-symbolizer"):
-        if shutil.which(name):
-            return name
-    raise SystemExit("llvm-symbolizer not found")
+    return llvm_tool("llvm-symbolizer") or sys.exit("llvm-symbolizer not found")
 
 
 def parse(path):
@@ -117,7 +120,10 @@ class Symbols:
 
     @staticmethod
     def exported(path):
-        result = subprocess.run(["llvm-nm-22", "-D", "--defined-only", path], capture_output=True, text=True)
+        nm = llvm_tool("llvm-nm")
+        if not nm:
+            return []
+        result = subprocess.run([nm, "-D", "--defined-only", path], capture_output=True, text=True)
         table = []
         for line in result.stdout.split("\n"):
             parts = line.split()

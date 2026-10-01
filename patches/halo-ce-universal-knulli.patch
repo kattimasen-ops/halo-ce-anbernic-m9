@@ -165,7 +165,7 @@ index 4d103199..82a30bda 100644
  #include <string.h>
  #include <sys/syscall.h>
 diff --git a/port/android/host/host_gl.c b/port/android/host/host_gl.c
-index 62d1d0a2..89643553 100644
+index 62d1d0a2..f329e800 100644
 --- a/port/android/host/host_gl.c
 +++ b/port/android/host/host_gl.c
 @@ -11,6 +11,8 @@ already have host types by then. Only strings need copying back.
@@ -187,7 +187,7 @@ index 62d1d0a2..89643553 100644
  	if (library)
  		function = dlsym(library, name);
  	if (!function)
-@@ -77,6 +82,91 @@ uint32_t host_gl_read_buffer_word(uint32_t buffer, uint32_t offset)
+@@ -77,6 +82,101 @@ uint32_t host_gl_read_buffer_word(uint32_t buffer, uint32_t offset)
  	return value;
  }
  
@@ -211,7 +211,7 @@ index 62d1d0a2..89643553 100644
 +	GLuint buffer;
 +	uint32_t size;
 +	uint32_t pair_count;
-+	uint32_t pairs[HALO_VISIBILITY_FRAME_TESTS][2];
++	uint32_t pairs[HALO_VISIBILITY_FRAME_TESTS][HALO_VISIBILITY_PAIR_WORDS];
 +	int valid;
 +} visibility_frames[VISIBILITY_FRAMES];
 +static uint32_t visibility_results[HALO_VISIBILITY_RESULTS];
@@ -239,9 +239,19 @@ index 62d1d0a2..89643553 100644
 +			{
 +				uint32_t test = visibility_frames[slot].pairs[index][0];
 +				uint32_t counter = visibility_frames[slot].pairs[index][1];
++				float area;
 +
++				/* a count of the game's pixels: divided by the area of one in
++				the test's target as it was */
++				memcpy(&area, &visibility_frames[slot].pairs[index][2], sizeof(area));
 +				if (test < HALO_VISIBILITY_RESULTS && counter * sizeof(uint32_t) < visibility_frames[slot].size)
-+					__atomic_store_n(&visibility_results[test], values[counter], __ATOMIC_RELAXED);
++				{
++					uint32_t count = values[counter];
++
++					if (area > 0.0f && area != 1.0f)
++						count = (uint32_t)(count / area + 0.5f);
++					__atomic_store_n(&visibility_results[test], count, __ATOMIC_RELAXED);
++				}
 +			}
 +			glUnmapBuffer(GL_COPY_READ_BUFFER);
 +		}
@@ -262,7 +272,7 @@ index 62d1d0a2..89643553 100644
 +		glCopyBufferSubData(GL_COPY_READ_BUFFER, GL_COPY_WRITE_BUFFER, 0, 0, counter_bytes);
 +		if (pair_count > HALO_VISIBILITY_FRAME_TESTS)
 +			pair_count = HALO_VISIBILITY_FRAME_TESTS;
-+		memcpy(visibility_frames[slot].pairs, pairs, pair_count * 2 * sizeof(uint32_t));
++		memcpy(visibility_frames[slot].pairs, pairs, pair_count * HALO_VISIBILITY_PAIR_WORDS * sizeof(uint32_t));
 +		visibility_frames[slot].pair_count = pair_count;
 +		visibility_frames[slot].valid = 1;
 +	}
@@ -279,7 +289,25 @@ index 62d1d0a2..89643553 100644
  /* The renderer streams each frame's vertices and indices into the next of
  a ring of buffers (d3d8_gl.c). A fence marks the end of each frame's work,
  and a buffer is written again only once the GPU has passed the fence of the
-@@ -105,6 +195,333 @@ void host_gl_wait_frame(uint32_t slot)
+@@ -99,12 +199,349 @@ void host_gl_wait_frame(uint32_t slot)
+ {
+ 	if (slot >= FRAME_FENCE_SLOTS || !frame_fences[slot])
+ 		return;
+-	/* at most a second: a lost context must not hang the game */
+-	glClientWaitSync(frame_fences[slot], GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000ull);
++	/* until the GPU is done with them; ten seconds at most, so that a lost
++	context does not hang the game */
++	{
++		GLenum result = GL_TIMEOUT_EXPIRED;
++		int second;
++
++		for (second = 0; second < 10 && result == GL_TIMEOUT_EXPIRED; second++)
++			result = glClientWaitSync(frame_fences[slot], GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000ull);
++		if (result == GL_TIMEOUT_EXPIRED || result == GL_WAIT_FAILED)
++			host_logf(HOST_LOG_WARN, "frame fence %u not signalled (%s)", slot,
++				result == GL_WAIT_FAILED ? "the wait failed" : "after 10 s");
++	}
+ 	glDeleteSync(frame_fences[slot]);
  	frame_fences[slot] = NULL;
  }
  
@@ -613,7 +641,7 @@ index 62d1d0a2..89643553 100644
  /* writes data into the buffer bound to target. The renderer streams a
  range per draw, so a frame makes hundreds of these, and the cost per call
  rather than per byte is what a frame is made of.
-@@ -123,7 +540,20 @@ makes still holds: the renderer only writes ranges that no queued draw reads,
+@@ -123,7 +560,20 @@ makes still holds: the renderer only writes ranges that no queued draw reads,
  because host_gl_wait_frame releases the ring slot first. */
  void host_gl_buffer_write(uint32_t target, uint32_t offset, uint32_t size, const void *data)
  {
@@ -663,7 +691,7 @@ index a2cb5c6c..ac9a6498 100644
  		{
  			host_logf(HOST_LOG_WARN, "guest import %s is not available", name);
 diff --git a/port/android/host/host_syscall.c b/port/android/host/host_syscall.c
-index e7e47501..ffb6a735 100644
+index e7e47501..39d39747 100644
 --- a/port/android/host/host_syscall.c
 +++ b/port/android/host/host_syscall.c
 @@ -207,7 +207,10 @@ long long host_syscall(long long number, long long a, long long b, long long c,
@@ -678,8 +706,18 @@ index e7e47501..ffb6a735 100644
  
  		if (result == 0)
  			timespec_out((uint64_t)b, &value);
+@@ -246,7 +249,8 @@ long long host_syscall(long long number, long long a, long long b, long long c,
+ 		if (!timespec_in((uint64_t)c, &request))
+ 			return -EFAULT;
+ 		result = clock_nanosleep((clockid_t)a, (int)b, &request, &remaining);
+-		if (result == EINTR)
++		/* (an absolute sleep leaves remaining as it was) */
++		if (result == EINTR && !((int)b & TIMER_ABSTIME))
+ 			timespec_out((uint64_t)d, &remaining);
+ 		return -result;
+ 	}
 diff --git a/port/android/host/host_thread.c b/port/android/host/host_thread.c
-index bc939b8b..a7821200 100644
+index bc939b8b..2fce2851 100644
 --- a/port/android/host/host_thread.c
 +++ b/port/android/host/host_thread.c
 @@ -27,6 +27,7 @@ Thread stacks are freed by a reaper thread once the thread has fully exited.
@@ -690,11 +728,12 @@ index bc939b8b..a7821200 100644
  
  uint32_t host_get_tp(void)
  {
-@@ -129,6 +130,8 @@ static void *thread_main(void *context)
+@@ -129,6 +130,9 @@ static void *thread_main(void *context)
  	struct finished_thread *finished;
  
  	free(context);
-+	host_thread_stack_low = (uintptr_t)start.mapping;
++	/* (above the guard page, which is not readable) */
++	host_thread_stack_low = (uintptr_t)start.mapping + GUARD_SIZE;
 +	host_thread_stack_high = (uintptr_t)start.mapping + start.mapping_size;
  	host_debug_thread_started();
  	start.function(start.argument);
@@ -721,10 +760,10 @@ index 2888fe99..34810bf5 100644
  
  host_errno
 diff --git a/port/android/include/halo_android_abi.h b/port/android/include/halo_android_abi.h
-index baa28789..f1d55fcf 100644
+index baa28789..26522655 100644
 --- a/port/android/include/halo_android_abi.h
 +++ b/port/android/include/halo_android_abi.h
-@@ -34,6 +34,11 @@ keeps its heaps low in the address space and fills it upwards */
+@@ -34,6 +34,15 @@ keeps its heaps low in the address space and fills it upwards */
  #define HALO_GUEST_WINDOW_BASE 0x80000000u
  #define HALO_GUEST_WINDOW_SIZE 0x08000000u
  
@@ -732,6 +771,10 @@ index baa28789..f1d55fcf 100644
 +game's test indexes it keeps results for */
 +#define HALO_VISIBILITY_FRAME_TESTS 512
 +#define HALO_VISIBILITY_RESULTS 4096
++/* the words of each of its tests: the game's test index, the counter's, and
++the area (a float's bits) of a game pixel in the test's target, which the
++count is divided by */
++#define HALO_VISIBILITY_PAIR_WORDS 3
 +
  #define HALO_GUEST_MAGIC 0x4f4c4148u /* 'HALO' */
  #define HALO_GUEST_ABI_VERSION 1
@@ -752,7 +795,7 @@ index dba15252..91c2c0d2 100644
  /* the width of the screen the game draws, 480 lines tall: the device's or
  the display's shape, or 640 (port/linux/src/d3d8_gl.c) */
 diff --git a/port/linux/src/d3d8_gl.c b/port/linux/src/d3d8_gl.c
-index 36c5f238..0d20472f 100644
+index 36c5f238..a44af0cb 100644
 --- a/port/linux/src/d3d8_gl.c
 +++ b/port/linux/src/d3d8_gl.c
 @@ -25,8 +25,11 @@ Conventions carried over from the Xbox:
@@ -798,31 +841,40 @@ index 36c5f238..0d20472f 100644
  long halo_screen_width(void)
  {
  	if (!screen_width)
-@@ -155,6 +173,8 @@ struct vertex_element
+@@ -155,6 +173,13 @@ struct vertex_element
  	unsigned short offset;
  };
  
-+#define VERTEX_SHADER_VARIANTS 32
++/* the instanced variants a program has at most (one for each set of low
++registers its draws read): past them its draws are not instanced */
++#define INSTANCED_VARIANTS 32
++
++/* a shader being translated beside the renderer (shader_worker) */
++struct shader_job;
 +
  struct vertex_shader_object
  {
  	unsigned long signature;
-@@ -164,8 +184,20 @@ struct vertex_shader_object
+@@ -164,8 +189,24 @@ struct vertex_shader_object
  	struct vertex_element elements[XGPU_VERTEX_ATTRIBUTE_COUNT];
  	unsigned long element_count;
  	unsigned long packed_mask;
 -	/* [0] streams per the declaration, [1] immediate mode (all floats) */
 -	GLuint shader[2];
 +	/* its shaders: for the declaration's streams or immediate mode (all
-+	floats), each writing some of the outputs (vertex_shader_get) */
++	floats), each writing some of the outputs (vertex_shader_get), each kept
++	once made, so that one is translated once however the draws alternate */
 +	struct
 +	{
 +		unsigned long flags;
++		/* the declaration's packed attributes it reads (0 in immediate mode) */
++		unsigned long packed;
 +		/* an instanced shader's own low registers (XGPU_OUTPUT_INSTANCED) */
 +		unsigned long long mask;
 +		GLuint shader;
-+	} shaders[VERTEX_SHADER_VARIANTS];
-+	unsigned long shader_count;
++		struct shader_job *job;     /* while it is translated */
++	} *shaders;
++	unsigned long shader_count, shader_capacity;
 +	/* the one the latest lookup found */
 +	unsigned long last_shader;
 +	/* the low registers (below XGPU_CONSTANT_SPLIT) its two-block shaders read */
@@ -830,10 +882,11 @@ index 36c5f238..0d20472f 100644
  };
  
  /* ---------- programs */
-@@ -176,6 +208,11 @@ struct fragment_entry
+@@ -176,6 +217,12 @@ struct fragment_entry
  	unsigned long hash;
  	struct nv2a_pixel_shader_key key;
  	GLuint shader;
++	struct shader_job *job;         /* while it is translated */
 +	/* the vertex shader outputs it reads (XGPU_OUTPUT_*) */
 +	unsigned long inputs;
 +	/* its variant for instanced programs, once made (fragment_instanced_shader) */
@@ -842,7 +895,7 @@ index 36c5f238..0d20472f 100644
  };
  
  /* the uniforms a draw sets besides the vertex constants */
-@@ -205,6 +242,29 @@ struct program_entry
+@@ -205,6 +252,29 @@ struct program_entry
  	GLuint fragment_shader;
  	GLuint program;
  	GLint constants;
@@ -872,7 +925,7 @@ index 36c5f238..0d20472f 100644
  	GLint viewport_scale;
  	GLint viewport_offset;
  	GLint point_size;
-@@ -258,6 +318,7 @@ struct framebuffer_entry
+@@ -258,6 +328,7 @@ struct framebuffer_entry
  {
  	struct framebuffer_entry *next;
  	GLuint color;
@@ -880,7 +933,7 @@ index 36c5f238..0d20472f 100644
  	GLuint depth;
  	GLuint framebuffer;
  };
-@@ -323,16 +384,24 @@ struct gl_device
+@@ -323,16 +394,26 @@ struct gl_device
  	float attributes[XGPU_VERTEX_ATTRIBUTE_COUNT][4];
  	BOOL immediate_active;
  	D3DPRIMITIVETYPE immediate_type;
@@ -898,6 +951,8 @@ index 36c5f238..0d20472f 100644
 +	unsigned long stream_generation;
  #ifdef HALO_ANDROID
  	GLuint stream_buffers[STREAM_BUFFER_RING];
++	/* the one a frame streams on into when its own is full (stream_reserve) */
++	GLuint stream_spare;
  	GLuint index_buffers[STREAM_BUFFER_RING];
  	unsigned long buffer_ring;
 +	/* GL_UNIFORM_BUFFER_OFFSET_ALIGNMENT */
@@ -905,7 +960,7 @@ index 36c5f238..0d20472f 100644
  #endif
  	unsigned long stream_offset;
  	GLuint index_buffer;
-@@ -347,12 +416,14 @@ struct gl_device
+@@ -347,12 +428,14 @@ struct gl_device
  	GLuint active_query;
  	BOOL visibility_test_active;
  #ifdef HALO_ANDROID
@@ -918,12 +973,12 @@ index 36c5f238..0d20472f 100644
 -	unsigned long counter_of_slot[VISIBILITY_TEST_SLOTS];
 +	/* the tests of this frame: the game's index and the counter
 +	(host_gl_visibility_frame at Present) */
-+	unsigned int visibility_pairs[HALO_VISIBILITY_FRAME_TESTS][2];
++	unsigned int visibility_pairs[HALO_VISIBILITY_FRAME_TESTS][HALO_VISIBILITY_PAIR_WORDS];
 +	unsigned long visibility_pair_count;
  #else
  	/* each test's latest result, which the GPU writes (as a query buffer)
  	when the test's draws are done: the game waits for results at the start
-@@ -366,6 +437,10 @@ struct gl_device
+@@ -366,6 +449,10 @@ struct gl_device
  	unsigned long next_vertex_shader_id;
  	BOOL gl_ready;
  	BOOL created;
@@ -934,12 +989,12 @@ index 36c5f238..0d20472f 100644
  };
  
  static struct gl_device device;
-@@ -374,12 +449,131 @@ static struct gl_device device;
+@@ -374,12 +461,131 @@ static struct gl_device device;
  static struct
  {
  	unsigned long draws, immediate_draws, clears, presents;
 -	unsigned long skipped_no_program, skipped_no_target, skipped_link;
-+	unsigned long skipped_no_program, skipped_no_target, skipped_link, skipped_texture;
++	unsigned long skipped_no_program, skipped_no_target, skipped_link, skipped_texture, skipped_shader;
  	unsigned long target_changes;
  	/* vertex and index bytes drawn from the mirror, and streamed */
  	unsigned long mirrored_bytes, streamed_bytes;
@@ -1067,7 +1122,7 @@ index 36c5f238..0d20472f 100644
  static D3DDevice *device_pointer(void)
  {
  	return (D3DDevice *)&device;
-@@ -410,6 +604,20 @@ static struct
+@@ -410,6 +616,20 @@ static struct
  	const char *skip_vertex_shaders;
  	const char *dump_shaders;
  	BOOL statistics;
@@ -1088,7 +1143,7 @@ index 36c5f238..0d20472f 100644
  } debug_settings;
  
  /* ---------- GL state cache
-@@ -468,6 +676,13 @@ static struct
+@@ -468,6 +688,13 @@ static struct
  	float attribute_values[XGPU_VERTEX_ATTRIBUTE_COUNT][4];
  } gl_state;
  
@@ -1102,7 +1157,7 @@ index 36c5f238..0d20472f 100644
  void xgpu_gl_state_invalidate(void)
  {
  	memset(&gl_state, 0xff, sizeof(gl_state));
-@@ -528,12 +743,15 @@ static void state_sampler(int unit, GLuint sampler)
+@@ -528,12 +755,15 @@ static void state_sampler(int unit, GLuint sampler)
  	}
  }
  
@@ -1119,7 +1174,7 @@ index 36c5f238..0d20472f 100644
  	}
  }
  
-@@ -541,8 +759,8 @@ static void state_element_array_buffer(GLuint buffer)
+@@ -541,8 +771,8 @@ static void state_element_array_buffer(GLuint buffer)
  {
  	if (gl_state.element_array_buffer != buffer)
  	{
@@ -1129,7 +1184,7 @@ index 36c5f238..0d20472f 100644
  	}
  }
  
-@@ -553,8 +771,8 @@ static void state_attribute_pointer(GLuint index, GLuint buffer, GLint size, GLe
+@@ -553,8 +783,8 @@ static void state_attribute_pointer(GLuint index, GLuint buffer, GLint size, GLe
  
  	if (gl_state.attribute_enabled[index] != 1)
  	{
@@ -1139,7 +1194,7 @@ index 36c5f238..0d20472f 100644
  	}
  	if (pointer->buffer == buffer && pointer->size == size && pointer->type == type &&
  		pointer->normalized == normalized && pointer->integer == (integer ? GL_TRUE : GL_FALSE) &&
-@@ -583,24 +801,24 @@ static void state_attribute_value(GLuint index, const float *value)
+@@ -583,24 +813,24 @@ static void state_attribute_value(GLuint index, const float *value)
  
  	if (gl_state.attribute_enabled[index] != 0)
  	{
@@ -1167,7 +1222,7 @@ index 36c5f238..0d20472f 100644
  }
  
  /* ---------- vertical blank emulation */
-@@ -700,7 +918,7 @@ void WINAPI D3DDevice_BlockUntilVerticalBlank(void)
+@@ -700,7 +930,7 @@ void WINAPI D3DDevice_BlockUntilVerticalBlank(void)
  
  /* ---------- GL helpers */
  
@@ -1176,7 +1231,7 @@ index 36c5f238..0d20472f 100644
  {
  	GLuint shader = glCreateShader(type);
  	GLint status = 0;
-@@ -720,6 +938,461 @@ static GLuint compile_shader(GLenum type, const char *source, const char *what)
+@@ -720,6 +950,491 @@ static GLuint compile_shader(GLenum type, const char *source, const char *what)
  	return shader;
  }
  
@@ -1360,6 +1415,26 @@ index 36c5f238..0d20472f 100644
 +}
 +#undef DECLARED
 +
++enum { placement_count = sizeof(explicit_placements) / sizeof(explicit_placements[0]) };
++/* where "uniform " is in each declaration, its length and that of its
++placed form: found once, before any shader is translated */
++static unsigned long uniform_at[placement_count], declaration_lengths[placement_count],
++	placed_lengths[placement_count];
++
++static void explicit_layouts_initialize(void)
++{
++	unsigned long index;
++
++	for (index = 0; index < placement_count; index++)
++	{
++		const char *declaration = explicit_placements[index].declaration;
++
++		declaration_lengths[index] = strlen(declaration);
++		placed_lengths[index] = strlen(explicit_placements[index].placed);
++		uniform_at[index] = (unsigned long)(strstr(declaration, "uniform ") - declaration);
++	}
++}
++
 +/* source with its uniforms, blocks and samplers placed (the samplers texN at
 +binding N): a program needs nothing asked of it once linked (program_build).
 +Each declaration holds "uniform ", so one pass over the places it is finds
@@ -1368,7 +1443,6 @@ index 36c5f238..0d20472f 100644
 +the placed uniforms it uses noted */
 +static char *explicit_layouts(const char *source, struct lazy_shader *shader)
 +{
-+	enum { placement_count = sizeof(explicit_placements) / sizeof(explicit_placements[0]) };
 +	/* a sampler texN's placement, at binding N */
 +#define SAMPLER_LAYOUT(n) "layout(binding = " #n ") "
 +	static const char sampler_layouts[10][sizeof(SAMPLER_LAYOUT(0))] =
@@ -1377,9 +1451,6 @@ index 36c5f238..0d20472f 100644
 +		SAMPLER_LAYOUT(5), SAMPLER_LAYOUT(6), SAMPLER_LAYOUT(7), SAMPLER_LAYOUT(8), SAMPLER_LAYOUT(9)
 +	};
 +#undef SAMPLER_LAYOUT
-+	/* where "uniform " is in each declaration, its length and that of its
-+	placed form */
-+	static unsigned long uniform_at[placement_count], lengths[placement_count], placed_lengths[placement_count];
 +	struct
 +	{
 +		const char *at;
@@ -1392,17 +1463,6 @@ index 36c5f238..0d20472f 100644
 +	unsigned long count = 0, index, found = 0;
 +	BOOL samplers = TRUE;
 +
-+	if (!lengths[0])
-+	{
-+		for (index = 0; index < placement_count; index++)
-+		{
-+			const char *declaration = explicit_placements[index].declaration;
-+
-+			lengths[index] = strlen(declaration);
-+			placed_lengths[index] = strlen(explicit_placements[index].placed);
-+			uniform_at[index] = (unsigned long)(strstr(declaration, "uniform ") - declaration);
-+		}
-+	}
 +	for (at = strstr(source, "uniform "); at && count < sizeof(edits) / sizeof(edits[0]) - 1;
 +		at = strstr(at + 8, "uniform "))
 +	{
@@ -1411,11 +1471,11 @@ index 36c5f238..0d20472f 100644
 +			const char *start = at - uniform_at[index];
 +
 +			if (!(found >> index & 1) && (unsigned long)(at - source) >= uniform_at[index] &&
-+				!strncmp(start, explicit_placements[index].declaration, lengths[index]))
++				!strncmp(start, explicit_placements[index].declaration, declaration_lengths[index]))
 +			{
 +				found |= 1UL << index;
 +				edits[count].at = start;
-+				edits[count].skip = lengths[index];
++				edits[count].skip = declaration_lengths[index];
 +				edits[count].placed = explicit_placements[index].placed;
 +				edits[count].length = placed_lengths[index];
 +				count++;
@@ -1460,7 +1520,10 @@ index 36c5f238..0d20472f 100644
 +	return text.buffer;
 +}
 +
-+static struct lazy_shader *lazy_shaders;
++/* each record allocated by itself, so that it stays where it is: a GL call
++can add one (the hook, drawing held instances, translates their shader)
++while another is in use */
++static struct lazy_shader **lazy_shaders;
 +static unsigned long lazy_shader_count, lazy_shader_capacity;
 +
 +static unsigned long long hash_text(const char *text, unsigned long long hash)
@@ -1470,29 +1533,51 @@ index 36c5f238..0d20472f 100644
 +	return hash;
 +}
 +
-+static GLuint compile_shader(GLenum type, const char *source, const char *what)
++/* a shader's record, its layouts placed and what program_build needs of it
++found: on any thread (the shader worker's too) */
++static void lazy_shader_prepare(struct lazy_shader *shader, GLenum type, const char *source, const char *what)
 +{
-+	struct lazy_shader *shader;
++	memset(shader, 0, sizeof(*shader));
++	shader->type = type;
++	shader->source = xgpu_capabilities.explicit_locations ? explicit_layouts(source, shader) : strdup(source);
++	shader->hash = hash_text(shader->source, 14695981039346656037ull);
++	shader->what = what;
++}
++
++/* the record kept, on the render thread: its handle */
++static GLuint lazy_shader_add(const struct lazy_shader *shader)
++{
++	struct lazy_shader *record = malloc(sizeof(*record));
 +
 +	if (lazy_shader_count == lazy_shader_capacity)
 +	{
 +		lazy_shader_capacity = lazy_shader_capacity ? lazy_shader_capacity * 2 : 256;
 +		lazy_shaders = realloc(lazy_shaders, lazy_shader_capacity * sizeof(*lazy_shaders));
 +	}
-+	shader = &lazy_shaders[lazy_shader_count];
-+	memset(shader, 0, sizeof(*shader));
-+	shader->type = type;
-+	shader->source = xgpu_capabilities.explicit_locations ? explicit_layouts(source, shader) : strdup(source);
-+	shader->hash = hash_text(shader->source, 14695981039346656037ull);
-+	shader->what = what;
++	/* (nothing draws without its shaders) */
++	if (!record || !lazy_shaders)
++	{
++		platform_log("out of memory for a shader");
++		abort();
++	}
++	*record = *shader;
++	lazy_shaders[lazy_shader_count] = record;
 +	return LAZY_SHADER | (GLuint)lazy_shader_count++;
++}
++
++static GLuint compile_shader(GLenum type, const char *source, const char *what)
++{
++	struct lazy_shader shader;
++
++	lazy_shader_prepare(&shader, type, source, what);
++	return lazy_shader_add(&shader);
 +}
 +
 +static struct lazy_shader *lazy_shader_get(GLuint handle)
 +{
 +	unsigned long index = handle & ~LAZY_SHADER;
 +
-+	return (handle & LAZY_SHADER) && index < lazy_shader_count ? &lazy_shaders[index] : NULL;
++	return (handle & LAZY_SHADER) && index < lazy_shader_count ? lazy_shaders[index] : NULL;
 +}
 +
 +/* the GL shader for a handle, compiled now if it has not been */
@@ -1638,7 +1723,7 @@ index 36c5f238..0d20472f 100644
  #ifndef HALO_ANDROID
  static void GLAPIENTRY gl_debug_callback(GLenum source, GLenum type, GLuint id, GLenum severity,
  	GLsizei length, const GLchar *message, const void *user)
-@@ -809,27 +1482,30 @@ struct xgpu_render_target *xgpu_render_target_find(unsigned long data)
+@@ -809,27 +1524,30 @@ struct xgpu_render_target *xgpu_render_target_find(unsigned long data)
  	return best ? &best->target : NULL;
  }
  
@@ -1673,7 +1758,7 @@ index 36c5f238..0d20472f 100644
  		platform_log("framebuffer %u/%u is incomplete", color, depth);
  	xgpu_gl_state_invalidate();
  	entry->next = framebuffers;
-@@ -862,7 +1538,8 @@ static BOOL bind_targets(BOOL *has_depth)
+@@ -862,33 +1580,44 @@ static BOOL bind_targets(BOOL *has_depth)
  	/* viewports and clears are in the targets' units (render_target_get) */
  	target_scale[0] = color ? color->target.scale[0] : depth->target.scale[0];
  	target_scale[1] = color ? color->target.scale[1] : depth->target.scale[1];
@@ -1683,7 +1768,15 @@ index 36c5f238..0d20472f 100644
  	*has_depth = depth != NULL;
  	return TRUE;
  }
-@@ -874,21 +1551,27 @@ static void gl_initialize(void)
+ 
+ /* ---------- device creation */
+ 
++#ifdef HALO_ANDROID
++static void shader_worker_start(void);
++#endif
++
+ static void gl_initialize(void)
+ {
  	GLint major = 0, minor = 0;
  	int index;
  
@@ -1714,7 +1807,7 @@ index 36c5f238..0d20472f 100644
  		{
  			GLint counters = 0;
  
-@@ -904,7 +1587,7 @@ static void gl_initialize(void)
+@@ -904,7 +1633,7 @@ static void gl_initialize(void)
  			xgpu_capabilities.anisotropy, xgpu_capabilities.s3tc, xgpu_capabilities.atomic_counters);
  	}
  #else
@@ -1723,7 +1816,7 @@ index 36c5f238..0d20472f 100644
  	{
  		glEnable(GL_DEBUG_OUTPUT);
  		glEnable(GL_DEBUG_OUTPUT_SYNCHRONOUS);
-@@ -923,10 +1606,12 @@ static void gl_initialize(void)
+@@ -923,10 +1652,12 @@ static void gl_initialize(void)
  		glGenBuffers(STREAM_BUFFER_RING, device.index_buffers);
  		for (ring = 0; ring < STREAM_BUFFER_RING; ring++)
  		{
@@ -1738,7 +1831,7 @@ index 36c5f238..0d20472f 100644
  		}
  		device.stream_buffer = device.stream_buffers[0];
  		device.index_buffer = device.index_buffers[0];
-@@ -971,6 +1656,29 @@ static void gl_initialize(void)
+@@ -971,6 +1702,33 @@ static void gl_initialize(void)
  	debug_settings.dump_shaders = *config_string("debug.gpu_dump_shaders") ?
  		config_string("debug.gpu_dump_shaders") : NULL;
  	debug_settings.statistics = config_boolean("debug.gpu_stats");
@@ -1764,11 +1857,15 @@ index 36c5f238..0d20472f 100644
 +	hitch.threshold = config_real("debug.hitch_log");
 +	device.frame_pacing = config_boolean("display.frame_pacing");
 +	xgpu_texture_worker_start();
++	/* what the translators read, set before a thread of their own does */
++	explicit_layouts_initialize();
++	xgpu_fast_shaders();
++	shader_worker_start();
 +#endif
  	xgpu_gl_state_invalidate();
  	device.gl_ready = TRUE;
  }
-@@ -992,6 +1700,12 @@ when the register last changed; a program's registers are current up to
+@@ -992,6 +1750,12 @@ when the register last changed; a program's registers are current up to
  the serial it recorded when it last uploaded them */
  static unsigned long constant_serials[XGPU_VERTEX_CONSTANT_COUNT];
  static unsigned long constants_serial;
@@ -1781,7 +1878,7 @@ index 36c5f238..0d20472f 100644
  /* the register each of the latest serials changed, so a program that is
  only a little behind finds its changed registers without a full scan */
  #define CONSTANT_LOG_SIZE 1024
-@@ -1002,6 +1716,13 @@ static void constants_store(unsigned long first, const void *data, unsigned long
+@@ -1002,6 +1766,13 @@ static void constants_store(unsigned long first, const void *data, unsigned long
  	const float (*values)[4] = data;
  	unsigned long index;
  
@@ -1795,7 +1892,7 @@ index 36c5f238..0d20472f 100644
  	for (index = 0; index < count; index++)
  	{
  		if (memcmp(device.constants[first + index], values[index], sizeof(device.constants[0])))
-@@ -1009,6 +1730,10 @@ static void constants_store(unsigned long first, const void *data, unsigned long
+@@ -1009,6 +1780,10 @@ static void constants_store(unsigned long first, const void *data, unsigned long
  			memcpy(device.constants[first + index], values[index], sizeof(device.constants[0]));
  			constant_serials[first + index] = ++constants_serial;
  			constant_log[constants_serial % CONSTANT_LOG_SIZE] = (unsigned char)(first + index);
@@ -1806,7 +1903,15 @@ index 36c5f238..0d20472f 100644
  		}
  	}
  }
-@@ -1378,8 +2103,13 @@ HRESULT WINAPI D3DDevice_EndVisibilityTest(DWORD index)
+@@ -1375,20 +2150,29 @@ HRESULT WINAPI D3DDevice_EndVisibilityTest(DWORD index)
+ 	index %= VISIBILITY_TEST_SLOTS;
+ 	if (!index)
+ 		index = 1;
++	/* the target's pixels to a game pixel: the result is a count of the
++	game's pixels (visibility_unscaled), which the game divides by its own
++	test's area (lens flares, rasterizer_lights.c), a split-screen window's
++	or the screen's alike */
++	device.query_area[index] = target_scale[0] * target_scale[1];
  #ifdef HALO_ANDROID
  	if (xgpu_capabilities.atomic_counters)
  	{
@@ -1814,14 +1919,48 @@ index 36c5f238..0d20472f 100644
  		device.query_pending[index] = TRUE;
 +		if (device.visibility_pair_count < HALO_VISIBILITY_FRAME_TESTS)
 +		{
-+			device.visibility_pairs[device.visibility_pair_count][0] = (unsigned int)index;
-+			device.visibility_pairs[device.visibility_pair_count][1] = (unsigned int)device.counter_active;
-+			device.visibility_pair_count++;
++			unsigned int *pair = device.visibility_pairs[device.visibility_pair_count++];
++
++			/* with its area: the host divides the count by it as it reads
++			the counter, frames later, when the area can have changed */
++			pair[0] = (unsigned int)index;
++			pair[1] = (unsigned int)device.counter_active;
++			memcpy(&pair[2], &device.query_area[index], sizeof(pair[2]));
 +		}
  		return S_OK;
  	}
  #endif
-@@ -1434,9 +2164,10 @@ HRESULT WINAPI D3DDevice_GetVisibilityTestResult(DWORD index, UINT *result, ULON
+ 	glEndQuery(VISIBILITY_QUERY);
+-	/* the target's pixels to a game pixel: the result is a count of the
+-	game's pixels (visibility_unscaled), which the game divides by its own
+-	test's area (lens flares, rasterizer_lights.c), a split-screen window's
+-	or the screen's alike */
+-	device.query_area[index] = target_scale[0] * target_scale[1];
+ 	/* swap the scratch query into the requested slot */
+ 	scratch = device.queries[0];
+ 	device.queries[0] = device.queries[index];
+@@ -1407,15 +2191,17 @@ HRESULT WINAPI D3DDevice_EndVisibilityTest(DWORD index)
+ }
+ 
+ #ifndef HALO_ANDROID
+-/* a count of pixels in the game's pixels */
++/* a count of pixels in the game's pixels (a render scale below 1 counts
++fewer of them, a larger display more; the Android host divides the atomic
++counters' counts itself, by their own tests' areas) */
+ static GLuint visibility_unscaled(GLuint samples, DWORD index)
+ {
+ 	float area = device.query_area[index];
+ 
+-	return area > 1.0f ? (GLuint)(samples / area + 0.5f) : samples;
++	return area > 0.0f && area != 1.0f ? (GLuint)(samples / area + 0.5f) : samples;
+ }
+-
+ #endif
++
+ HRESULT WINAPI D3DDevice_GetVisibilityTestResult(DWORD index, UINT *result, ULONGLONG *time_stamp)
+ {
+ 	GLuint available = 0, samples = 0;
+@@ -1434,9 +2220,10 @@ HRESULT WINAPI D3DDevice_GetVisibilityTestResult(DWORD index, UINT *result, ULON
  #ifdef HALO_ANDROID
  	if (xgpu_capabilities.atomic_counters)
  	{
@@ -1835,7 +1974,7 @@ index 36c5f238..0d20472f 100644
  		if (result)
  			*result = samples;
  		return S_OK;
-@@ -1791,88 +2522,185 @@ static unsigned long hash_words(const void *data, unsigned long size)
+@@ -1791,36 +2578,273 @@ static unsigned long hash_words(const void *data, unsigned long size)
  	return hash;
  }
  
@@ -1856,119 +1995,248 @@ index 36c5f238..0d20472f 100644
  	{
 -		char *source = nv2a_vertex_shader_to_glsl(program->instructions, program->instruction_count,
 -			immediate ? 0 : device.vertex_shader->packed_mask);
--
++		va_start(arguments, format);
++		vfprintf(file, format, arguments);
++		va_end(arguments);
++		fclose(file);
++	}
++}
+ 
 -		program->shader[variant] = compile_shader(GL_VERTEX_SHADER, source, "vertex");
 -		if (debug_settings.dump_shaders)
 -		{
 -			char path[512];
 -			FILE *file;
--
++/* the vertex shader outputs a pixel shader reads: each name that appears
++again after its declaration */
++static unsigned long pixel_shader_inputs(const char *source)
++{
++	static const struct used_name names[9] =
++	{
++		USED_NAME("xD0"), USED_NAME("xD1"), USED_NAME("xB0"), USED_NAME("xB1"), USED_NAME("xT0"), USED_NAME("xT1"),
++		USED_NAME("xT2"), USED_NAME("xT3"), USED_NAME("xFog")
++	};
+ 
 -			snprintf(path, sizeof(path), "%s/vs%03lu_%d.glsl", debug_settings.dump_shaders, program->id, variant);
 -			if ((file = fopen(path, "w")) != NULL)
 -			{
 -				fputs(source, file);
 -				fclose(file);
 -			}
--		}
--		free(source);
-+		va_start(arguments, format);
-+		vfprintf(file, format, arguments);
-+		va_end(arguments);
-+		fclose(file);
- 	}
--	return program->shader[variant];
- }
- 
--typedef char pixel_shader_key_size_assert[sizeof(struct nv2a_pixel_shader_key) % 4 == 0 ? 1 : -1];
--
--static GLuint fragment_shader_get(const struct nv2a_pixel_shader_key *key)
++	return names_used(source, names, 9) * XGPU_OUTPUT_D0;
++}
++
++#ifdef HALO_ANDROID
++/* the low registers (below XGPU_CONSTANT_SPLIT) a vertex shader's source
++reads: those an instanced variant may read from the instances' own
++(instance_flush) */
++static unsigned long long vertex_shader_low_reads(const char *source)
++{
++	unsigned long long reads = 0;
++	const char *read = source;
++
++	while ((read = strstr(read, "cl[")) != NULL)
++	{
++		char *end;
++		unsigned long register_index = strtoul(read + 3, &end, 10);
++
++		if (end != read + 3 && *end == ']' && register_index < XGPU_CONSTANT_SPLIT)
++			reads |= 1ULL << register_index;
++		read += 3;
++	}
++	return reads;
++}
++
++/* ---------- shaders translated beside the renderer
++
++Translating a shader took the render thread about 0.5 ms, more for a large
++vertex shader, and a frame that walks into a new area asks for tens of
++them. A thread of their own translates them instead
++(nv2a_vertex_shader_to_glsl, nv2a_pixel_shader_to_glsl) and prepares their
++records (lazy_shader_prepare); the render thread keeps a record the next
++time a draw asks for its shader, and skips the draws until then. Instanced
++variants are made at once, with their program (instance_program), and every
++shader is with debug.async_shaders off or debug.gpu_dump_shaders on. */
++struct shader_job
++{
++	struct shader_job *next;
++	/* a pixel shader's key, or a copy of a vertex shader's instructions and
++	its variant's outputs */
++	struct nv2a_pixel_shader_key key;
++	DWORD *instructions;
++	unsigned long instruction_count, packed_mask, outputs;
++	unsigned long long mask;
++	/* the record prepared, and what else the source tells: the vertex
++	outputs a pixel shader reads, the low registers a vertex shader reads */
++	struct lazy_shader shader;
++	unsigned long inputs;
++	unsigned long long low_reads;
++	unsigned int done;
++};
++
++static pthread_mutex_t shader_lock = PTHREAD_MUTEX_INITIALIZER;
++static pthread_cond_t shader_wake = PTHREAD_COND_INITIALIZER;
++static struct shader_job *shader_first, *shader_last;
++static BOOL shaders_beside;
++
++static void *shader_worker(void *unused)
++{
++	(void)unused;
++	for (;;)
++	{
++		struct shader_job *job;
++		char *source;
++
++		pthread_mutex_lock(&shader_lock);
++		while (!shader_first)
++			pthread_cond_wait(&shader_wake, &shader_lock);
++		job = shader_first;
++		shader_first = job->next;
++		if (!shader_first)
++			shader_last = NULL;
++		pthread_mutex_unlock(&shader_lock);
++		if (job->instructions)
++		{
++			source = nv2a_vertex_shader_to_glsl(job->instructions, job->instruction_count, job->packed_mask,
++				job->outputs, job->mask);
++			lazy_shader_prepare(&job->shader, GL_VERTEX_SHADER, source, "vertex");
++			job->low_reads = vertex_shader_low_reads(source);
++		}
++		else
++		{
++			source = nv2a_pixel_shader_to_glsl(&job->key);
++			lazy_shader_prepare(&job->shader, GL_FRAGMENT_SHADER, source, "pixel");
++			job->inputs = pixel_shader_inputs(source);
+ 		}
+ 		free(source);
++		__atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
++	}
++	return NULL;
++}
++
++/* at the device's start (gl_initialize), once what the translators read of
++it is known */
++static void shader_worker_start(void)
++{
++	pthread_t thread;
++
++	if (config_boolean("debug.async_shaders") && !debug_settings.dump_shaders &&
++		pthread_create(&thread, NULL, shader_worker, NULL) == 0)
++	{
++		pthread_detach(thread);
++		shaders_beside = TRUE;
++	}
++}
++
++static void shader_queue(struct shader_job *job)
++{
++	pthread_mutex_lock(&shader_lock);
++	if (shader_last)
++		shader_last->next = job;
++	else
++		shader_first = job;
++	shader_last = job;
++	pthread_cond_signal(&shader_wake);
++	pthread_mutex_unlock(&shader_lock);
++}
++
++/* a job's record kept once it is done: its handle, or 0 */
++static GLuint shader_collect(struct shader_job *job)
++{
++	return __atomic_load_n(&job->done, __ATOMIC_ACQUIRE) ? lazy_shader_add(&job->shader) : 0;
++}
++#endif
++
++/* a variant's shader, its translation taken once it is done: 0 until then */
++static GLuint vertex_variant(struct vertex_shader_object *program, unsigned long index)
++{
++#ifdef HALO_ANDROID
++	struct shader_job *job = program->shaders[index].job;
++
++	if (job)
++	{
++		GLuint shader = shader_collect(job);
++
++		if (!shader)
++			return 0;
++		program->shaders[index].shader = shader;
++		program->low_reads |= job->low_reads;
++		program->shaders[index].job = NULL;
++		free(job->instructions);
++		free(job);
++	}
++#endif
++	return program->shaders[index].shader;
++}
++
 +static GLuint vertex_shader_get(struct vertex_shader_object *program, BOOL immediate, unsigned long outputs,
 +	unsigned long long mask)
- {
--	/* consecutive draws mostly use the same pixel shader */
--	static struct fragment_entry *last;
--	unsigned long hash;
--	struct fragment_entry **bucket;
--	struct fragment_entry *entry;
-+	unsigned long flags = outputs << 1 | (immediate ? 1 : 0), index = program->last_shader;
- 	char *source;
++{
++	unsigned long flags = outputs << 1 | (immediate ? 1 : 0), index = program->last_shader, instanced = 0;
++	unsigned long packed = immediate ? 0 : device.vertex_shader->packed_mask;
++	char *source;
 +	double start;
- 
--	if (last && !memcmp(&last->key, key, sizeof(*key)))
--		return last->shader;
--	hash = hash_words(key, sizeof(*key));
--	bucket = &fragment_buckets[hash % FRAGMENT_BUCKETS];
--	for (entry = *bucket; entry; entry = entry->next)
++
 +	/* a program's draws mostly want the shader the one before did (a search
-+	of the 32 was 0.2% of the game's thread, mostly cache misses) */
-+	if (index < program->shader_count && program->shaders[index].flags == flags && program->shaders[index].mask == mask)
-+		return program->shaders[index].shader;
-+	for (index = 0; index < program->shader_count; index++)
- 	{
--		if (entry->hash == hash && !memcmp(&entry->key, key, sizeof(*key)))
-+		if (program->shaders[index].flags == flags && program->shaders[index].mask == mask)
- 		{
--			last = entry;
--			return entry->shader;
-+			program->last_shader = index;
-+			return program->shaders[index].shader;
- 		}
- 	}
--	entry = calloc(1, sizeof(*entry));
--	entry->hash = hash;
--	entry->key = *key;
--	source = nv2a_pixel_shader_to_glsl(key);
--	entry->shader = compile_shader(GL_FRAGMENT_SHADER, source, "pixel");
--	if (debug_settings.dump_shaders)
-+	if (program->shader_count == VERTEX_SHADER_VARIANTS && (outputs & XGPU_OUTPUT_INSTANCED))
-+		return 0;
-+	if (program->shader_count == VERTEX_SHADER_VARIANTS)
- 	{
--		char path[512];
--		FILE *file;
--
--		snprintf(path, sizeof(path), "%s/ps_%08lx.glsl", debug_settings.dump_shaders, hash);
--		if ((file = fopen(path, "w")) != NULL)
-+		mask = 0;
-+		/* out of variants: the one with every output, which any pixel
-+		shader links with */
-+		flags = XGPU_OUTPUTS_ALL << 1 | (immediate ? 1 : 0);
-+		for (index = 0; index < program->shader_count; index++)
- 		{
--			fputs(source, file);
--			fclose(file);
-+			if (program->shaders[index].flags == flags && !program->shaders[index].mask)
-+				return program->shaders[index].shader;
- 		}
-+		index = VERTEX_SHADER_VARIANTS - 1;
-+	}
-+	else
++	of its variants was 0.2% of the game's thread, mostly cache misses) */
++	if (index < program->shader_count && program->shaders[index].flags == flags &&
++		program->shaders[index].mask == mask && program->shaders[index].packed == packed)
 +	{
-+		index = program->shader_count++;
++		return vertex_variant(program, index);
 +	}
++	for (index = 0; index < program->shader_count; index++)
++	{
++		if (program->shaders[index].flags == flags && program->shaders[index].mask == mask &&
++			program->shaders[index].packed == packed)
++		{
++			program->last_shader = index;
++			return vertex_variant(program, index);
++		}
++		instanced += (program->shaders[index].flags >> 1 & XGPU_OUTPUT_INSTANCED) != 0;
++	}
++	if ((outputs & XGPU_OUTPUT_INSTANCED) && instanced >= INSTANCED_VARIANTS)
++		return 0;
++	if (program->shader_count == program->shader_capacity)
++	{
++		unsigned long capacity = program->shader_capacity ? program->shader_capacity * 2 : 8;
++		void *grown = realloc(program->shaders, capacity * sizeof(*program->shaders));
++
++		if (!grown)
++			return 0;
++		program->shaders = grown;
++		program->shader_capacity = capacity;
++	}
++	/* (a slot of its own, cleared: the table grows uncleared) */
++	index = program->shader_count++;
++	memset(&program->shaders[index], 0, sizeof(program->shaders[index]));
 +	start = xgpu_hitch_start();
-+	source = nv2a_vertex_shader_to_glsl(program->instructions, program->instruction_count,
-+		immediate ? 0 : device.vertex_shader->packed_mask, flags >> 1, mask);
 +	program->shaders[index].flags = flags;
 +	program->shaders[index].mask = mask;
++	program->shaders[index].packed = packed;
++#ifdef HALO_ANDROID
++	if (shaders_beside && !(outputs & XGPU_OUTPUT_INSTANCED))
++	{
++		struct shader_job *job = calloc(1, sizeof(*job));
++
++		job->instructions = malloc(program->instruction_count * 4 * sizeof(DWORD));
++		memcpy(job->instructions, program->instructions, program->instruction_count * 4 * sizeof(DWORD));
++		job->instruction_count = program->instruction_count;
++		job->packed_mask = packed;
++		job->outputs = flags >> 1;
++		job->mask = mask;
++		program->shaders[index].shader = 0;
++		program->shaders[index].job = job;
++		shader_queue(job);
++		hitch_shader(TRUE, start);
++		return 0;
++	}
++#endif
++	source = nv2a_vertex_shader_to_glsl(program->instructions, program->instruction_count, packed, flags >> 1,
++		mask);
 +	program->shaders[index].shader = compile_shader(GL_VERTEX_SHADER, source, "vertex");
 +#ifdef HALO_ANDROID
-+	/* the low registers the program reads, from its shader: those an
-+	instanced variant may read from the instances' own (instance_flush) */
 +	if (!(flags >> 1 & XGPU_OUTPUT_INSTANCED))
-+	{
-+		const char *read = source;
-+
-+		while ((read = strstr(read, "cl[")) != NULL)
-+		{
-+			char *end;
-+			unsigned long register_index = strtoul(read + 3, &end, 10);
-+
-+			if (end != read + 3 && *end == ']' && register_index < XGPU_CONSTANT_SPLIT)
-+				program->low_reads |= 1ULL << register_index;
-+			read += 3;
-+		}
-+	}
++		program->low_reads |= vertex_shader_low_reads(source);
 +#endif
 +	if (debug_settings.dump_shaders)
 +	{
@@ -1982,73 +2250,91 @@ index 36c5f238..0d20472f 100644
 +			fclose(file);
 +		}
 +		dump_shader_line("shader %08x vs%03lu_%03lx_%llx.glsl\n", program->shaders[index].shader, program->id, flags, mask);
-+	}
+ 	}
+-	return program->shader[variant];
 +	free(source);
 +	hitch_shader(TRUE, start);
 +	return program->shaders[index].shader;
-+}
-+
-+/* the vertex shader outputs a pixel shader reads: each name that appears
-+again after its declaration */
-+static unsigned long pixel_shader_inputs(const char *source)
-+{
-+	static const struct used_name names[9] =
-+	{
-+		USED_NAME("xD0"), USED_NAME("xD1"), USED_NAME("xB0"), USED_NAME("xB1"), USED_NAME("xT0"), USED_NAME("xT1"),
-+		USED_NAME("xT2"), USED_NAME("xT3"), USED_NAME("xFog")
-+	};
-+
-+	return names_used(source, names, 9) * XGPU_OUTPUT_D0;
-+}
-+
-+typedef char pixel_shader_key_size_assert[sizeof(struct nv2a_pixel_shader_key) % 4 == 0 ? 1 : -1];
-+
+ }
+ 
+ typedef char pixel_shader_key_size_assert[sizeof(struct nv2a_pixel_shader_key) % 4 == 0 ? 1 : -1];
+ 
+-static GLuint fragment_shader_get(const struct nv2a_pixel_shader_key *key)
++/* a pixel shader's entry, its translation taken once it is done: NULL until
++then */
 +static struct fragment_entry *fragment_shader_get(const struct nv2a_pixel_shader_key *key)
-+{
-+	/* consecutive draws mostly use the same pixel shader */
-+	static struct fragment_entry *last;
-+	unsigned long hash;
-+	struct fragment_entry **bucket;
-+	struct fragment_entry *entry;
-+	char *source;
+ {
+ 	/* consecutive draws mostly use the same pixel shader */
+ 	static struct fragment_entry *last;
+@@ -1828,24 +2852,52 @@ static GLuint fragment_shader_get(const struct nv2a_pixel_shader_key *key)
+ 	struct fragment_entry **bucket;
+ 	struct fragment_entry *entry;
+ 	char *source;
 +	double start;
-+
-+	if (last && !memcmp(&last->key, key, sizeof(*key)))
+ 
+ 	if (last && !memcmp(&last->key, key, sizeof(*key)))
+-		return last->shader;
 +		return last;
-+	hash = hash_words(key, sizeof(*key));
-+	bucket = &fragment_buckets[hash % FRAGMENT_BUCKETS];
-+	for (entry = *bucket; entry; entry = entry->next)
-+	{
-+		if (entry->hash == hash && !memcmp(&entry->key, key, sizeof(*key)))
-+		{
-+			last = entry;
-+			return entry;
-+		}
-+	}
-+	entry = calloc(1, sizeof(*entry));
-+	entry->hash = hash;
-+	entry->key = *key;
-+	start = xgpu_hitch_start();
-+	source = nv2a_pixel_shader_to_glsl(key);
-+	entry->shader = compile_shader(GL_FRAGMENT_SHADER, source, "pixel");
-+	entry->inputs = pixel_shader_inputs(source);
-+	if (debug_settings.dump_shaders)
-+	{
-+		char path[512];
-+		FILE *file;
+ 	hash = hash_words(key, sizeof(*key));
+ 	bucket = &fragment_buckets[hash % FRAGMENT_BUCKETS];
+ 	for (entry = *bucket; entry; entry = entry->next)
+ 	{
+ 		if (entry->hash == hash && !memcmp(&entry->key, key, sizeof(*key)))
+ 		{
++#ifdef HALO_ANDROID
++			if (entry->job)
++			{
++				GLuint shader = shader_collect(entry->job);
 +
-+		snprintf(path, sizeof(path), "%s/ps_%08lx.glsl", debug_settings.dump_shaders, hash);
-+		if ((file = fopen(path, "w")) != NULL)
-+		{
++				if (!shader)
++					return NULL;
++				entry->shader = shader;
++				entry->inputs = entry->job->inputs;
++				free(entry->job);
++				entry->job = NULL;
++			}
++#endif
+ 			last = entry;
+-			return entry->shader;
++			return entry;
+ 		}
+ 	}
+ 	entry = calloc(1, sizeof(*entry));
+ 	entry->hash = hash;
+ 	entry->key = *key;
++	entry->next = *bucket;
++	*bucket = entry;
++	start = xgpu_hitch_start();
++#ifdef HALO_ANDROID
++	if (shaders_beside)
++	{
++		entry->job = calloc(1, sizeof(*entry->job));
++		entry->job->key = *key;
++		shader_queue(entry->job);
++		hitch_shader(FALSE, start);
++		return NULL;
++	}
++#endif
+ 	source = nv2a_pixel_shader_to_glsl(key);
+ 	entry->shader = compile_shader(GL_FRAGMENT_SHADER, source, "pixel");
++	entry->inputs = pixel_shader_inputs(source);
+ 	if (debug_settings.dump_shaders)
+ 	{
+ 		char path[512];
+@@ -1854,25 +2906,32 @@ static GLuint fragment_shader_get(const struct nv2a_pixel_shader_key *key)
+ 		snprintf(path, sizeof(path), "%s/ps_%08lx.glsl", debug_settings.dump_shaders, hash);
+ 		if ((file = fopen(path, "w")) != NULL)
+ 		{
+-			fputs(source, file);
 +			fputs(shader_text(entry->shader, source), file);
-+			fclose(file);
-+		}
+ 			fclose(file);
+ 		}
 +		dump_shader_line("shader %08x ps_%08lx.glsl\n", entry->shader, hash);
  	}
  	free(source);
+-	entry->next = *bucket;
+-	*bucket = entry;
 +	hitch_shader(FALSE, start);
- 	entry->next = *bucket;
- 	*bucket = entry;
  	last = entry;
 -	return entry->shader;
 +	return entry;
@@ -2074,7 +2360,7 @@ index 36c5f238..0d20472f 100644
  
  	if (last && last->vertex_shader == vertex_shader && last->fragment_shader == fragment_shader)
  		return last;
-@@ -1886,6 +2714,23 @@ static struct program_entry *program_get(GLuint vertex_shader, GLuint fragment_s
+@@ -1886,6 +2945,23 @@ static struct program_entry *program_get(GLuint vertex_shader, GLuint fragment_s
  			return entry;
  		}
  	}
@@ -2098,7 +2384,7 @@ index 36c5f238..0d20472f 100644
  	entry = calloc(1, sizeof(*entry));
  	entry->vertex_shader = vertex_shader;
  	entry->fragment_shader = fragment_shader;
-@@ -1895,11 +2740,48 @@ static struct program_entry *program_get(GLuint vertex_shader, GLuint fragment_s
+@@ -1895,11 +2971,48 @@ static struct program_entry *program_get(GLuint vertex_shader, GLuint fragment_s
  	if (!vertex_shader || !fragment_shader)
  		return NULL;
  
@@ -2147,7 +2433,7 @@ index 36c5f238..0d20472f 100644
  	if (!status)
  	{
  		char log[4096];
-@@ -1912,6 +2794,59 @@ static struct program_entry *program_get(GLuint vertex_shader, GLuint fragment_s
+@@ -1912,6 +3025,59 @@ static struct program_entry *program_get(GLuint vertex_shader, GLuint fragment_s
  	state_program(entry->program);
  	entry->constants = glGetUniformLocation(entry->program, "c");
  	entry->constant_count = XGPU_VERTEX_CONSTANT_COUNT;
@@ -2207,7 +2493,7 @@ index 36c5f238..0d20472f 100644
  	if (entry->constants >= 0)
  	{
  		unsigned long index;
-@@ -1939,21 +2874,9 @@ static struct program_entry *program_get(GLuint vertex_shader, GLuint fragment_s
+@@ -1939,21 +3105,9 @@ static struct program_entry *program_get(GLuint vertex_shader, GLuint fragment_s
  			}
  		}
  	}
@@ -2232,7 +2518,7 @@ index 36c5f238..0d20472f 100644
  	for (stage = 0; stage < D3DTSS_MAXSTAGES; stage++)
  	{
  		char name[8];
-@@ -1961,10 +2884,54 @@ static struct program_entry *program_get(GLuint vertex_shader, GLuint fragment_s
+@@ -1961,10 +3115,54 @@ static struct program_entry *program_get(GLuint vertex_shader, GLuint fragment_s
  		snprintf(name, sizeof(name), "tex%d", stage);
  		glUniform1i(glGetUniformLocation(entry->program, name), stage);
  	}
@@ -2250,7 +2536,7 @@ index 36c5f238..0d20472f 100644
 +own, and skips the draws made with it until it is built. */
 +static BOOL program_build(struct program_entry *entry, GLuint vertex_shader, GLuint fragment_shader)
 +{
-+	struct lazy_shader *vertex = lazy_shader_get(vertex_shader), *fragment = lazy_shader_get(fragment_shader);
++	const struct lazy_shader *vertex = lazy_shader_get(vertex_shader), *fragment = lazy_shader_get(fragment_shader);
 +	unsigned long long key = program_key(vertex_shader, fragment_shader);
 +	char path[600];
 +	unsigned long uses;
@@ -2288,7 +2574,7 @@ index 36c5f238..0d20472f 100644
  /* ---------- per-draw state */
  
  static unsigned long stage_texture_mode(int stage)
-@@ -1988,11 +2955,51 @@ static GLenum address_mode(DWORD mode)
+@@ -1988,11 +3186,51 @@ static GLenum address_mode(DWORD mode)
  	}
  }
  
@@ -2341,7 +2627,7 @@ index 36c5f238..0d20472f 100644
  	GLuint sampler = device.samplers[stage];
  	DWORD *state = D3D__TextureState[stage];
  	DWORD min_filter = state[D3DTSS_MINFILTER];
-@@ -2012,9 +3019,23 @@ static void configure_sampler(int stage, BOOL mipmapped)
+@@ -2012,9 +3250,23 @@ static void configure_sampler(int stage, BOOL mipmapped)
  	inputs[8] = state[D3DTSS_MAXANISOTROPY];
  	inputs[9] = state[D3DTSS_BORDERCOLOR];
  	if (configured_valid[stage] && !memcmp(configured[stage], inputs, sizeof(inputs)))
@@ -2366,7 +2652,7 @@ index 36c5f238..0d20472f 100644
  
  	if (min_filter == D3DTEXF_POINT)
  		minification = mip_filter == D3DTEXF_NONE ? GL_NEAREST :
-@@ -2047,6 +3068,7 @@ static void configure_sampler(int stage, BOOL mipmapped)
+@@ -2047,6 +3299,7 @@ static void configure_sampler(int stage, BOOL mipmapped)
  	color_to_vec4(state[D3DTSS_BORDERCOLOR], border);
  	glSamplerParameterfv(sampler, GL_TEXTURE_BORDER_COLOR, border);
  #endif
@@ -2374,7 +2660,7 @@ index 36c5f238..0d20472f 100644
  }
  
  
-@@ -2062,12 +3084,14 @@ struct mip_composite
+@@ -2062,31 +3315,60 @@ struct mip_composite
  	struct mip_composite *next;
  	unsigned long data, width, height, levels;
  	GLuint texture;
@@ -2389,29 +2675,71 @@ index 36c5f238..0d20472f 100644
 +static GLuint framebuffer_get(GLuint color, GLint color_level, GLuint depth);
  
  /* glCopyImageSubData for ES 3.0/3.1 contexts without the extension */
- static void copy_level_by_blit(GLuint source, GLuint destination, GLint level, GLsizei width, GLsizei height)
-@@ -2076,7 +3100,7 @@ static void copy_level_by_blit(GLuint source, GLuint destination, GLint level, G
+-static void copy_level_by_blit(GLuint source, GLuint destination, GLint level, GLsizei width, GLsizei height)
++static void copy_level_by_blit(GLuint source, GLint source_level, GLuint destination, GLint level, GLsizei width,
++	GLsizei height)
+ {
+ 	static GLuint draw_framebuffer;
++	GLint read = 0, draw = 0, scissor = 0;
++	GLuint source_framebuffer;
  
  	if (!draw_framebuffer)
  		glGenFramebuffers(1, &draw_framebuffer);
 -	glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer_get(source, 0));
-+	glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer_get(source, 0, 0));
++	glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &read);
++	glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &draw);
++	glGetIntegerv(GL_SCISSOR_TEST, &scissor);
++	source_framebuffer = framebuffer_get(source, source_level, 0);
++	glBindFramebuffer(GL_READ_FRAMEBUFFER, source_framebuffer);
  	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, draw_framebuffer);
  	glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, destination, level);
  	glDisable(GL_SCISSOR_TEST);
-@@ -2121,6 +3145,11 @@ static GLuint mip_composite_get(const struct xgpu_texture_description *descripti
+ 	glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+-	glBindFramebuffer(GL_FRAMEBUFFER, 0);
+-	/* the blit bypasses the cached state, so the next draw must re-apply it */
+-	xgpu_gl_state_invalidate();
++	/* the draw being prepared keeps its target */
++	glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)read);
++	glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)draw);
++	if (scissor)
++		glEnable(GL_SCISSOR_TEST);
+ }
+ #endif
+ 
++/* whether the game draws every level into the composite itself still: the
++level's targets can move to another composite of the same memory with
++another level count (the water's, from one shader to the next) */
++static BOOL mip_composite_current(const struct mip_composite *composite,
++	const struct xgpu_texture_description *description, unsigned long data)
++{
++	unsigned long level;
++
++	for (level = 0; level < description->levels; level++)
++	{
++		struct xgpu_render_target *target = xgpu_render_target_find(data + xgpu_texture_level_offset(description, level));
++
++		if (target && (target->texture != composite->texture || target->level != (GLint)level))
++			return FALSE;
++	}
++	return TRUE;
++}
++
+ static GLuint mip_composite_get(const struct xgpu_texture_description *description, unsigned long data)
+ {
+ 	struct mip_composite *composite;
+@@ -2121,6 +3403,11 @@ static GLuint mip_composite_get(const struct xgpu_texture_description *descripti
  		composite->next = mip_composites;
  		mip_composites = composite;
  	}
 +	/* the game draws its levels once a frame, and a frame binds it more than
 +	once (the water's two draws) */
-+	if (composite->frame == device.frame + 1)
++	if (composite->frame == device.frame + 1 && mip_composite_current(composite, description, data))
 +		return composite->texture;
 +	composite->frame = device.frame + 1;
  	for (level = 0; level < description->levels; level++)
  	{
  		unsigned long width = description->width >> level ? description->width >> level : 1;
-@@ -2131,6 +3160,12 @@ static GLuint mip_composite_get(const struct xgpu_texture_description *descripti
+@@ -2131,16 +3418,29 @@ static GLuint mip_composite_get(const struct xgpu_texture_description *descripti
  		if (!target || target->width != width || target->height != height ||
  			target->gl_width != width || target->gl_height != height)
  			break;
@@ -2424,7 +2752,9 @@ index 36c5f238..0d20472f 100644
  #ifdef HALO_ANDROID
  		if (!xgpu_capabilities.copy_image)
  		{
-@@ -2138,9 +3173,15 @@ static GLuint mip_composite_get(const struct xgpu_texture_description *descripti
+-			copy_level_by_blit(target->texture, composite->texture, (GLint)level, (GLsizei)width, (GLsizei)height);
++			copy_level_by_blit(target->texture, (GLint)target->level, composite->texture, (GLint)level, (GLsizei)width,
++				(GLsizei)height);
  		}
  		else
  #endif
@@ -2441,7 +2771,7 @@ index 36c5f238..0d20472f 100644
  	}
  	glBindTexture(GL_TEXTURE_2D, composite->texture);
  	/* levels the game did not render come from the ones it did */
-@@ -2154,7 +3195,64 @@ static GLuint mip_composite_get(const struct xgpu_texture_description *descripti
+@@ -2154,10 +3454,72 @@ static GLuint mip_composite_get(const struct xgpu_texture_description *descripti
  	return composite->texture;
  }
  
@@ -2505,17 +2835,31 @@ index 36c5f238..0d20472f 100644
 +uploaded the first time, xbox_textures.c, cannot) */
 +static BOOL bind_textures(struct nv2a_pixel_shader_key *key, float texture_scale[4][4])
  {
++	GLuint textures[D3DTSS_MAXSTAGES];
++	GLenum targets[D3DTSS_MAXSTAGES];
++	unsigned long levels[D3DTSS_MAXSTAGES];
  	int stage;
  
-@@ -2165,6 +3263,7 @@ static void bind_textures(struct nv2a_pixel_shader_key *key, float texture_scale
++	/* every stage's texture first: an upload or a copy made for one binds
++	on the active unit, and would unbind a stage bound before it */
+ 	for (stage = 0; stage < D3DTSS_MAXSTAGES; stage++)
+ 	{
+ 		D3DBaseTexture *texture = device.textures[stage];
+@@ -2165,9 +3527,12 @@ static void bind_textures(struct nv2a_pixel_shader_key *key, float texture_scale
  
  		texture_scale[stage][0] = texture_scale[stage][1] = 1.0f;
  		texture_scale[stage][2] = texture_scale[stage][3] = 1.0f;
 +		device.texture_opaque[stage] = FALSE;
++		textures[stage] = 0;
++		targets[stage] = GL_TEXTURE_2D;
++		levels[stage] = 1;
  		if (!texture || !texture->Data || mode == 0 || mode == 0x04 || mode == 0x05 || mode == 0x11)
  		{
- 			state_texture(stage, GL_TEXTURE_2D, 0);
-@@ -2199,20 +3298,72 @@ static void bind_textures(struct nv2a_pixel_shader_key *key, float texture_scale
+-			state_texture(stage, GL_TEXTURE_2D, 0);
+ 			key->sampler_type[stage] = mode == 0x11 ? _xgpu_sampler_2d : _xgpu_sampler_none;
+ 			continue;
+ 		}
+@@ -2199,20 +3564,89 @@ static void bind_textures(struct nv2a_pixel_shader_key *key, float texture_scale
  					(const D3DCOLOR *)PLATFORM_PHYSICAL_TO_VIRTUAL(device.palettes[stage]->Data) : NULL;
  
  				gl_texture = xgpu_texture_get((const DWORD *)texture, palette, &gl_target, &description);
@@ -2531,15 +2875,23 @@ index 36c5f238..0d20472f 100644
 -			state_texture(stage, gl_target, gl_texture);
 -			state_sampler(stage, device.samplers[stage]);
 -			configure_sampler(stage, description.levels > 1);
-+			if (!debug_frozen("textures"))
-+			{
-+				state_texture(stage, gl_target, gl_texture);
-+				state_sampler(stage, configure_sampler(stage, description.levels > 1));
-+			}
++			textures[stage] = gl_texture;
++			targets[stage] = gl_target;
++			levels[stage] = description.levels;
  			key->sampler_type[stage] = gl_target == GL_TEXTURE_CUBE_MAP ? _xgpu_sampler_cube :
  				gl_target == GL_TEXTURE_3D ? _xgpu_sampler_3d : _xgpu_sampler_2d;
  		}
  	}
++	for (stage = 0; stage < D3DTSS_MAXSTAGES; stage++)
++	{
++		if (!textures[stage])
++			state_texture(stage, GL_TEXTURE_2D, 0);
++		else if (!debug_frozen("textures"))
++		{
++			state_texture(stage, targets[stage], textures[stage]);
++			state_sampler(stage, configure_sampler(stage, levels[stage] > 1));
++		}
++	}
 +	return TRUE;
 +}
 +
@@ -2567,6 +2919,15 @@ index 36c5f238..0d20472f 100644
 +	{
 +		return FALSE;
 +	}
++	/* (a border address mode reads the border colour outside the texture,
++	and filters it into the texels near its edge) */
++	if ((address_mode(D3D__TextureState[stage][D3DTSS_ADDRESSU]) == GL_CLAMP_TO_BORDER ||
++		address_mode(D3D__TextureState[stage][D3DTSS_ADDRESSV]) == GL_CLAMP_TO_BORDER ||
++		address_mode(D3D__TextureState[stage][D3DTSS_ADDRESSW]) == GL_CLAMP_TO_BORDER) &&
++		(D3D__TextureState[stage][D3DTSS_BORDERCOLOR] >> 24) != 0xff)
++	{
++		return FALSE;
++	}
 +	/* no combiner writes the register's alpha */
 +	for (index = 0; index < combiners && index < 8; index++)
 +	{
@@ -2591,7 +2952,7 @@ index 36c5f238..0d20472f 100644
  
  static GLenum stencil_operation(DWORD operation)
  {
-@@ -2257,6 +3408,12 @@ static void apply_raster_state(BOOL has_depth)
+@@ -2257,6 +3691,12 @@ static void apply_raster_state(BOOL has_depth)
  	what keeps a split-screen window's geometry from bleeding across the divider */
  	/* (glScissor takes the corner and the size, as glViewport does) */
  	memcpy(scissor, viewport, sizeof(scissor));
@@ -2604,7 +2965,7 @@ index 36c5f238..0d20472f 100644
  	if (memcmp(gl_state.scissor, scissor, sizeof(scissor)))
  	{
  		memcpy(gl_state.scissor, scissor, sizeof(scissor));
-@@ -2417,13 +3574,10 @@ static void apply_raster_state(BOOL has_depth)
+@@ -2417,13 +3857,10 @@ static void apply_raster_state(BOOL has_depth)
  each draw instead, reporting each distinct error a few times */
  static void gl_check_errors(const char *where)
  {
@@ -2619,10 +2980,11 @@ index 36c5f238..0d20472f 100644
  		return;
  	while ((error = glGetError()) != GL_NO_ERROR)
  	{
-@@ -2443,6 +3597,149 @@ static DWORD draw_uniform_inputs[DRAW_UNIFORM_INPUT_COUNT];
+@@ -2443,7 +3880,166 @@ static DWORD draw_uniform_inputs[DRAW_UNIFORM_INPUT_COUNT];
  static struct draw_uniforms draw_uniforms;
  static unsigned long draw_uniforms_serial;
  
+-/* sets a program's uniform unless it already holds value */
 +#ifdef HALO_ANDROID
 +/* The vertex constants of a program that reads many of them, from a uniform
 +block (nv2a_vertex_shader_to_glsl): the registers as this draw sees them are
@@ -2632,6 +2994,9 @@ index 36c5f238..0d20472f 100644
 +about 3. Draws between which no register changes share their range. */
 +static void stream_reserve(unsigned long size);
 +static unsigned long stream_upload(const void *data, unsigned long size);
++/* set while guest_gl_before_call draws a batch or held draws: from within a GL
++call, perhaps in the middle of preparing another draw */
++static BOOL gl_hook_active;
 +static void uniform_range_bind(GLuint binding, GLuint buffer, unsigned long offset, unsigned long size);
 +
 +static void constants_block_bind(unsigned long size)
@@ -2707,6 +3072,9 @@ index 36c5f238..0d20472f 100644
 +	const unsigned long high_size = (XGPU_VERTEX_CONSTANT_COUNT - XGPU_CONSTANT_SPLIT) * 16;
 +	unsigned long alignment = device.uniform_alignment ? device.uniform_alignment : 16;
 +
++	/* room for both blocks first: starting the buffer again for the second
++	would leave the first bound to what then overwrites it */
++	stream_reserve(low_size + high_size + 2 * alignment);
 +	if (!low_serial || low_serial != low_version || low_generation != device.stream_generation)
 +	{
 +		stream_reserve(low_size + alignment);
@@ -2764,12 +3132,23 @@ index 36c5f238..0d20472f 100644
 +	constants_blocks_bind_from((const float (*)[4])device.constants, constants_low_serial,
 +		(const float (*)[4])device.constants[XGPU_CONSTANT_SPLIT], constants_high_serial, constants_high_extent);
 +}
++
++/* a program's vertex constants bound: in two blocks, or one */
++static void program_constants_bind(const struct program_entry *entry)
++{
++	if (entry->constant_high_block_size)
++		constants_blocks_bind();
++	else if (entry->constant_block_size)
++		constants_block_bind(entry->constant_block_size);
++}
++
 +#endif
 +
- /* sets a program's uniform unless it already holds value */
++/* sets a program's uniform unless it already holds value */
  static void uniform_vec4(GLint location, float *shadow, const float *value, int count)
  {
-@@ -2460,6 +3757,47 @@ static void uniform_float(GLint location, float *shadow, float value)
+ 	if (location < 0 || !memcmp(shadow, value, (size_t)count * 4 * sizeof(float)))
+@@ -2460,6 +4056,47 @@ static void uniform_float(GLint location, float *shadow, float value)
  	glUniform1f(location, value);
  }
  
@@ -2817,11 +3196,12 @@ index 36c5f238..0d20472f 100644
  static struct program_entry *prepare_draw(BOOL immediate)
  {
  	struct vertex_shader_object *program = current_program();
-@@ -2468,12 +3806,19 @@ static struct program_entry *prepare_draw(BOOL immediate)
+@@ -2468,12 +4105,20 @@ static struct program_entry *prepare_draw(BOOL immediate)
  	struct draw_uniforms uniforms;
  	BOOL has_depth = FALSE;
  	int stage;
 +	struct fragment_entry *fragment;
++	GLuint vertex_shader;
 +	unsigned long outputs;
 +#ifdef HALO_ANDROID
 +	BOOL held;
@@ -2837,7 +3217,7 @@ index 36c5f238..0d20472f 100644
  	{
  		const char *skip = debug_settings.skip_vertex_shaders;
  
-@@ -2491,7 +3836,8 @@ static struct program_entry *prepare_draw(BOOL immediate)
+@@ -2491,7 +4136,8 @@ static struct program_entry *prepare_draw(BOOL immediate)
  		stats.skipped_no_target++;
  		return NULL;
  	}
@@ -2847,7 +3227,7 @@ index 36c5f238..0d20472f 100644
  
  	memset(&key, 0, sizeof(key));
  	memcpy(key.combiner_state, D3D__RenderState, sizeof(key.combiner_state));
-@@ -2500,7 +3846,11 @@ static struct program_entry *prepare_draw(BOOL immediate)
+@@ -2500,7 +4146,11 @@ static struct program_entry *prepare_draw(BOOL immediate)
  	key.combiner_state[D3DRS_PSFINALCOMBINERCONSTANT0] = 0;
  	key.combiner_state[D3DRS_PSFINALCOMBINERCONSTANT1] = 0;
  	key.texture_modes = D3D__RenderState[D3DRS_PSTEXTUREMODES];
@@ -2860,7 +3240,7 @@ index 36c5f238..0d20472f 100644
  	for (stage = 0; stage < D3DTSS_MAXSTAGES; stage++)
  	{
  		key.alpha_kill[stage] = D3D__TextureState[stage][D3DTSS_ALPHAKILL] == D3DTALPHAKILL_ENABLE;
-@@ -2511,27 +3861,57 @@ static struct program_entry *prepare_draw(BOOL immediate)
+@@ -2511,27 +4161,64 @@ static struct program_entry *prepare_draw(BOOL immediate)
  	key.fog_table_mode = (unsigned char)D3D__RenderState[D3DRS_FOGTABLEMODE];
  #ifdef HALO_ANDROID
  	key.count_samples = device.visibility_test_active && xgpu_capabilities.atomic_counters;
@@ -2870,13 +3250,25 @@ index 36c5f238..0d20472f 100644
  #endif
  
 -	entry = program_get(vertex_shader_get(program, immediate), fragment_shader_get(&key));
++	/* (shaders translated beside the renderer are not drawn with until they are in) */
 +	fragment = fragment_shader_get(&key);
++	if (!fragment)
++	{
++		stats.skipped_shader++;
++		return NULL;
++	}
 +#ifdef HALO_ANDROID
 +	outputs = fragment->inputs | (device.drawing_points ? XGPU_OUTPUT_POINT_SIZE : 0);
 +#else
 +	outputs = XGPU_OUTPUTS_ALL;
 +#endif
-+	entry = program_get(vertex_shader_get(program, immediate, outputs, 0), fragment->shader);
++	vertex_shader = vertex_shader_get(program, immediate, outputs, 0);
++	if (!vertex_shader)
++	{
++		stats.skipped_shader++;
++		return NULL;
++	}
++	entry = program_get(vertex_shader, fragment->shader);
  	if (!entry)
  	{
  		stats.skipped_link++;
@@ -2909,18 +3301,13 @@ index 36c5f238..0d20472f 100644
  #endif
  
 +#ifdef HALO_ANDROID
-+	if (entry->constant_high_block_size)
-+	{
-+		if (!defer_constant_blocks)
-+			constants_blocks_bind();
-+	}
-+	else if (entry->constant_block_size)
-+		constants_block_bind(entry->constant_block_size);
++	if (!held)
++		program_constants_bind(entry);
 +#endif
  	if (entry->constants >= 0 && entry->constants_serial != constants_serial)
  	{
  		unsigned long first = entry->constant_count, last = 0, index;
-@@ -2646,30 +4026,21 @@ static struct program_entry *prepare_draw(BOOL immediate)
+@@ -2646,30 +4333,21 @@ static struct program_entry *prepare_draw(BOOL immediate)
  				converted->bump_luminance[stage][0] = dword_to_float(state[D3DTSS_BUMPENVLSCALE]);
  				converted->bump_luminance[stage][1] = dword_to_float(state[D3DTSS_BUMPENVLOFFSET]);
  				converted->bump_luminance[stage][2] = converted->bump_luminance[stage][3] = 0.0f;
@@ -2961,7 +3348,7 @@ index 36c5f238..0d20472f 100644
  	return entry;
  }
  
-@@ -2876,6 +4247,10 @@ static BOOL mirror_refresh(unsigned long first, unsigned long last)
+@@ -2876,6 +4554,10 @@ static BOOL mirror_refresh(unsigned long first, unsigned long last)
  		}
  		address = PLATFORM_CONTIGUOUS_BASE + page * MIRROR_PAGE_SIZE;
  		size = (run - page) * MIRROR_PAGE_SIZE;
@@ -2972,7 +3359,7 @@ index 36c5f238..0d20472f 100644
  		/* protect first, so a write racing with the upload is noticed */
  		memory_watch_protect(address, size);
  		for (; page < run; page++)
-@@ -2951,7 +4326,11 @@ static BOOL mirror_range(unsigned long address, unsigned long size, GLuint *buff
+@@ -2951,7 +4633,11 @@ static BOOL mirror_range(unsigned long address, unsigned long size, GLuint *buff
  	}
  	if (!present || memory_watch_generation(address, size) > oldest)
  	{
@@ -2985,8 +3372,12 @@ index 36c5f238..0d20472f 100644
  			return FALSE;
  		for (newest = 0, page = first; page < last; page++)
  		{
-@@ -3024,8 +4403,17 @@ static void stream_reserve(unsigned long size)
+@@ -3022,49 +4708,125 @@ static void stream_reserve(unsigned long size)
+ {
+ 	if (device.stream_offset + size > STREAM_BUFFER_SIZE)
  	{
++		unsigned long generation = device.stream_generation;
++
  		/* orphan the buffer and start again */
  		state_array_buffer(device.stream_buffer);
 +#ifdef HALO_ANDROID
@@ -2998,27 +3389,70 @@ index 36c5f238..0d20472f 100644
 +#else
  		glBufferData(GL_ARRAY_BUFFER, STREAM_BUFFER_SIZE, NULL, GL_STREAM_DRAW);
 +#endif
++		/* (the calls can have drawn held draws, which may have started the
++		buffer again themselves and uploaded into it since) */
++		if (device.stream_offset + size <= STREAM_BUFFER_SIZE)
++			return;
++#ifdef HALO_ANDROID
++		/* on in the spare, made the first time, rather than over this one:
++		what is bound in it for draws not yet issued (held draws, a batch,
++		the draw being prepared) stays as it is. It is the spare in turn,
++		free again at the next wrap's glFinish. Unless held draws drawn by
++		the calls above went on into the spare already: the spare is then
++		the buffer the draw being prepared still needs, and what they wrote
++		in this one is drawn (the glFinish waited for it), so this one
++		starts again. (A draw would have to stream most of a buffer by
++		itself to meet its own data again: the game's stream well under a
++		megabyte each, a busy frame about 5 MB in all.) */
++		if (device.stream_generation == generation)
++		{
++			GLuint spare = device.stream_spare;
++
++			if (!spare)
++			{
++				glGenBuffers(1, &spare);
++				state_array_buffer(spare);
++				host_gl_buffer_persistent(GL_ARRAY_BUFFER, STREAM_BUFFER_SIZE);
++			}
++			device.stream_spare = device.stream_buffer;
++			device.stream_buffer = device.stream_buffers[device.buffer_ring] = spare;
++			state_array_buffer(spare);
++		}
++#endif
  		device.stream_offset = 0;
 +		device.stream_generation++;
  	}
  }
  
-@@ -3034,11 +4422,13 @@ static unsigned long stream_upload(const void *data, unsigned long size)
- 	unsigned long offset;
+ static unsigned long stream_upload(const void *data, unsigned long size)
+ {
+-	unsigned long offset;
++	unsigned long offset, rounded = (size + 15) & ~15UL;
  
- 	size = (size + 15) & ~15UL;
+-	size = (size + 15) & ~15UL;
+-	stream_reserve(size);
+-	offset = device.stream_offset;
 +	stats.uploads++;
-+	stats.uploaded_bytes += size;
- 	stream_reserve(size);
- 	offset = device.stream_offset;
++	stats.uploaded_bytes += rounded;
++	/* the buffer bound first: its call can draw held draws, which upload
++	too, so the room and the offset are this upload's only after it; and
++	bound again after the room is made, as held draws drawn meanwhile can
++	have moved the stream on into the spare (stream_reserve), and the write
++	is flushed in the bound buffer */
  	state_array_buffer(device.stream_buffer);
++	stream_reserve(rounded);
++	state_array_buffer(device.stream_buffer);
++	offset = device.stream_offset;
++	/* (the data's own bytes: past them is not the caller's) */
  #ifdef HALO_ANDROID
 -	host_gl_buffer_write(GL_ARRAY_BUFFER, (unsigned int)offset, (unsigned int)size, data);
 +	host_gl_buffer_write_to(device.stream_buffer, GL_ARRAY_BUFFER, (unsigned int)offset, (unsigned int)size, data);
  #else
  	glBufferSubData(GL_ARRAY_BUFFER, (GLintptr)offset, (GLsizeiptr)size, data);
  #endif
-@@ -3047,24 +4437,51 @@ static unsigned long stream_upload(const void *data, unsigned long size)
+-	device.stream_offset += size;
++	device.stream_offset += rounded;
+ 	return offset;
  }
  
  #ifdef HALO_ANDROID
@@ -3081,7 +3515,7 @@ index 36c5f238..0d20472f 100644
  		return stream_upload(data, size);
  	if (scratch_size < size)
  	{
-@@ -3073,17 +4490,7 @@ static unsigned long stream_upload_swizzled(const struct vertex_shader_object *d
+@@ -3073,39 +4835,40 @@ static unsigned long stream_upload_swizzled(const struct vertex_shader_object *d
  		scratch = malloc(scratch_size);
  	}
  	memcpy(scratch, data, size);
@@ -3100,14 +3534,18 @@ index 36c5f238..0d20472f 100644
  	return stream_upload(scratch, size);
  }
  #endif
-@@ -3093,15 +4500,24 @@ static unsigned long index_upload(const void *data, unsigned long size)
- 	unsigned long offset;
  
- 	size = (size + 15) & ~15UL;
+ static unsigned long index_upload(const void *data, unsigned long size)
+ {
+-	unsigned long offset;
++	unsigned long offset, rounded = (size + 15) & ~15UL;
+ 
+-	size = (size + 15) & ~15UL;
 +	stats.uploads++;
-+	stats.uploaded_bytes += size;
++	stats.uploaded_bytes += rounded;
  	state_element_array_buffer(device.index_buffer);
- 	if (device.index_offset + size > INDEX_BUFFER_SIZE)
+-	if (device.index_offset + size > INDEX_BUFFER_SIZE)
++	if (device.index_offset + rounded > INDEX_BUFFER_SIZE)
  	{
 +#ifdef HALO_ANDROID
 +		/* immutable storage (stream_reserve) */
@@ -3115,10 +3553,14 @@ index 36c5f238..0d20472f 100644
 +		hitch.frame.ring_waits++;
 +#else
  		glBufferData(GL_ELEMENT_ARRAY_BUFFER, INDEX_BUFFER_SIZE, NULL, GL_STREAM_DRAW);
+-		device.index_offset = 0;
 +#endif
- 		device.index_offset = 0;
++		/* (unless held draws drawn by the call started it again) */
++		if (device.index_offset + rounded > INDEX_BUFFER_SIZE)
++			device.index_offset = 0;
  	}
  	offset = device.index_offset;
++	/* (the data's own bytes: past them is not the caller's) */
  #ifdef HALO_ANDROID
 -	host_gl_buffer_write(GL_ELEMENT_ARRAY_BUFFER, (unsigned int)offset, (unsigned int)size, data);
 +	host_gl_buffer_write_to(device.index_buffer, GL_ELEMENT_ARRAY_BUFFER, (unsigned int)offset, (unsigned int)size,
@@ -3126,7 +3568,12 @@ index 36c5f238..0d20472f 100644
  #else
  	glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, (GLintptr)offset, (GLsizeiptr)size, data);
  #endif
-@@ -3143,24 +4559,22 @@ static void attribute_format(const struct vertex_element *element, GLint *size,
+-	device.index_offset += size;
++	device.index_offset += rounded;
+ 	return offset;
+ }
+ 
+@@ -3143,24 +4906,22 @@ static void attribute_format(const struct vertex_element *element, GLint *size,
  /* upload vertices [first, first + count) of every stream the declaration
  uses and point the attributes at them; attribute data then starts at
  vertex 0 of the uploaded range */
@@ -3163,7 +3610,7 @@ index 36c5f238..0d20472f 100644
  	struct vertex_shader_object *declaration = device.vertex_shader;
  	GLuint stream_buffers[16];
  	unsigned long stream_offsets[16];
-@@ -3190,6 +4604,21 @@ static void setup_streams(unsigned long first, unsigned long count)
+@@ -3190,6 +4951,21 @@ static void setup_streams(unsigned long first, unsigned long count)
  		stream_buffers[stream] = 0;
  		total += (bytes + 15) & ~15UL;
  	}
@@ -3185,7 +3632,7 @@ index 36c5f238..0d20472f 100644
  	stream_reserve(total);
  	for (index = 0; index < declaration->element_count; index++)
  	{
-@@ -3233,6 +4662,7 @@ static void setup_streams(unsigned long first, unsigned long count)
+@@ -3233,6 +5009,7 @@ static void setup_streams(unsigned long first, unsigned long count)
  		if (!enabled[index])
  			state_attribute_value(index, declaration->packed_mask & (1UL << index) ? NULL : device.attributes[index]);
  	}
@@ -3193,7 +3640,7 @@ index 36c5f238..0d20472f 100644
  }
  
  static GLenum primitive_mode(D3DPRIMITIVETYPE type)
-@@ -3290,13 +4720,290 @@ void WINAPI D3DDevice_SetIndices(D3DIndexBuffer *index_data, UINT base_vertex_in
+@@ -3290,13 +5067,287 @@ void WINAPI D3DDevice_SetIndices(D3DIndexBuffer *index_data, UINT base_vertex_in
  	D3D__IndexData = index_data ? (WORD *)index_data->Data : NULL;
  }
  
@@ -3213,7 +3660,8 @@ index 36c5f238..0d20472f 100644
 +#define QUAD_INDEX_VERTICES 8192
 +
 +static GLuint quad_index_buffer(void)
-+{
+ {
+-	if (!vertex_count || !prepare_draw(FALSE))
 +	static GLuint buffer;
 +
 +	if (!buffer)
@@ -3253,14 +3701,11 @@ index 36c5f238..0d20472f 100644
 +debug.batch_quads = false draws each quad draw by itself. */
 +
 +void (*guest_gl_before_call)(void);
-+/* set while guest_gl_before_call draws a batch or held draws: from within a GL
-+call, perhaps in the middle of preparing another draw */
-+static BOOL gl_hook_active;
 +
 +static void batch_flush_hook(void)
 +{
 +	if (!pthread_equal(pthread_self(), device.render_thread))
-+		return;
+ 		return;
 +	gl_hook_active = TRUE;
 +	batch_flush();
 +	gl_hook_active = FALSE;
@@ -3279,8 +3724,7 @@ index 36c5f238..0d20472f 100644
 +};
 +
 +static struct
- {
--	if (!vertex_count || !prepare_draw(FALSE))
++{
 +	BOOL pending;
 +	const struct vertex_shader_object *declaration;
 +	unsigned long stream_stride[BATCH_STREAMS];
@@ -3302,9 +3746,9 @@ index 36c5f238..0d20472f 100644
 +	/* an instanced draw held before the batch began is drawn first */
 +	instance_flush();
 +	if (!batch.pending)
- 		return;
++		return;
 +	batch.pending = FALSE;
-+	guest_gl_before_call = NULL;
++	__atomic_store_n(&guest_gl_before_call, NULL, __ATOMIC_RELAXED);
 +	/* the constant attributes that differ between the draws */
 +	for (index = 0; index < XGPU_VERTEX_ATTRIBUTE_COUNT; index++)
 +	{
@@ -3447,7 +3891,7 @@ index 36c5f238..0d20472f 100644
 +	batch.vertex_count += vertex_count;
 +	batch.quad_draws++;
 +	batch.pending = TRUE;
-+	guest_gl_before_call = batch_flush_hook;
++	__atomic_store_n(&guest_gl_before_call, batch_flush_hook, __ATOMIC_RELAXED);
 +	return TRUE;
 +}
 +#endif
@@ -3487,7 +3931,7 @@ index 36c5f238..0d20472f 100644
  	{
  		unsigned long count;
  		WORD *indices = quad_indices(NULL, vertex_count, &count);
-@@ -3312,15 +5019,414 @@ void WINAPI D3DDevice_DrawVertices(D3DPRIMITIVETYPE primitive_type, UINT start_v
+@@ -3312,15 +5363,414 @@ void WINAPI D3DDevice_DrawVertices(D3DPRIMITIVETYPE primitive_type, UINT start_v
  	gl_check_errors("draw");
  }
  
@@ -3688,7 +4132,7 @@ index 36c5f238..0d20472f 100644
 +	if (!instances.pending)
 +		return;
 +	instances.pending = FALSE;
-+	guest_gl_before_call = batch.pending ? batch_flush_hook : NULL;
++	__atomic_store_n(&guest_gl_before_call, batch.pending ? batch_flush_hook : NULL, __ATOMIC_RELAXED);
 +	if (instances.count == 1 && !gl_hook_active)
 +	{
 +		/* by itself, between draws: with its own program */
@@ -3850,7 +4294,7 @@ index 36c5f238..0d20472f 100644
 +	instances.count++;
 +	instances.pending = TRUE;
 +	/* (batch_flush draws held instanced draws first) */
-+	guest_gl_before_call = batch_flush_hook;
++	__atomic_store_n(&guest_gl_before_call, batch_flush_hook, __ATOMIC_RELAXED);
 +	return TRUE;
 +}
 +
@@ -3903,7 +4347,7 @@ index 36c5f238..0d20472f 100644
  		return;
  	/* quads are drawn as triangles, from indices made for the draw */
  	mirrored = primitive_type != D3DPT_QUADLIST &&
-@@ -3331,15 +5437,40 @@ void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type, UINT
+@@ -3331,15 +5781,40 @@ void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type, UINT
  	index_extent(index_data, vertex_count, generation, mirrored, &minimum, &maximum);
  	trace_draw("indexed", primitive_type, vertex_count, NULL);
  	/* (the streams from the base vertex on: index i is vertex base + i) */
@@ -3947,7 +4391,7 @@ index 36c5f238..0d20472f 100644
  	stats.streamed_bytes += vertex_count * sizeof(WORD);
  	count = vertex_count;
  	if (primitive_type == D3DPT_QUADLIST)
-@@ -3363,11 +5494,147 @@ void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type, UINT
+@@ -3363,11 +5838,151 @@ void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type, UINT
  	}
  #endif
  	(void)index;
@@ -3987,7 +4431,7 @@ index 36c5f238..0d20472f 100644
 +	} slots[DRAW_SIGNATURE_SLOTS];
 +	static unsigned long frame, frames, draws, repeats, groups, previous_hash;
 +	static unsigned long consecutive;
-+	unsigned long words[20], hash = 2166136261UL, index, slot;
++	unsigned long words[20], hash = 2166136261UL, index, slot, probes;
 +	int stage;
 +
 +	if (frame != device.frame)
@@ -4032,9 +4476,13 @@ index 36c5f238..0d20472f 100644
 +	if (hash == previous_hash)
 +		consecutive++;
 +	previous_hash = hash;
-+	for (slot = hash % DRAW_SIGNATURE_SLOTS; slots[slot].draws && slots[slot].hash != hash;
++	for (probes = 0, slot = hash % DRAW_SIGNATURE_SLOTS; slots[slot].draws && slots[slot].hash != hash;
 +		slot = (slot + 1) % DRAW_SIGNATURE_SLOTS)
-+		;
++	{
++		/* (a full table: the draw is not counted) */
++		if (++probes == DRAW_SIGNATURE_SLOTS)
++			return FALSE;
++	}
 +	if (slots[slot].draws)
 +		repeats++;
 +	slots[slot].hash = hash;
@@ -4097,7 +4545,7 @@ index 36c5f238..0d20472f 100644
  /* ---------- immediate mode */
  
  void WINAPI D3DDevice_Begin(D3DPRIMITIVETYPE primitive_type)
-@@ -3397,7 +5664,10 @@ void WINAPI D3DDevice_End(void)
+@@ -3397,7 +6012,10 @@ void WINAPI D3DDevice_End(void)
  	unsigned long offset, index, count = device.immediate_count;
  	D3DPRIMITIVETYPE type = device.immediate_type;
  
@@ -4108,7 +4556,7 @@ index 36c5f238..0d20472f 100644
  	if (!count || !prepare_draw(TRUE))
  		return;
  	trace_draw("immediate", type, count, device.immediate_vertices);
-@@ -3567,7 +5837,7 @@ static void write_screenshot(struct render_target_entry *target)
+@@ -3567,7 +6185,7 @@ static void write_screenshot(struct render_target_entry *target)
  	if (!directory)
  		return;
  	pixels = malloc(image_size);
@@ -4117,7 +4565,7 @@ index 36c5f238..0d20472f 100644
  	glReadPixels(0, 0, (GLsizei)width, (GLsizei)height, GL_BGRA, GL_UNSIGNED_BYTE, pixels);
  	/* the display ignores destination alpha, which the game uses as scratch;
  	image viewers would show it as transparency */
-@@ -3601,6 +5871,19 @@ static void write_screenshot(struct render_target_entry *target)
+@@ -3601,6 +6219,19 @@ static void write_screenshot(struct render_target_entry *target)
  	free(pixels);
  }
  
@@ -4137,7 +4585,7 @@ index 36c5f238..0d20472f 100644
  void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destination_rectangle,
  	void *unused, void *unused2)
  {
-@@ -3612,7 +5895,10 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
+@@ -3612,11 +6243,15 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
  	(void)unused2;
  	if (screenshot_every < 0)
  		screenshot_every = config_integer("debug.screenshot_every");
@@ -4148,7 +4596,12 @@ index 36c5f238..0d20472f 100644
  	if (device.gl_ready)
  	{
  		struct render_target_entry *back_buffer = render_target_get(&device.back_buffer);
-@@ -3635,12 +5921,21 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
+ 		int window_width, window_height, width, height, x, y;
++		GLuint read_framebuffer;
+ 
+ 		if (trace_frame())
+ 			platform_log("present back buffer %08lx texture %u", (unsigned long)device.back_buffer.Data,
+@@ -3635,12 +6270,23 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
  		}
  		x = (window_width - width) / 2;
  		y = (window_height - height) / 2;
@@ -4161,17 +4614,19 @@ index 36c5f238..0d20472f 100644
 +			glInvalidateFramebuffer(GL_DRAW_FRAMEBUFFER, 2, depth_stencil);
 +		}
 +#endif
++		/* (found first: making it binds it) */
++		read_framebuffer = framebuffer_get(back_buffer->target.texture, back_buffer->target.level, 0);
  		glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
  		glDisable(GL_SCISSOR_TEST);
  		glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
  		glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
  		glClear(GL_COLOR_BUFFER_BIT);
 -		glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer_get(back_buffer->target.texture, 0));
-+		glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer_get(back_buffer->target.texture, back_buffer->target.level, 0));
++		glBindFramebuffer(GL_READ_FRAMEBUFFER, read_framebuffer);
  		/* row 0 of the render target is the top of the picture */
  		glBlitFramebuffer(0, 0, (GLint)back_buffer->target.gl_width, (GLint)back_buffer->target.gl_height,
  			x, y + height, x + width, y, GL_COLOR_BUFFER_BIT, GL_LINEAR);
-@@ -3648,12 +5943,19 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
+@@ -3648,12 +6294,19 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
  		xgpu_gl_state_invalidate();
  		xgpu_texture_cache_begin_frame();
  #ifdef HALO_ANDROID
@@ -4191,17 +4646,17 @@ index 36c5f238..0d20472f 100644
  		device.index_offset = 0;
  #else
  		device.stream_offset = STREAM_BUFFER_SIZE; /* orphan next frame */
-@@ -3664,12 +5966,23 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
+@@ -3664,12 +6317,23 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
  	stats.presents++;
  	if (debug_settings.statistics && device.frame % 60 == 0)
  	{
 -		platform_log("frame %lu: %lu draws, %lu immediate, %lu clears, %lu target changes; skipped %lu no program, %lu no target, %lu link; "
 -			"%lu KB mirrored, %lu KB streamed",
 +		platform_log("frame %lu: %lu draws, %lu immediate, %lu clears, %lu target changes; skipped %lu no program, %lu no target, %lu link, "
-+			"%lu texture not in yet; %lu KB mirrored, %lu KB streamed",
++			"%lu texture not in yet, %lu shader not translated yet; %lu KB mirrored, %lu KB streamed",
  			device.frame, stats.draws / stats.presents, stats.immediate_draws / stats.presents, stats.clears / stats.presents,
  			stats.target_changes / stats.presents, stats.skipped_no_program, stats.skipped_no_target, stats.skipped_link,
-+			stats.skipped_texture,
++			stats.skipped_texture, stats.skipped_shader,
  			stats.mirrored_bytes / stats.presents / 1024, stats.streamed_bytes / stats.presents / 1024);
 +		platform_log("high constants: %lu found again, %lu written; %lu instanced draws of %lu draws (a frame)",
 +			stats.high_constant_hits / stats.presents, stats.high_constant_writes / stats.presents,
@@ -4217,7 +4672,7 @@ index 36c5f238..0d20472f 100644
  	}
  	platform_pump_events();
  
-@@ -3688,6 +6001,8 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
+@@ -3688,6 +6352,8 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
  		pending_flips++;
  	}
  	pthread_mutex_unlock(&vertical_blank_lock);
@@ -4307,7 +4762,7 @@ index 578e0567..c5a2fd19 100644
  #define glShaderSource halo_glShaderSource
  #define glCompileShader halo_glCompileShader
 diff --git a/port/linux/src/nv2a_psh.c b/port/linux/src/nv2a_psh.c
-index 5223c9ab..36d24efd 100644
+index 5223c9ab..bef36f9b 100644
 --- a/port/linux/src/nv2a_psh.c
 +++ b/port/linux/src/nv2a_psh.c
 @@ -18,7 +18,6 @@ Register values are clamped to [-1, 1] between stages, as on the hardware.
@@ -4318,7 +4773,19 @@ index 5223c9ab..36d24efd 100644
  #include <stdlib.h>
  
  enum
-@@ -75,12 +74,12 @@ static const char *register_expression(unsigned long reg, int stage, BOOL unique
+@@ -66,8 +65,9 @@ enum
+ 
+ static const char *register_expression(unsigned long reg, int stage, BOOL unique_c0, BOOL unique_c1)
+ {
+-	static char buffer[4][32];
+-	static int next = 0;
++	/* (each thread's: shaders are translated beside the renderer too) */
++	static __thread char buffer[4][32];
++	static __thread int next = 0;
+ 	char *result = buffer[next++ & 3];
+ 
+ 	switch (reg)
+@@ -75,12 +75,12 @@ static const char *register_expression(unsigned long reg, int stage, BOOL unique
  	case _register_c0:
  		if (stage < 0)
  			return "ps_final_c0";
@@ -4333,7 +4800,7 @@ index 5223c9ab..36d24efd 100644
  		return result;
  	case _register_fog: return "fog";
  	case _register_v0: return "v0";
-@@ -108,11 +107,11 @@ static void combiner_input(struct xgpu_text *text, unsigned long input, BOOL alp
+@@ -108,11 +108,11 @@ static void combiner_input(struct xgpu_text *text, unsigned long input, BOOL alp
  	char value[64];
  
  	if (alpha_portion)
@@ -4348,7 +4815,7 @@ index 5223c9ab..36d24efd 100644
  
  	switch (mapping)
  	{
-@@ -136,11 +135,11 @@ static void final_input(struct xgpu_text *text, unsigned long input, BOOL alpha_
+@@ -136,11 +136,11 @@ static void final_input(struct xgpu_text *text, unsigned long input, BOOL alpha_
  	char value[64];
  
  	if (alpha_portion)
@@ -4363,7 +4830,7 @@ index 5223c9ab..36d24efd 100644
  	if (input & 0x20)
  		xgpu_text_append(text, "(1.0 - clamp(%s, 0.0, 1.0))", value);
  	else
-@@ -228,15 +227,15 @@ static void combiner_stage(struct xgpu_text *text, const DWORD *state, int stage
+@@ -228,15 +228,15 @@ static void combiner_stage(struct xgpu_text *text, const DWORD *state, int stage
  		{
  			xgpu_text_append(text, "\t\t%s %sSUM = %sAB + %sCD;\n", type, prefix, prefix, prefix);
  		}
@@ -4382,7 +4849,7 @@ index 5223c9ab..36d24efd 100644
  		xgpu_text_append(text, "\t\t%sSUM = clamp(", prefix);
  		xgpu_text_append(text, mapped, prefix);
  		xgpu_text_append(text, ", -1.0, 1.0);\n");
-@@ -317,12 +316,12 @@ static void dot_input(struct xgpu_text *text, const DWORD *state, int stage)
+@@ -317,12 +317,12 @@ static void dot_input(struct xgpu_text *text, const DWORD *state, int stage)
  #ifdef HALO_ANDROID
  /* ES samplers have no LOD bias: pass D3DTSS_MIPMAPLODBIAS to the lookup */
  #define SAMPLE_BIAS ", texture_lod_bias[%d]"
@@ -4400,7 +4867,7 @@ index 5223c9ab..36d24efd 100644
  #else
  #define SAMPLE_BIAS ""
  #define SHADER_VERSION "#version 450 core\n"
-@@ -347,6 +346,27 @@ static void sample(struct xgpu_text *text, const struct nv2a_pixel_shader_key *k
+@@ -347,6 +347,27 @@ static void sample(struct xgpu_text *text, const struct nv2a_pixel_shader_key *k
  			);
  		break;
  	default:
@@ -4428,7 +4895,7 @@ index 5223c9ab..36d24efd 100644
  		xgpu_text_append(text, "texture(tex%d, (%s).xy * texture_scale[%d].xy" SAMPLE_BIAS ")", stage, coordinates, stage
  #ifdef HALO_ANDROID
  			, stage
-@@ -372,13 +392,13 @@ static void texture_stage(struct xgpu_text *text, const struct nv2a_pixel_shader
+@@ -372,13 +393,13 @@ static void texture_stage(struct xgpu_text *text, const struct nv2a_pixel_shader
  	{
  	case _mode_project2d:
  	case _mode_project3d:
@@ -4444,7 +4911,16 @@ index 5223c9ab..36d24efd 100644
  		xgpu_text_append(text, "\tt%d = ", stage);
  		sample(text, key, stage, coordinates);
  		xgpu_text_append(text, ";\n");
-@@ -428,7 +448,7 @@ static void texture_stage(struct xgpu_text *text, const struct nv2a_pixel_shader
+@@ -406,7 +427,7 @@ static void texture_stage(struct xgpu_text *text, const struct nv2a_pixel_shader
+ 		int input = stage - 1;
+ 
+ 		xgpu_text_append(text, "\t{\n\t\tvec2 d = signed_bytes(t%d.rgb).rg;\n", input);
+-		xgpu_text_append(text, "\t\tvec2 coordinates = xT%d.xy + vec2(bump_matrix[%d].x * d.x + bump_matrix[%d].z * d.y,"
++		xgpu_text_append(text, "\t\thighp vec2 coordinates = xT%d.xy + vec2(bump_matrix[%d].x * d.x + bump_matrix[%d].z * d.y,"
+ 			" bump_matrix[%d].y * d.x + bump_matrix[%d].w * d.y);\n", stage, stage, stage, stage, stage);
+ 		xgpu_text_append(text, "\t\tt%d = ", stage);
+ 		sample(text, key, stage, "vec4(coordinates, 0.0, 1.0)");
+@@ -428,7 +449,7 @@ static void texture_stage(struct xgpu_text *text, const struct nv2a_pixel_shader
  		xgpu_text_append(text, "\tdot%d = dot(xT%d.xyz, ", stage, stage);
  		dot_input(text, state, stage);
  		xgpu_text_append(text, ");\n\tt%d = ", stage);
@@ -4453,7 +4929,24 @@ index 5223c9ab..36d24efd 100644
  		sample(text, key, stage, coordinates);
  		xgpu_text_append(text, ";\n");
  		break;
-@@ -469,13 +489,13 @@ static void texture_stage(struct xgpu_text *text, const struct nv2a_pixel_shader
+@@ -451,12 +472,12 @@ static void texture_stage(struct xgpu_text *text, const struct nv2a_pixel_shader
+ 	case _mode_dot_reflect_specular_constant:
+ 		xgpu_text_append(text, "\tdot%d = dot(xT%d.xyz, ", stage, stage);
+ 		dot_input(text, state, stage);
+-		xgpu_text_append(text, ");\n\t{\n\t\tvec3 n = vec3(dot1, dot2, dot3);\n");
++		xgpu_text_append(text, ");\n\t{\n\t\thighp vec3 n = vec3(dot1, dot2, dot3);\n");
+ 		if (mode == _mode_dot_reflect_specular)
+-			xgpu_text_append(text, "\t\tvec3 e = vec3(xT1.w, xT2.w, xT3.w);\n");
++			xgpu_text_append(text, "\t\thighp vec3 e = vec3(xT1.w, xT2.w, xT3.w);\n");
+ 		else
+-			xgpu_text_append(text, "\t\tvec3 e = ps_c0[0].xyz;\n");
+-		xgpu_text_append(text, "\t\tvec3 r = 2.0 * n * dot(n, e) / max(dot(n, n), 1.0e-20) - e;\n\t\tt%d = ", stage);
++			xgpu_text_append(text, "\t\thighp vec3 e = ps_c0[0].xyz;\n");
++		xgpu_text_append(text, "\t\thighp vec3 r = 2.0 * n * dot(n, e) / max(dot(n, n), 1.0e-20) - e;\n\t\tt%d = ", stage);
+ 		sample(text, key, stage, "vec4(r, 1.0)");
+ 		xgpu_text_append(text, ";\n\t}\n");
+ 		break;
+@@ -469,13 +490,13 @@ static void texture_stage(struct xgpu_text *text, const struct nv2a_pixel_shader
  		xgpu_text_append(text, ";\n");
  		break;
  	case _mode_dependent_ar:
@@ -4469,7 +4962,7 @@ index 5223c9ab..36d24efd 100644
  		xgpu_text_append(text, "\tt%d = ", stage);
  		sample(text, key, stage, coordinates);
  		xgpu_text_append(text, ";\n");
-@@ -540,6 +560,14 @@ char *nv2a_pixel_shader_to_glsl(const struct nv2a_pixel_shader_key *key)
+@@ -540,6 +561,14 @@ char *nv2a_pixel_shader_to_glsl(const struct nv2a_pixel_shader_key *key)
  			"layout(early_fragment_tests) in;\n"
  			"layout(binding = 0, offset = 0) uniform atomic_uint visible_samples;\n");
  	}
@@ -4484,7 +4977,7 @@ index 5223c9ab..36d24efd 100644
  #endif
  	xgpu_text_append(&text,
  		SHADER_VERSION
-@@ -547,11 +575,11 @@ char *nv2a_pixel_shader_to_glsl(const struct nv2a_pixel_shader_key *key)
+@@ -547,11 +576,11 @@ char *nv2a_pixel_shader_to_glsl(const struct nv2a_pixel_shader_key *key)
  		"in vec4 xD1;\n"
  		"in vec4 xB0;\n"
  		"in vec4 xB1;\n"
@@ -4501,8 +4994,32 @@ index 5223c9ab..36d24efd 100644
  		"layout(location = 0) out vec4 fragment_color;\n"
  		XGPU_PIXEL_UNIFORMS);
  	for (stage = 0; stage < 4; stage++)
+@@ -570,8 +599,21 @@ char *nv2a_pixel_shader_to_glsl(const struct nv2a_pixel_shader_key *key)
+ 		"{\n"
+ 		"\tvec4 v0 = xD0;\n"
+ 		"\tvec4 v1 = xD1;\n"
+-		"\tvec4 t0 = vec4(0.0), t1 = vec4(0.0), t2 = vec4(0.0), t3 = vec4(0.0);\n"
+-		"\tfloat dot0 = 0.0, dot1 = 0.0, dot2 = 0.0, dot3 = 0.0;\n");
++		"\tvec4 t0 = vec4(0.0), t1 = vec4(0.0), t2 = vec4(0.0), t3 = vec4(0.0);\n");
++	/* the dot products: full precision where a stage samples with them */
++	{
++		BOOL coordinates = FALSE;
++
++		for (stage = 0; stage < 4; stage++)
++		{
++			unsigned long mode = stage_mode(key, stage);
++
++			if ((mode >= _mode_dot_st && mode <= _mode_dot_str_cube) || mode == _mode_dot_reflect_specular_constant)
++				coordinates = TRUE;
++		}
++		xgpu_text_append(&text, coordinates ? "\thighp float dot0 = 0.0, dot1 = 0.0, dot2 = 0.0, dot3 = 0.0;\n" :
++			"\tfloat dot0 = 0.0, dot1 = 0.0, dot2 = 0.0, dot3 = 0.0;\n");
++	}
+ 
+ 	for (stage = 0; stage < 4; stage++)
+ 		texture_stage(&text, key, stage);
 diff --git a/port/linux/src/nv2a_vsh.c b/port/linux/src/nv2a_vsh.c
-index bfb1a7b1..215d4d42 100644
+index bfb1a7b1..460c3bbf 100644
 --- a/port/linux/src/nv2a_vsh.c
 +++ b/port/linux/src/nv2a_vsh.c
 @@ -19,7 +19,9 @@ clip-space position again.
@@ -4537,16 +5054,17 @@ index bfb1a7b1..215d4d42 100644
  	"invariant gl_Position;\n"
  	"vec4 unpack_normpacked3(uint p)\n"
  	"{\n"
-@@ -194,16 +186,192 @@ static const char shader_prologue[] =
+@@ -194,16 +186,193 @@ static const char shader_prologue[] =
  	"	return vec4(1.0, max(s.x, 0.0), specular, 1.0);\n"
  	"}\n";
  
 +/* the number of constant registers a program needs: one past the highest it
-+reads, or all of them if it reads any relative to a0 */
++reads, or all of them if it reads any relative to a0; at least the viewport's,
++which the shader's end reads (c[-38] and c[-37]) */
 +static unsigned long constant_registers(const DWORD *instructions, unsigned long instruction_count)
 +{
 +#ifdef HALO_ANDROID
-+	unsigned long index, count = 1;
++	unsigned long index, count = 60;
 +
 +	for (index = 0; index < instruction_count; index++)
 +	{
@@ -4732,7 +5250,7 @@ index bfb1a7b1..215d4d42 100644
  	for (index = 0; index < XGPU_VERTEX_ATTRIBUTE_COUNT; index++)
  	{
  		if (packed_attribute_mask & (1UL << index))
-@@ -213,6 +381,14 @@ char *nv2a_vertex_shader_to_glsl(const DWORD *instructions, unsigned long instru
+@@ -213,6 +382,14 @@ char *nv2a_vertex_shader_to_glsl(const DWORD *instructions, unsigned long instru
  	}
  
  	xgpu_text_append(&text, "void main()\n{\n");
@@ -4747,7 +5265,7 @@ index bfb1a7b1..215d4d42 100644
  	for (index = 0; index < XGPU_VERTEX_ATTRIBUTE_COUNT; index++)
  	{
  		if (packed_attribute_mask & (1UL << index))
-@@ -361,20 +537,27 @@ char *nv2a_vertex_shader_to_glsl(const DWORD *instructions, unsigned long instru
+@@ -361,20 +538,27 @@ char *nv2a_vertex_shader_to_glsl(const DWORD *instructions, unsigned long instru
  		"\tgl_Position.y = -gl_Position.y;\n"
  		"\tgl_Position.z = 2.0 * gl_Position.z - gl_Position.w;\n"
  #endif
@@ -4787,7 +5305,7 @@ index bfb1a7b1..215d4d42 100644
  	return text.buffer;
  }
 diff --git a/port/linux/src/port_config.c b/port/linux/src/port_config.c
-index 004871e3..b4ef73c5 100644
+index 004871e3..f9634f4b 100644
 --- a/port/linux/src/port_config.c
 +++ b/port/linux/src/port_config.c
 @@ -73,11 +73,29 @@ static const struct config_setting config_settings[] =
@@ -4820,7 +5338,7 @@ index 004871e3..b4ef73c5 100644
  
  	{ "audio.enabled", _config_boolean, "true", "HALO_NO_AUDIO", _environment_set_is_false, _platform_all,
  		"Play sound." },
-@@ -213,6 +231,47 @@ static const struct config_setting config_settings[] =
+@@ -213,6 +231,51 @@ static const struct config_setting config_settings[] =
  	{ "debug.sample_seconds", _config_real, "0.0", "HALO_SAMPLE", _environment_value, _platform_android,
  		"Log where every game thread is this often, in seconds (read by the\n"
  		"app, port/android/host/host_debug.c); 0 never." },
@@ -4835,6 +5353,10 @@ index 004871e3..b4ef73c5 100644
 +		"Decode textures and upload them on a thread of their own, drawing what\n"
 +		"uses one only once it is in, rather than on the render thread when it is\n"
 +		"first drawn with. Needs a host that gives the thread a context of its own." },
++	{ "debug.async_shaders", _config_boolean, "true", "HALO_ASYNC_SHADERS", _environment_value, _platform_android,
++		"Translate shaders on a thread of their own, drawing what uses one only\n"
++		"once it is in, rather than on the render thread when it is first drawn\n"
++		"with." },
 +	{ "debug.instance_models", _config_boolean, "true", "HALO_INSTANCE_MODELS", _environment_value, _platform_android,
 +		"Draw consecutive draws of the same skinned model part that differ only\n"
 +		"in their constants (several marines' same part) as one instanced draw." },
@@ -4946,7 +5468,7 @@ index 04fc3267..b20400b4 100644
  }
  
 diff --git a/port/linux/src/xbox_textures.c b/port/linux/src/xbox_textures.c
-index 9bdcdc99..0639f2e6 100644
+index 9bdcdc99..ef8a9ef0 100644
 --- a/port/linux/src/xbox_textures.c
 +++ b/port/linux/src/xbox_textures.c
 @@ -17,6 +17,7 @@ memory_watch.c detects that by write-protecting the pages.
@@ -5033,7 +5555,7 @@ index 9bdcdc99..0639f2e6 100644
  				}
  			}
  		}
-@@ -572,8 +583,274 @@ static void texture_dump(GLenum target, const struct xgpu_texture_description *d
+@@ -572,8 +583,294 @@ static void texture_dump(GLenum target, const struct xgpu_texture_description *d
  }
  #endif
  
@@ -5149,6 +5671,26 @@ index 9bdcdc99..0639f2e6 100644
 +
 +				if (dxt1_block_transparent(source + ((z * blocks_y + by) * blocks_x + bx) * 8, dxt_inside(rows, columns)))
 +					return TRUE;
++			}
++		}
++	}
++	return FALSE;
++}
++
++/* whether any level of any face of a DXT1 texture has a transparent texel */
++static BOOL dxt1_texture_has_alpha(const unsigned char *base, const struct xgpu_texture_description *description)
++{
++	unsigned long faces = description->cube_map ? 6 : 1, face_size = xgpu_texture_face_size(description), face, level;
++
++	for (face = 0; face < faces; face++)
++	{
++		for (level = 0; level < description->levels; level++)
++		{
++			if (dxt1_has_alpha(base + face * face_size + xgpu_texture_level_offset(description, level),
++				level_dimension(description->width, level), level_dimension(description->height, level),
++				level_dimension(description->depth, level)))
++			{
++				return TRUE;
 +			}
 +		}
 +	}
@@ -5310,7 +5852,7 @@ index 9bdcdc99..0639f2e6 100644
  {
  	struct format_information information = format_information(description->format);
  	unsigned long face_count = description->cube_map ? 6 : 1;
-@@ -582,18 +859,59 @@ static void upload(GLuint texture, GLenum target, const struct xgpu_texture_desc
+@@ -582,18 +879,58 @@ static void upload(GLuint texture, GLenum target, const struct xgpu_texture_desc
  	BOOL decode_compressed = FALSE;
  	unsigned long *converted;
  	unsigned long face, level;
@@ -5344,9 +5886,8 @@ index 9bdcdc99..0639f2e6 100644
 +		switch (information.kind)
 +		{
 +		case _texel_dxt1:
-+			/* the alpha of the largest level decides */
-+			packing = dxt1_has_alpha(base, description->width, description->height, description->depth) ?
-+				_packing_5551 : _packing_565;
++			/* the alpha of every level of every face decides */
++			packing = dxt1_texture_has_alpha(base, description) ? _packing_5551 : _packing_565;
 +			break;
 +		case _texel_r5g6b5: case _texel_x1r5g5b5: case _texel_r6g5b5:
 +			packing = _packing_565;
@@ -5375,7 +5916,7 @@ index 9bdcdc99..0639f2e6 100644
  #endif
  	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
  	glTexParameteri(target, GL_TEXTURE_BASE_LEVEL, 0);
-@@ -621,21 +939,47 @@ static void upload(GLuint texture, GLenum target, const struct xgpu_texture_desc
+@@ -621,21 +958,47 @@ static void upload(GLuint texture, GLenum target, const struct xgpu_texture_desc
  			else
  			{
  #ifdef HALO_ANDROID
@@ -5430,7 +5971,7 @@ index 9bdcdc99..0639f2e6 100644
  }
  
  /* ---------- cache */
-@@ -651,6 +995,16 @@ struct texture_entry
+@@ -651,6 +1014,16 @@ struct texture_entry
  	unsigned long address, size;
  	unsigned long generation;
  	unsigned long last_used_frame;
@@ -5447,7 +5988,7 @@ index 9bdcdc99..0639f2e6 100644
  };
  
  #define TEXTURE_BUCKET_COUNT 4096
-@@ -675,6 +1029,138 @@ static struct
+@@ -675,6 +1048,168 @@ static struct
  static unsigned long texture_drop_serial = 1;
  static unsigned long texture_frame = 0;
  
@@ -5522,7 +6063,15 @@ index 9bdcdc99..0639f2e6 100644
 +	{
 +		if (!entry->upload_palette)
 +			entry->upload_palette = malloc(256 * sizeof(D3DCOLOR));
++		if (!entry->upload_palette)
++			return FALSE;
 +		memcpy(entry->upload_palette, palette, 256 * sizeof(D3DCOLOR));
++	}
++	else
++	{
++		/* (an entry reused for no palette: not an earlier one's) */
++		free(entry->upload_palette);
++		entry->upload_palette = NULL;
 +	}
 +	/* again: into a new texture, drawn with once it is in */
 +	entry->uploading = entry->texture;
@@ -5541,6 +6090,29 @@ index 9bdcdc99..0639f2e6 100644
 +	return TRUE;
 +}
 +
++/* textures replaced by a new upload, deleted as the next frame begins: a
++draw may have found the old one for one stage before another stage's lookup
++took the new one */
++static GLuint *retired_textures;
++static unsigned long retired_count, retired_capacity;
++
++static void texture_retire(GLuint texture)
++{
++	if (retired_count == retired_capacity)
++	{
++		unsigned long capacity = retired_capacity ? retired_capacity * 2 : 64;
++		GLuint *grown = realloc(retired_textures, capacity * sizeof(*grown));
++
++		/* (short of memory: kept for good rather than deleted under a draw
++		that may still use it) */
++		if (!grown)
++			return;
++		retired_textures = grown;
++		retired_capacity = capacity;
++	}
++	retired_textures[retired_count++] = texture;
++}
++
 +/* the worker's upload of the entry taken once it is done, its texture in
 +place of the old one */
 +static void texture_collect(struct texture_entry *entry)
@@ -5551,8 +6123,7 @@ index 9bdcdc99..0639f2e6 100644
 +		return;
 +	if (entry->uploading != entry->texture)
 +	{
-+		glDeleteTextures(1, &entry->texture);
-+		xgpu_gl_state_invalidate();
++		texture_retire(entry->texture);
 +		entry->texture = entry->uploading;
 +	}
 +	entry->description.opaque = done == 2;
@@ -5586,7 +6157,7 @@ index 9bdcdc99..0639f2e6 100644
  static unsigned long bucket_index(DWORD data, DWORD format_word, DWORD size_word)
  {
  	return ((data >> 7) ^ (format_word * 2654435761UL) ^ size_word) % TEXTURE_BUCKET_COUNT;
-@@ -699,7 +1185,6 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
+@@ -699,7 +1234,6 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
  	DWORD data = resource[1], format_word = resource[3], size_word = resource[4];
  	struct texture_entry **bucket = &texture_buckets[bucket_index(data, format_word, size_word)];
  	struct texture_entry *entry;
@@ -5594,7 +6165,7 @@ index 9bdcdc99..0639f2e6 100644
  	BOOL palettized = ((format_word & D3DFORMAT_FORMAT_MASK) >> D3DFORMAT_FORMAT_SHIFT) == 0x0b;
  	unsigned long hash = palettized ? palette_hash(palette) : 0;
  
-@@ -714,11 +1199,7 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
+@@ -714,11 +1248,7 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
  		recent_textures[recent].watch_serial == watch_serial &&
  		recent_textures[recent].drop_serial == texture_drop_serial)
  	{
@@ -5607,34 +6178,41 @@ index 9bdcdc99..0639f2e6 100644
  	}
  
  	for (entry = *bucket; entry; entry = entry->next)
-@@ -728,11 +1209,12 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
+@@ -728,13 +1258,18 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
  			if (entry->palette_hash == hash)
  				break;
  			variant_count++;
 -			if (!oldest_variant || entry->last_used_frame < oldest_variant->last_used_frame)
-+			/* (not one the worker is uploading) */
++			/* (not one the worker is uploading: one done is taken first) */
++			texture_collect(entry);
 +			if (!entry->uploading && (!oldest_variant || entry->last_used_frame < oldest_variant->last_used_frame))
  				oldest_variant = entry;
  		}
  	}
--	if (!entry && variant_count >= MAXIMUM_PALETTE_VARIANTS)
-+	if (!entry && variant_count >= MAXIMUM_PALETTE_VARIANTS && oldest_variant)
+ 	if (!entry && variant_count >= MAXIMUM_PALETTE_VARIANTS)
  	{
- 		/* a palette that keeps changing reuses the stalest copy */
+-		/* a palette that keeps changing reuses the stalest copy */
++		/* a palette that keeps changing reuses the stalest copy; while all
++		are being uploaded, the draw waits (no more copies are made) */
++		if (!oldest_variant)
++			return 0;
  		entry = oldest_variant;
-@@ -759,8 +1241,9 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
+ 		entry->palette_hash = hash;
+ 		entry->generation = 0;
+@@ -759,8 +1294,10 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
  
  	if (no_cache < 0)
  		no_cache = config_boolean("debug.texture_no_cache");
 -	generation = memory_watch_generation(entry->address, entry->size);
 -	if (!entry->generation || generation > entry->generation || no_cache)
++	texture_collect(entry);
 +	/* (an upload under way is looked at again once it is done) */
 +	if (!entry->uploading && (!entry->generation || no_cache ||
 +		memory_watch_generation(entry->address, entry->size) > entry->generation))
  	{
  		/* protect first, so a write racing with the upload is noticed */
  		memory_watch_protect(entry->address, entry->size);
-@@ -785,10 +1268,21 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
+@@ -785,11 +1322,22 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
  					entry->description.height, entry->size, entry->generation,
  					ones * 100 / entry->size, zeros * 100 / entry->size);
  			}
@@ -5655,10 +6233,12 @@ index 9bdcdc99..0639f2e6 100644
 +			entry->ready = TRUE;
  	}
 -	entry->last_used_frame = texture_frame;
- 	if (!palettized && !no_cache)
+-	if (!palettized && !no_cache)
++	if (!palettized && !no_cache && !entry->uploading)
  	{
  		recent_textures[recent].data = data;
-@@ -798,9 +1292,7 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
+ 		recent_textures[recent].format_word = format_word;
+@@ -798,15 +1346,21 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
  		recent_textures[recent].watch_serial = watch_serial;
  		recent_textures[recent].drop_serial = texture_drop_serial;
  	}
@@ -5669,7 +6249,21 @@ index 9bdcdc99..0639f2e6 100644
  }
  
  void xgpu_texture_cache_begin_frame(void)
-@@ -819,12 +1311,15 @@ void xgpu_texture_cache_begin_frame(void)
+ {
+ 	unsigned long index;
+ 
++#ifdef HALO_ANDROID
++	if (retired_count)
++	{
++		glDeleteTextures((GLsizei)retired_count, retired_textures);
++		xgpu_gl_state_invalidate();
++		retired_count = 0;
++	}
++#endif
+ 	texture_frame++;
+ 	if (texture_frame % 600)
+ 		return;
+@@ -819,12 +1373,15 @@ void xgpu_texture_cache_begin_frame(void)
  		{
  			struct texture_entry *entry = *link;
  
@@ -5878,7 +6472,7 @@ index 7d276da8..2b267bec 100644
  	targets when the game draws at the display's resolution (d3d8_gl.c) */
  	float scale[2];
 diff --git a/port/linux/src/xgpu_text.c b/port/linux/src/xgpu_text.c
-index 23beb89c..bdd14d47 100644
+index 23beb89c..45c93a44 100644
 --- a/port/linux/src/xgpu_text.c
 +++ b/port/linux/src/xgpu_text.c
 @@ -1,7 +1,7 @@
@@ -5890,7 +6484,7 @@ index 23beb89c..bdd14d47 100644
  */
  
  #include "xgpu.h"
-@@ -9,24 +9,140 @@ A growable string for the shader translators.
+@@ -9,24 +9,149 @@ A growable string for the shader translators.
  #include <stdarg.h>
  #include <stdio.h>
  #include <stdlib.h>
@@ -5940,9 +6534,12 @@ index 23beb89c..bdd14d47 100644
 +				value = "(null)";
 +			break;
 +		case 'c':
-+			number[0] = (char)va_arg(arguments, int);
-+			number[1] = 0;
-+			break;
++			/* one byte, even a zero one */
++			if (length + 1 >= size)
++				return -1;
++			buffer[length++] = (char)va_arg(arguments, int);
++			format = percent + 2;
++			continue;
 +		case 'd':
 +			_ltoa(va_arg(arguments, int), number, 10);
 +			break;
@@ -6001,6 +6598,12 @@ index 23beb89c..bdd14d47 100644
 +		needed = vsnprintf(text->buffer + text->length, text->capacity - text->length, format, arguments);
  		va_end(arguments);
 -		if (text->buffer && text->length + (unsigned long)needed < text->capacity)
++		/* (a conversion printf cannot make: nothing appended) */
++		if (needed < 0)
++		{
++			text->buffer[text->length] = 0;
++			return;
++		}
 +		if (text->length + (unsigned long)needed < text->capacity)
  		{
  			text->length += (unsigned long)needed;
@@ -6147,11 +6750,35 @@ index ebaeaccc..2d69abf2 100644
  		{
  			geometry_detail_level_index--;
  		}
+diff --git a/source/rasterizer/rasterizer.c b/source/rasterizer/rasterizer.c
+index f197c5c2..43598b5c 100644
+--- a/source/rasterizer/rasterizer.c
++++ b/source/rasterizer/rasterizer.c
+@@ -941,10 +941,19 @@ void rasterizer_decals_initialize_for_new_map(
+ 	return;
+ }
+ 
++#ifdef HALO_ANDROID
++void rasterizer_water_dispose_from_old_map(void);
++#endif
++
+ void rasterizer_decals_dispose_from_old_map(
+ 	void)
+ {
+ 	_rasterizer_decals_dispose_from_old_map();
++#ifdef HALO_ANDROID
++	/* (the rasterizer's own map unload: the water prebuilt at a frame's
++	start, rasterizer_xbox_water.c, keeps a pointer into the map's tags) */
++	rasterizer_water_dispose_from_old_map();
++#endif
+ 	return;
+ }
+ 
 diff --git a/source/rasterizer/xbox/rasterizer_xbox.c b/source/rasterizer/xbox/rasterizer_xbox.c
-index 6b32a94f..3ec4743b 100644
+index 6b32a94f..2a6ba309 100644
 --- a/source/rasterizer/xbox/rasterizer_xbox.c
 +++ b/source/rasterizer/xbox/rasterizer_xbox.c
-@@ -1390,6 +1390,55 @@ boolean rasterizer_set_texture_non_blocking(
+@@ -1390,6 +1390,75 @@ boolean rasterizer_set_texture_non_blocking(
  	return FALSE;
  }
  
@@ -6183,18 +6810,38 @@ index 6b32a94f..3ec4743b 100644
 +	}
 +	if (!slots[slot].primary)
 +	{
++		static boolean failed[SHADOW_TARGET_SLOTS];
++		D3DTexture *primary_texture = NULL, *secondary_texture = NULL;
++		D3DSurface *primary = NULL, *secondary = NULL;
++
++		/* (a slot that could not be made is not tried again) */
++		if (failed[slot])
++			return FALSE;
 +		if (IDirect3DDevice8_CreateTexture(global_d3d_device, RASTERIZER_TARGET_SHADOW_PRIMARY_SIZE,
 +				RASTERIZER_TARGET_SHADOW_PRIMARY_SIZE, 1, D3DUSAGE_RENDERTARGET, D3DFMT_R5G6B5, D3DPOOL_DEFAULT,
-+				&slots[slot].primary_texture) < 0 ||
-+			IDirect3DTexture8_GetSurfaceLevel(slots[slot].primary_texture, 0, &slots[slot].primary) < 0 ||
++				&primary_texture) < 0 ||
++			IDirect3DTexture8_GetSurfaceLevel(primary_texture, 0, &primary) < 0 ||
 +			IDirect3DDevice8_CreateTexture(global_d3d_device, RASTERIZER_TARGET_SHADOW_SECONDARY_SIZE,
 +				RASTERIZER_TARGET_SHADOW_SECONDARY_SIZE, 1, D3DUSAGE_RENDERTARGET, D3DFMT_R5G6B5, D3DPOOL_DEFAULT,
-+				&slots[slot].secondary_texture) < 0 ||
-+			IDirect3DTexture8_GetSurfaceLevel(slots[slot].secondary_texture, 0, &slots[slot].secondary) < 0)
++				&secondary_texture) < 0 ||
++			IDirect3DTexture8_GetSurfaceLevel(secondary_texture, 0, &secondary) < 0)
 +		{
-+			slots[slot].primary = NULL;
++			/* what was made goes again */
++			if (secondary)
++				IDirect3DSurface8_Release(secondary);
++			if (secondary_texture)
++				IDirect3DTexture8_Release(secondary_texture);
++			if (primary)
++				IDirect3DSurface8_Release(primary);
++			if (primary_texture)
++				IDirect3DTexture8_Release(primary_texture);
++			failed[slot] = TRUE;
 +			return FALSE;
 +		}
++		slots[slot].primary_texture = primary_texture;
++		slots[slot].primary = primary;
++		slots[slot].secondary_texture = secondary_texture;
++		slots[slot].secondary = secondary;
 +	}
 +	global_d3d_texture_shadow_primary = slots[slot].primary_texture;
 +	global_d3d_surface_shadow_primary = slots[slot].primary;
@@ -6207,7 +6854,7 @@ index 6b32a94f..3ec4743b 100644
  void rasterizer_set_target_as_texture(
  	short stage,
  	short target,
-@@ -1709,6 +1758,10 @@ D3DSurface *rasterizer_get_target(
+@@ -1709,6 +1778,10 @@ D3DSurface *rasterizer_get_target(
  	return d3d_surface;
  }
  
@@ -6218,7 +6865,7 @@ index 6b32a94f..3ec4743b 100644
  void _rasterizer_window_begin(
  	struct rasterizer_window_begin_parameters const *parameters)
  {
-@@ -1736,6 +1789,13 @@ void _rasterizer_window_begin(
+@@ -1736,6 +1809,13 @@ void _rasterizer_window_begin(
  	}
  	rasterizer_water_set_visibility_for_window(FALSE);
  	rasterizer_active_camouflage_set_visibility(FALSE);
@@ -6233,10 +6880,10 @@ index 6b32a94f..3ec4743b 100644
  	rasterizer_set_stencil_mode(RASTERIZER_STENCIL_MODE_NONE);
  	rasterizer_window_set_fog(&parameters->fog);
 diff --git a/source/rasterizer/xbox/rasterizer_xbox_decals.c b/source/rasterizer/xbox/rasterizer_xbox_decals.c
-index 410140b9..75ca8708 100644
+index 410140b9..62384cbf 100644
 --- a/source/rasterizer/xbox/rasterizer_xbox_decals.c
 +++ b/source/rasterizer/xbox/rasterizer_xbox_decals.c
-@@ -668,10 +668,69 @@ void _rasterizer_decals_begin(
+@@ -668,10 +668,74 @@ void _rasterizer_decals_begin(
  	return;
  }
  
@@ -6251,14 +6898,17 @@ index 410140b9..75ca8708 100644
 +static boolean decal_order_independent(short framebuffer_blend_function)
 +{
 +	return framebuffer_blend_function != _shader_framebuffer_blend_function_alpha_blend &&
-+		framebuffer_blend_function != _shader_framebuffer_blend_function_alpha_multiply_add;
++		framebuffer_blend_function != _shader_framebuffer_blend_function_alpha_multiply_add &&
++		framebuffer_blend_function != _shader_framebuffer_blend_function_double_multiply;
 +}
 +
 +/* the cluster's decals in drawing order; returns their count */
 +static long decal_drawing_order(short cluster_index, long *order, long capacity)
 +{
 +	/* an order independent decal's key: a flag, its blend function, bitmap
-+	and place in the list (so that the sort is stable); 0 for the others */
++	and place in the list (so that the sort is stable); 0 for the others.
++	Bits 40 and up, the flag and the function, set the runs (a run of zero
++	keys never moves) */
 +	static unsigned long long keys[MAXIMUM_DECALS_PER_MAP];
 +	long count = 0, run, end, index, place;
 +
@@ -6274,10 +6924,12 @@ index 410140b9..75ca8708 100644
 +			(unsigned long long)count : 0;
 +		order[count++] = index;
 +	}
-+	/* an insertion sort of each run of order independent decals */
-+	for (run = 0; run < count; run = end + 1)
++	/* an insertion sort of each run of order independent decals of one blend
++	function (two functions do not commute: one decal added and the next
++	multiplied is not the same picture the other way round) */
++	for (run = 0; run < count; run = end)
 +	{
-+		for (end = run; end < count && keys[end]; end++)
++		for (end = run; end < count && keys[end] >> 40 == keys[run] >> 40; end++)
 +		{
 +			unsigned long long key = keys[end];
 +			long moving = order[end];
@@ -6306,7 +6958,7 @@ index 410140b9..75ca8708 100644
  
  	match_assert(
  		"c:\\halo\\SOURCE\\rasterizer\\xbox\\rasterizer_xbox_decals.c",
-@@ -682,7 +741,12 @@ void _rasterizer_decals_draw(
+@@ -682,7 +746,12 @@ void _rasterizer_decals_draw(
  	if (!rasterizer_debug_options.draw_environment_decals)
  		return;
  
@@ -6319,7 +6971,7 @@ index 410140b9..75ca8708 100644
  	while (decal_index != NONE)
  	{
  		struct decal_datum *decal = DECAL_GET(decal_index);
-@@ -804,7 +868,11 @@ void _rasterizer_decals_draw(
+@@ -804,7 +873,11 @@ void _rasterizer_decals_draw(
  			rasterizer_frame_statistics.decal_vertex_count += 4*decal->quad_count;
  		}
  
@@ -6332,10 +6984,10 @@ index 410140b9..75ca8708 100644
  
  	return;
 diff --git a/source/rasterizer/xbox/rasterizer_xbox_models.c b/source/rasterizer/xbox/rasterizer_xbox_models.c
-index ef1545e6..6262bd47 100644
+index ef1545e6..93227980 100644
 --- a/source/rasterizer/xbox/rasterizer_xbox_models.c
 +++ b/source/rasterizer/xbox/rasterizer_xbox_models.c
-@@ -661,6 +661,322 @@ void rasterizer_model_ambient_reflection_tint(
+@@ -661,6 +661,317 @@ void rasterizer_model_ambient_reflection_tint(
  
  /* ---------- private code */
  
@@ -6623,16 +7275,11 @@ index ef1545e6..6262bd47 100644
 +
 +		if (deferred_draw_count == DEFERRED_MODEL_DRAWS)
 +		{
-+			/* full: draw what is kept, and keep this object's draws from here */
-+			short object = current_deferred_object;
-+			struct rasterizer_model_begin_parameters parameters = deferred_objects[object].parameters;
-+			boolean do_not_change = deferred_objects[object].do_not_change_z_stencil_states;
-+
-+			models_flush();
-+			model_begin_now(&parameters, do_not_change);
++			/* full: what is kept drawn, and this object drawn in place from
++			here, still open for its other parts and its end */
++			model_undefer();
 +			model_draw_now(shader, shader_permutation_index, triangle_buffer, dynamic_triangle_buffer_index,
 +				triangle_count, vertex_buffer, dynamic_vertex_buffer_index);
-+			model_end_now();
 +			return;
 +		}
 +		draw = &deferred_draws[deferred_draw_count];
@@ -6658,7 +7305,7 @@ index ef1545e6..6262bd47 100644
  void _rasterizer_models_begin(
  	boolean sky)
  {
-@@ -668,6 +984,10 @@ void _rasterizer_models_begin(
+@@ -668,6 +979,10 @@ void _rasterizer_models_begin(
  	{
  		local_pixel_shader_dirty_flag = TRUE;
  		local_sky_flag = sky;
@@ -6669,7 +7316,7 @@ index ef1545e6..6262bd47 100644
  		if (sky)
  		{
  			rasterizer_profile_begin(_rasterizer_profile_model_sky);
-@@ -686,6 +1006,17 @@ void _rasterizer_models_end(
+@@ -686,6 +1001,17 @@ void _rasterizer_models_end(
  {
  	if (rasterizer_debug_options.draw_models)
  	{
@@ -6687,7 +7334,7 @@ index ef1545e6..6262bd47 100644
  		if (local_sky_flag)
  		{
  			rasterizer_profile_end(_rasterizer_profile_model_sky);
-@@ -699,8 +1030,13 @@ void _rasterizer_models_end(
+@@ -699,8 +1025,13 @@ void _rasterizer_models_end(
  	return;
  }
  
@@ -6701,7 +7348,7 @@ index ef1545e6..6262bd47 100644
  {
  	if (rasterizer_debug_options.draw_models)
  	{
-@@ -726,9 +1062,15 @@ void _rasterizer_model_end(
+@@ -726,9 +1057,15 @@ void _rasterizer_model_end(
  	return;
  }
  
@@ -6717,7 +7364,7 @@ index ef1545e6..6262bd47 100644
  {
  	unsigned long skinning_work;
  	unsigned long lighting_work;
-@@ -1695,7 +2037,11 @@ void rasterizer_model_draw_environment_shader(
+@@ -1695,7 +2032,11 @@ void rasterizer_model_draw_environment_shader(
  	return;
  }
  
@@ -6729,7 +7376,7 @@ index ef1545e6..6262bd47 100644
  	struct shader *shader,
  	short shader_permutation_index,
  	struct triangle_buffer const *triangle_buffer,
-@@ -2429,13 +2775,16 @@ void _rasterizer_model_draw(
+@@ -2429,13 +2770,18 @@ void _rasterizer_model_draw(
  					D3DRS_CULLMODE,
  					D3DCULL_CCW);
  
@@ -6740,7 +7387,9 @@ index ef1545e6..6262bd47 100644
 -					triangle_count,
 -					vertex_buffer,
 -					dynamic_vertex_buffer_index);
++#ifdef HALO_ANDROID
 +				if (model_draw_sides != _model_draw_back_side)
++#endif
 +				{
 +					rasterizer_draw(
 +						triangle_buffer,
@@ -6753,12 +7402,15 @@ index ef1545e6..6262bd47 100644
  
  				if (rasterizer_debug_options.statistics_mode ==
  					_rasterizer_statistics_mode_enabled)
-@@ -2449,7 +2798,8 @@ void _rasterizer_model_draw(
+@@ -2449,7 +2795,11 @@ void _rasterizer_model_draw(
  							vertex_buffer);
  				}
  
 -				if (TEST_FLAG(
-+				if (model_draw_sides != _model_draw_front_side &&
++				if (
++#ifdef HALO_ANDROID
++					model_draw_sides != _model_draw_front_side &&
++#endif
 +					TEST_FLAG(
  						shader_model->model.flags,
  						_shader_model_two_sided_bit))
@@ -7004,10 +7656,10 @@ index 35dbdf72..38080fe8 100644
  		IDirect3DDevice8_Begin(global_d3d_device, D3DPT_TRIANGLEFAN);
  		IDirect3DDevice8_SetVertexData2s(global_d3d_device, 4, 0, 0);
 diff --git a/source/rasterizer/xbox/rasterizer_xbox_water.c b/source/rasterizer/xbox/rasterizer_xbox_water.c
-index 322516f0..162c060e 100644
+index 322516f0..51a746a3 100644
 --- a/source/rasterizer/xbox/rasterizer_xbox_water.c
 +++ b/source/rasterizer/xbox/rasterizer_xbox_water.c
-@@ -229,11 +229,39 @@ extern struct rasterizer_window_begin_parameters global_window_parameters;
+@@ -229,11 +229,48 @@ extern struct rasterizer_window_begin_parameters global_window_parameters;
  
  /* ---------- public code */
  
@@ -7022,6 +7674,15 @@ index 322516f0..162c060e 100644
 +
 +static struct shader *built_water_shader = NULL;
 +static boolean water_drawn_this_frame = FALSE;
++
++/* the map's tags go with it: the water drawn last with them */
++void rasterizer_water_dispose_from_old_map(
++	void)
++{
++	built_water_shader = NULL;
++
++	return;
++}
 +
 +void rasterizer_water_prebuild_bumpmap(
 +	void)
@@ -7047,7 +7708,7 @@ index 322516f0..162c060e 100644
  
  	return;
  }
-@@ -691,11 +719,26 @@ void rasterizer_water_draw(
+@@ -691,11 +728,26 @@ void rasterizer_water_draw(
  		{
  			write_depth = !TEST_FLAG(group->geometry_flags, _rasterizer_geometry_sky_bit) &&
  				!TEST_FLAG(water->flags, _shader_transparent_water_draw_before_fog_bit);
@@ -7133,7 +7794,7 @@ index 95cb7853..f160eb3f 100644
  					render_object_shadow_end(data);
  				}
 diff --git a/source/saved games/game_state_xbox.c b/source/saved games/game_state_xbox.c
-index 591a52b4..b9543380 100644
+index 591a52b4..b5aa8d04 100644
 --- a/source/saved games/game_state_xbox.c	
 +++ b/source/saved games/game_state_xbox.c	
 @@ -151,6 +151,17 @@ static HANDLE game_state_open_persistent_storage(
@@ -7154,7 +7815,7 @@ index 591a52b4..b9543380 100644
  /* ---------- public code */
  
  void *game_state_allocate_buffer(
-@@ -232,6 +243,18 @@ void game_state_create_or_open_file(
+@@ -232,6 +243,20 @@ void game_state_create_or_open_file(
  		87,
  		!xbox_game_state_globals.file_open);
  
@@ -7163,6 +7824,8 @@ index 591a52b4..b9543380 100644
 +	first checkpoint's copy (which took twice as long) */
 +	checkpoint = debug_malloc(xbox_game_state_globals.buffer_size, TRUE, __FILE__, __LINE__);
 +	xbox_game_state_globals.file_open = checkpoint != NULL;
++	/* (a new copy holds no checkpoint) */
++	xbox_game_state_globals.file_valid_for_read = FALSE;
 +	match_vassert(
 +		"c:\\halo\\SOURCE\\saved games\\game_state_xbox.c",
 +		97,
@@ -7173,20 +7836,21 @@ index 591a52b4..b9543380 100644
  	xbox_game_state_globals.handle = CreateFileA("z:\\savegame.bin",
  		GENERIC_READ|GENERIC_WRITE, 0, NULL, OPEN_ALWAYS,
  		FILE_FLAG_NO_BUFFERING|FILE_FLAG_SEQUENTIAL_SCAN, NULL);
-@@ -262,7 +285,12 @@ void game_state_close_file(
+@@ -262,7 +287,13 @@ void game_state_close_file(
  		"c:\\halo\\SOURCE\\saved games\\game_state_xbox.c",
  		106,
  		xbox_game_state_globals.file_open);
 +#ifdef HALO_LINUX
 +	free(checkpoint);
 +	checkpoint = NULL;
++	xbox_game_state_globals.file_valid_for_read = FALSE;
 +#else
  	CloseHandle(xbox_game_state_globals.handle);
 +#endif
  	xbox_game_state_globals.file_open = FALSE;
  
  	return;
-@@ -283,6 +311,11 @@ boolean game_state_write_to_file(
+@@ -283,6 +314,11 @@ boolean game_state_write_to_file(
  		121,
  		xbox_game_state_globals.file_open);
  
@@ -7198,11 +7862,15 @@ index 591a52b4..b9543380 100644
  	if (SetFilePointer(xbox_game_state_globals.handle, 0, NULL, FILE_BEGIN) !=
  			INVALID_SET_FILE_POINTER &&
  		WriteFile(xbox_game_state_globals.handle, xbox_game_state_globals.buffer,
-@@ -323,6 +356,10 @@ boolean game_state_read_from_file(
+@@ -323,6 +359,14 @@ boolean game_state_read_from_file(
  		146,
  		xbox_game_state_globals.file_valid_for_read || recover_saved_games_hack);
  
 +#ifdef HALO_LINUX
++	/* (nothing written to the copy, even for recover_saved_games_hack: there
++	is no file of an earlier session to recover) */
++	if (!checkpoint || !xbox_game_state_globals.file_valid_for_read)
++		return FALSE;
 +	memcpy(xbox_game_state_globals.buffer, checkpoint, xbox_game_state_globals.buffer_size);
 +	return TRUE;
 +#endif
@@ -7210,22 +7878,25 @@ index 591a52b4..b9543380 100644
  			INVALID_SET_FILE_POINTER &&
  		ReadFile(xbox_game_state_globals.handle, xbox_game_state_globals.buffer,
 diff --git a/tools/android_gl_stubs.py b/tools/android_gl_stubs.py
-index c28a0f0b..7cc5dca0 100644
+index c28a0f0b..0fe84fc6 100644
 --- a/tools/android_gl_stubs.py
 +++ b/tools/android_gl_stubs.py
-@@ -66,6 +66,11 @@ def main():
+@@ -66,6 +66,14 @@ def main():
          "",
          "void host_gl_get_string(unsigned int name, int index, char *buffer, unsigned int size);",
          "",
 +        "/* d3d8_gl.c: what runs before each call (the batched quad draws, which",
 +        "are drawn before any other call) */",
 +        "extern void (*guest_gl_before_call)(void);",
-+        "#define GUEST_GL_CALL() do { if (guest_gl_before_call) guest_gl_before_call(); } while (0)",
++        "/* (loaded once: the render thread sets and clears it while other threads",
++        "make GL calls; the hook itself does nothing on another thread) */",
++        "#define GUEST_GL_CALL() do { void (*hook)(void) = __atomic_load_n(&guest_gl_before_call, __ATOMIC_RELAXED); \\",
++        "\tif (hook) hook(); } while (0)",
 +        "",
      ]
      table = []
      import_names = []
-@@ -85,6 +90,7 @@ def main():
+@@ -85,6 +93,7 @@ def main():
                  "\tstatic __thread int next;",
                  "\tchar *result = buffer[next++ & 3];",
                  "",
@@ -7233,7 +7904,7 @@ index c28a0f0b..7cc5dca0 100644
                  "\thost_gl_get_string(name, -1, result, sizeof(buffer[0]));",
                  "\treturn (const GLubyte *)result;",
                  "}",
-@@ -108,6 +114,7 @@ def main():
+@@ -108,6 +117,7 @@ def main():
                  "\t\tcount = 16;",
                  "\tfor (index = 0; index < count; index++)",
                  "\t\twide[index] = (unsigned long long)(unsigned int)strings[index];",
@@ -7241,7 +7912,7 @@ index c28a0f0b..7cc5dca0 100644
                  "\thostgl_glShaderSource(shader, count, wide, lengths);",
                  "}",
                  "",
-@@ -150,6 +157,7 @@ def main():
+@@ -150,6 +160,7 @@ def main():
          out.append(f"{ret} {host_name}({', '.join(host_params) or 'void'});")
          out.append(f"static {ret} GL_APIENTRY guest_{name}({', '.join(decl_params) or 'void'})")
          out.append("{")

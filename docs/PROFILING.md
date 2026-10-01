@@ -272,7 +272,9 @@ between targets, and compare runs that differ in one thing. Turning the
 renderer's features off one at a time under this timer, with `INIT_EXTRA`,
 shows each feature's GPU time.
 
-**`=2`: one frame's passes in order.** As 1, and frame 750 is traced: each
+**`=2`: one frame's passes in order.** As 1, and frame 750 is traced
+(`HALO_GPU_TRACE_PASSES_AT=<frame>` another, and
+`HALO_GPU_TRACE_PASSES_FRAMES=<n>` that many from it): each
 pass is logged as it ends, with its draws, clears and copies (copies, blits,
 mipmap generation and invalidations):
 
@@ -290,13 +292,14 @@ and by what: here by six small targets between passes 6 and 13, and by
 target 484 before pass 15.
 
 **`=3`: one frame's draws.** As 2, and in the traced frame every draw is
-finished by itself and its GPU time logged, with the GL program's name and
-the draw's count:
+finished by itself and its GPU time logged, with the frame, the GL
+program's name and the draw's count; a draw that took over 2 ms also logs
+its 2D textures (size and levels), blending, depth test and call:
 
 ```
-I halo: draw: pass  6 framebuffer 511 program   41 count     53 gpu   0.212 ms
-I halo: draw: pass  6 framebuffer 511 program   42 count     53 gpu   0.625 ms
-I halo: draw: pass  6 framebuffer 511 program   43 count    421 gpu   0.212 ms
+I halo: draw: frame 1205 pass  8 framebuffer 511 program  299 count   1254 gpu   5.110 ms
+I halo: draw:   unit 0 texture 300, 128x128, levels 0 to 2
+I halo: draw:   blend 1 (302 303), depth test 1 write 0, cull 0, viewport 480x360; glDrawElements 4 4e6 1403 5000500
 ```
 
 Each time includes a load and a store of the target's tiles, so only the
@@ -362,22 +365,28 @@ while they did. The host's two lines need the variable; the setting in
 ## HALO_PACING_LOG
 
 `HALO_PACING_LOG=1` (`host_glthread.c`) logs every 300 frames how they
-reached the display, from the H700's display timing
-([Architecture](ARCHITECTURE.md#frame-pacing)): how many refreshes each
-frame stayed on screen, and how the time from the moment a frame shows the
-world at (its due refresh when paced, its start when not) to the refresh it
-was shown at changed from one frame to the next. Motion is even while that
-time stays the same. From the b30 battle with the walk bot, paced and then
-not (`HALO_FRAME_PACING=0`):
+reached the display ([Architecture](ARCHITECTURE.md#frame-pacing)), from
+the pans of the framebuffer themselves: the host defines `ioctl` over the C
+library's, so it sees each of Mali's `FBIOPAN_DISPLAY` calls return at the
+refresh that shows the frame. It counts how many refreshes each frame stayed
+on screen, how the time from the moment a frame shows the world at (its due
+refresh when paced, its start when not) to the refresh it was shown at
+changed from one frame to the next (motion is even while that time stays the
+same), and, paced, how many frames were shown after their due refresh.
+From the b30 battle with the walk bot, paced and then not
+(`HALO_FRAME_PACING=0`):
 
 ```
-pacing: shown for 1 refresh 203, 2 93, 3 4, more 0; paced, the time from what a frame shows to its showing changing by under 2 ms 266 times, 2 to 6 ms 0, 6 to 12 ms 0, more 34
-pacing: 22 of 300 frames shown after their refresh
-pacing: shown for 1 refresh 194, 2 102, 3 4, more 0; not paced, the time from what a frame shows to its showing changing by under 2 ms 102 times, 2 to 6 ms 51, 6 to 12 ms 10, more 137
+pacing: of 300 frames (paced), shown for 1 refresh 263, 2 36, 3 1, more 0; the time from what a frame shows to its showing changed by under 2 ms 252 times, 2 to 6 ms 0, 6 to 12 ms 0, more 48; 294 shown after their due refresh, 0 before it
+pacing: of 300 frames (not paced), shown for 1 refresh 214, 2 82, 3 3, more 1; the time from what a frame shows to its showing changed by under 2 ms 102 times, 2 to 6 ms 114, 6 to 12 ms 58, more 26; 0 shown after their due refresh, 0 before it
 ```
 
-Paced, the time changes only when a frame is late, and then by a refresh;
-not paced, it changes on most frames.
+Paced, the time changes only by whole refreshes. "Shown after their due
+refresh" counts every frame of a steady lag too (a frame the GPU made late
+delays the frames after it), which on its own does not make motion uneven:
+the changes do. `HALO_PACING_LOG=2` also logs each late frame, with its
+time to its swap and to its due refresh. `tools/pacing_summary.sh` (in the
+development tools) sums a run's reports.
 
 ## HALO_PROFILE_HZ and profile.py
 

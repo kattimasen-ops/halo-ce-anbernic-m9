@@ -9,15 +9,20 @@
 # this creates and deletes a hidden file there. Nothing else changes on the
 # handheld: once the pings stop, the battery saver's timers run as usual.
 #
-# ADB: the adb executable (default: adb from PATH).
+# ADB, ANDROID_SERIAL: the adb executable and the handheld (tools/adb_target.sh).
 set -u
 # Git Bash on Windows: pass device paths to adb unchanged
 export MSYS_NO_PATHCONV=1
-ADB=${ADB:-adb}
+. "$(cd "$(dirname "$0")" && pwd)/adb_target.sh"
 interval=${1:-60}
 state=""
+checked=""
 while true; do
-	if "$ADB" shell 'touch /dev/input/.keepalive && rm -f /dev/input/.keepalive' > /dev/null 2>&1; then
+	# (the handheld checked, and pinned, once it is first seen)
+	if [ -z "$checked" ] && device_check 2> /dev/null; then
+		checked=1
+	fi
+	if [ -n "$checked" ] && "$ADB" shell 'touch /dev/input/.keepalive && rm -f /dev/input/.keepalive' > /dev/null 2>&1; then
 		now="online"
 	else
 		now="offline"

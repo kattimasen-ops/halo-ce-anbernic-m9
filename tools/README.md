@@ -2,15 +2,20 @@
 
 Scripts used to measure the port on the handheld. They talk to it with
 `adb` over USB. Set `ADB` if `adb` is not on your
-`PATH`, for example `ADB=/path/to/platform-tools/adb`. On Windows, run them
-from Git Bash; under WSL, use a Linux `adb`.
+`PATH`, for example `ADB=/path/to/platform-tools/adb`, and adb's own
+`ANDROID_SERIAL` (the serial `adb devices` shows) when more than one device is
+attached. Before
+pushing or running anything they check that the device is a Knulli handheld
+with an H700 (`adb_target.sh`). On Windows, run them from Git Bash; under
+WSL, use a Linux `adb`.
 
 | Script | Where it runs | What it does |
 | --- | --- | --- |
-| `bench.sh <level> <seconds> <label> [HALO_X=value ...]` | computer | One benchmark: waits until the CPU is below `COOL_TO` (50 °C), loads the level through `init.txt`, plays for the given time with `HALO_FPS_LOG=5`, takes two screenshots and the threads' CPU use, and saves everything in `bench/<label>/`. Extra `HALO_*` assignments are passed to the game. `INIT_EXTRA` adds console commands, separated by `;`. |
+| `bench.sh <level> <seconds> <label> [HALO_X=value ...]` | computer | One benchmark: waits until the CPU is below `COOL_TO` (50 °C, ten minutes at most), loads the level through `init.txt`, plays for the given time with `HALO_FPS_LOG=5`, takes two screenshots and the threads' CPU use, and saves everything in `bench/<label>/`. Extra `HALO_*` assignments are passed to the game. `INIT_EXTRA` adds console commands, separated by `;`. It exits 0 only when the game ran and exited cleanly. It does not start while the game runs (its lock), and stops its own run if that has not ended two minutes after it should have. |
 | `keepalive.sh [interval]` | computer | Keeps the handheld awake while EmulationStation is stopped, so that the battery saver does not suspend it and drop USB. |
 | `device/keepalive.sh [hours]` | handheld | The same as `keepalive.sh`, run on the handheld itself (`setsid sh keepalive.sh 6 &` over `adb shell`), so that it keeps going when the computer sleeps. It stops after the given hours (default 6). |
-| `device/run.sh <seconds> [HALO_X=value ...]` | handheld | The runner `bench.sh` copies to `/userdata/system/halo-dev/`. It pins the CPU and GPU clocks, sets the number of framebuffers (`HALO_FB_BUFFERS`), runs the game for the given time and writes `run.log`, then restores the clocks. |
+| `device/run.sh <seconds> [HALO_X=value ...]` | handheld | The runner `bench.sh` copies to `/userdata/system/halo-dev/`. It pins the CPU and GPU clocks, sets the number of framebuffers (`HALO_FB_BUFFERS`), runs the game for the given time and writes `run.log`, then puts the clocks and framebuffers back as they were, also when it is stopped. It keeps the clocks it found where `Halo.sh` does, so that either puts them back after a run that was killed outright, and one of either runs at a time (`/var/run/halo-lock`). |
+| `adb_target.sh` | computer | Sourced by the others: the `adb` they run (`ADB`), and the check that the device is the handheld. |
 
 Before benchmarking:
 

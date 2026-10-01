@@ -78,6 +78,23 @@ static uint32_t handle_new(int type, void *object)
 	return 0;
 }
 
+/* the handle of an object that is going away freed */
+static void handle_release(void *object)
+{
+	int index;
+
+	pthread_mutex_lock(&handle_lock);
+	for (index = 1; index < HANDLE_COUNT; index++)
+	{
+		if (handles[index].type != _handle_free && handles[index].object == object)
+		{
+			handles[index].type = _handle_free;
+			handles[index].object = NULL;
+		}
+	}
+	pthread_mutex_unlock(&handle_lock);
+}
+
 static void *handle_get(uint32_t handle, int type)
 {
 	void *object = NULL;
@@ -232,8 +249,10 @@ int host_sdl_gl_set_swap_interval(int interval)
 
 	if (setting && *setting)
 		interval = atoi(setting);
+	if (SDL_GL_SetSwapInterval(interval) != 0)
+		return 0;
 	swap_interval = interval;
-	return SDL_GL_SetSwapInterval(interval) == 0;
+	return 1;
 }
 
 /* whether swaps wait for the display, for frame pacing (host_glthread.c):
@@ -339,15 +358,46 @@ int host_sdl_gl_swap_window(uint32_t window)
 
 /* ---------- events */
 
-/* the gamepad buttons held, for the exit combination (hotkey and start,
-as the firmware's other ports) */
-static uint32_t buttons_held;
+/* the buttons held on each gamepad, for the exit combination (hotkey and
+start on the same gamepad, as the firmware's other ports), from its button
+events in their order: SDL's own state of a gamepad is the latest, and a
+press and release queued together would never show both buttons held */
+#define HELD_GAMEPADS 8
+static struct
+{
+	SDL_JoystickID gamepad;
+	uint32_t buttons;
+} held[HELD_GAMEPADS];
 
-static int exit_combination(void)
+/* the buttons held on a gamepad, a new entry if it has none (one reused in
+turn when all are taken) */
+static uint32_t *buttons_held(SDL_JoystickID gamepad)
+{
+	static int next;
+	int index;
+
+	for (index = 0; index < HELD_GAMEPADS; index++)
+	{
+		if (held[index].buttons && held[index].gamepad == gamepad)
+			return &held[index].buttons;
+	}
+	for (index = 0; index < HELD_GAMEPADS; index++)
+	{
+		if (!held[index].buttons)
+			break;
+	}
+	if (index == HELD_GAMEPADS)
+		index = next++ % HELD_GAMEPADS;
+	held[index].gamepad = gamepad;
+	held[index].buttons = 0;
+	return &held[index].buttons;
+}
+
+static int exit_combination(uint32_t buttons)
 {
 	uint32_t hotkey = (1u << SDL_CONTROLLER_BUTTON_GUIDE) | (1u << SDL_CONTROLLER_BUTTON_BACK);
 
-	return (buttons_held & hotkey) && (buttons_held & (1u << SDL_CONTROLLER_BUTTON_START));
+	return (buttons & hotkey) && (buttons & (1u << SDL_CONTROLLER_BUTTON_START));
 }
 
 static int translate(const SDL_Event *event, struct host_event *result)
@@ -374,25 +424,41 @@ static int translate(const SDL_Event *event, struct host_event *result)
 		result->which = (uint32_t)SDL_JoystickGetDeviceInstanceID(event->cdevice.which);
 		return 1;
 	case SDL_CONTROLLERDEVICEREMOVED:
+	{
+		SDL_GameController *gamepad = SDL_GameControllerFromInstanceID(event->cdevice.which);
+
+		/* its buttons let go, its handle and the controller freed (the
+		game's handle then reads nothing) */
+		*buttons_held(event->cdevice.which) = 0;
+		if (gamepad)
+		{
+			handle_release(gamepad);
+			SDL_GameControllerClose(gamepad);
+		}
 		result->kind = _host_event_gamepad_removed;
 		result->which = (uint32_t)event->cdevice.which;
 		return 1;
+	}
 	case SDL_CONTROLLERBUTTONDOWN:
 	case SDL_CONTROLLERBUTTONUP:
+	{
+		uint32_t *buttons = buttons_held(event->cbutton.which);
+
 		if (event->cbutton.button < 32)
 		{
 			if (event->type == SDL_CONTROLLERBUTTONDOWN)
-				buttons_held |= 1u << event->cbutton.button;
+				*buttons |= 1u << event->cbutton.button;
 			else
-				buttons_held &= ~(1u << event->cbutton.button);
+				*buttons &= ~(1u << event->cbutton.button);
 		}
-		if (event->type == SDL_CONTROLLERBUTTONDOWN && exit_combination())
+		if (event->type == SDL_CONTROLLERBUTTONDOWN && exit_combination(*buttons))
 		{
 			host_logf(HOST_LOG_INFO, "exit combination pressed");
 			result->kind = _host_event_quit;
 			return 1;
 		}
 		return 0;
+	}
 	case SDL_WINDOWEVENT:
 		if (event->window.event == SDL_WINDOWEVENT_FOCUS_GAINED)
 		{

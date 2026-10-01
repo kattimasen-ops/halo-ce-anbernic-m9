@@ -42,14 +42,33 @@ def connected_names():
     return names
 
 
-def element(entry):
+# the sticks' axes, named in EmulationStation by the direction that gives
+# the value it notes (left and up are negative in SDL)
+STICKS = {"leftx", "lefty", "rightx", "righty"}
+# the triggers' axes: their whole travel (SDL reads an axis end to end, and a
+# trigger rests at the low end), the other way round when pressing one lowers
+# it
+TRIGGERS = {"lefttrigger", "righttrigger"}
+
+
+def element(entry, sdl_name):
     kind, identifier, value = entry.get("type"), entry.get("id"), entry.get("value")
     if kind == "button":
         return f"b{identifier}"
     if kind == "hat":
         return f"h{identifier}.{value}"
     if kind == "axis":
-        return f"a{identifier}"
+        try:
+            negative = int(value) < 0
+        except (TypeError, ValueError):
+            return None
+        if sdl_name in STICKS:
+            # a stick whose left or up is positive is the other way round
+            return f"a{identifier}" if negative else f"a{identifier}~"
+        if sdl_name in TRIGGERS:
+            return f"a{identifier}~" if negative else f"a{identifier}"
+        # a button or a direction of the pad on half an axis
+        return f"-a{identifier}" if negative else f"+a{identifier}"
     return None
 
 
@@ -68,7 +87,7 @@ def main():
             parts = [guid, name]
             for entry in config.iter("input"):
                 sdl_name = NAMES.get(entry.get("name"))
-                value = element(entry)
+                value = element(entry, sdl_name)
                 if sdl_name and value:
                     parts.append(f"{sdl_name}:{value}")
             parts.append("platform:Linux")

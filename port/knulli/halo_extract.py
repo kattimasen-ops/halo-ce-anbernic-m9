@@ -10,6 +10,7 @@ image is only read.
 """
 
 import os
+import re
 import struct
 import sys
 
@@ -19,6 +20,9 @@ MAGIC = b"MICROSOFT*XBOX*MEDIA"
 # of the first Xbox discs (XGD1) and of later ones
 PARTITIONS = [0, 0x18300000, 0xFD90000, 0x2080000]
 CHUNK = 4 * 1024 * 1024
+# a map's name as the disc gives it: a plain file name, never a path (a name
+# from the image must not reach outside the maps folder)
+MAP_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}")
 
 
 def find_partition(image):
@@ -64,8 +68,18 @@ def main():
         if not maps:
             raise SystemExit("the disc image has no maps folder")
         files = [entry for entry in read_directory(image, base, maps[1], maps[2]) if not entry[3]]
+        image.seek(0, os.SEEK_END)
+        image_size = image.tell()
+        for name, start, length, _ in files:
+            if not MAP_NAME.fullmatch(name):
+                raise SystemExit(f"the disc image has a file with an unexpected name in its maps folder: {name!r}")
+            if base + start * SECTOR + length > image_size:
+                raise SystemExit(f"the disc image ends inside {name}")
         total = sum(entry[2] for entry in files) or 1
         target = os.path.join(destination, "maps")
+        # (a folder, not a link that would put the maps elsewhere)
+        if os.path.islink(target):
+            raise SystemExit(f"{target} is a link: remove it first")
         os.makedirs(target, exist_ok=True)
         done = 0
         # ui.map last: the launcher takes it as the sign that the folder is whole
@@ -73,7 +87,10 @@ def main():
             path = os.path.join(target, name.lower())
             print(f"{done * 100 // total:3d}% {name}", flush=True)
             image.seek(base + start * SECTOR)
-            with open(path + ".part", "wb") as output:
+            # (a new file, not through a link left where it goes)
+            if os.path.lexists(path + ".part"):
+                os.remove(path + ".part")
+            with os.fdopen(os.open(path + ".part", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644), "wb") as output:
                 remaining = length
                 while remaining:
                     block = image.read(min(CHUNK, remaining))

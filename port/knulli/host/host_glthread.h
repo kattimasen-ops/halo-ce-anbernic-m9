@@ -64,7 +64,9 @@ GLint glthread_driver_integer(GLenum name);
 int glthread_draw_count(uint32_t function, const void *data);
 int glthread_call_kind(uint32_t function);
 void glthread_replay(uint32_t function, const void *data);
-void *glthread_record_function(const char *name, void *function);
+void *glthread_record_function(const char *name, void *function, void *direct);
+/* the commands queued so far told to the GL thread */
+void glthread_publish(void);
 void glthread_generate_names(int kind, GLsizei n, GLuint *names);
 /* a queued call's name (glthread_gen.py) */
 const char *glthread_function_name(uint32_t function);

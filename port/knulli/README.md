@@ -62,7 +62,8 @@ a queue and made by a thread of their own, so the driver's work runs on
 another core than the game. Calls that return nothing are queued with a copy
 of the memory their pointers refer to; calls that return a value wait.
 `glGen*` names come from a reserve the GL thread keeps filled. The game can be
-one frame ahead (`HALO_GL_THREAD_FRAMES`). `HALO_GL_THREAD=0` turns it off.
+one frame ahead (`HALO_GL_THREAD_FRAMES`, 7 at most). `HALO_GL_THREAD=0` turns
+it off.
 
 Shader programs are built beside it: two threads (`halo-load`, `halo-compile`)
 load them from the cache or compile them on EGL contexts that share the GL
@@ -74,7 +75,9 @@ Textures are decoded and uploaded beside it too: a thread of the guest's own
 (`xbox_textures.c`) gets a shared context (`host_gl_texture_thread`), whose
 GL calls the recording functions then pass straight to the driver
 (`glthread_direct`). The draws that use a texture are skipped until its first
-upload is done (`debug.async_textures`).
+upload is done (`debug.async_textures`). Shaders are translated on a thread
+of the guest's own as well (`debug.async_shaders`), and the draws that need
+one are skipped until it is in.
 
 Frames are paced to the display. Below 60 fps Mali's swap on the
 framebuffer does not wait, and a frame is shown from the next refresh; the
@@ -82,6 +85,11 @@ H700's LCD timing controller, read through `/dev/mem`, tells where that
 refresh is. Each frame is given the refresh it is due at as it begins, the
 game times the frame by it (`host_gl_frame_due`), and the GL thread holds a
 frame that is ready early until the refresh before (`display.frame_pacing`).
+A frame the GPU finishes too late is shown a refresh late, and the frames
+after it follow it until one is due two refreshes after the one before:
+Mali begins a frame's last pass only once the frame before it is on screen.
+The host defines `ioctl` over the C library's to see Mali's pans of the
+framebuffer (`HALO_PACING_LOG`).
 
 ### Changes to the renderer for this GPU
 
@@ -178,7 +186,11 @@ GPU, the GL thread and the game's thread limits a scene.
 
 The launcher sets the CPU governor to `performance` and holds the GPU at its
 top frequency (648 MHz): its governor otherwise keeps it at 420 MHz. The
-kernel's thermal governor still lowers both at 70 °C.
+kernel's thermal governor still lowers both at 70 °C. What they were is kept
+in `/var/run/halo-clocks`, so that a start after a launcher that was killed
+outright puts them back first. One start runs at a time: the launcher holds
+a lock (`/var/run/halo-lock`, with `flock`) that the game inherits, so a
+second start while the game runs is refused (`log.txt` notes it).
 
 ## Tools for performance work
 
@@ -186,10 +198,10 @@ kernel's thermal governor still lowers both at 70 °C.
 | --- | --- |
 | `HALO_FPS_LOG=<seconds>` | The frame rate, the longest frame, memory, temperature and clocks in the log. |
 | `HALO_GL_TIMING=1` | Each GL function's calls and time per frame (on the GL thread). |
-| `HALO_GPU_PASS_TIMING=1` | Finishes the GPU at each change of render target and logs the time of each target's passes, split into the calls that made them and the GPU's work. `2` also logs one frame's passes in order; `3` also the GPU's time for each draw of that frame; `4` logs, for one frame, how long each change of render target waited in the driver, with the GPU running as it does (nothing finished). |
+| `HALO_GPU_PASS_TIMING=1` | Finishes the GPU at each change of render target and logs the time of each target's passes, split into the calls that made them and the GPU's work. `2` also logs one frame's passes in order (`HALO_GPU_TRACE_PASSES_AT=<frame>` another than the 750th, `HALO_GPU_TRACE_PASSES_FRAMES=<n>` that many); `3` also the GPU's time for each draw of those frames, and a slow draw's textures and state; `4` logs, for one frame, how long each change of render target waited in the driver, with the GPU running as it does (nothing finished). |
 | `HALO_PROFILE_HZ=<rate>`, `HALO_PROFILE_DELAY=<seconds>` | Samples every thread (`HALO_PROFILE_THREADS=game`: the game's thread only; `HALO_PROFILE_SAMPLES` the samples kept); `profile.py` reports the result, `--frames-over <ms>` only the samples of the game thread's frames longer than that. |
 | `HALO_HITCH_LOG=<ms>` | Logs every frame longer than that from the renderer, the game's thread and the GL thread: what the frame made (programs, textures, shaders, geometry), the waits, the slowest calls and the draws skipped for programs being built. |
-| `HALO_PACING_LOG=1` | Every 300 frames, how many refreshes the frames stayed on screen and how evenly what they show matches when they are shown (frame pacing). |
+| `HALO_PACING_LOG=1` | Every 300 frames, from the framebuffer's pans: how many refreshes the frames stayed on screen, how the time from what a frame shows to its showing changed from frame to frame, and how many frames were shown after their due refresh (frame pacing); `2` also logs each late frame. |
 | `HALO_TEST_INPUT=walk[:<seed>]` | A bot that walks, turns, looks around and jumps, never firing: traversal benchmarks for the hitch log. |
 | `HALO_DEBUG_DRAW_CALLERS=1` | The draws each caller of the draw functions makes, per frame (`2`: their callers' callers; `3` also counts the indexed draws that repeat another draw's geometry and state; `4` skips those, a wrong picture). |
 | `HALO_GPU_DUMP_SHADERS=<folder>` | Writes the generated GLSL, to analyse with Arm's Mali Offline Compiler (`malioc -c Mali-G31`). |

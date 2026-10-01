@@ -319,16 +319,24 @@ Notes on the steps:
 
 - **Frames paced to the display.** With the hitches gone, what remained in
   motion was its timing. Below 60 fps a frame reached the screen at the
-  first refresh after its swap, 0 to 16.7 ms later, while the game blends
-  between its ticks by its clock at the frame's start; over a two-minute
-  walk through the b30 battle the time between the two changed by more than
-  2 ms on 60% of frames, and by more than 12 ms on 25%. The H700's LCD
-  timing controller tells where the display is in its refresh, so each
-  frame is now given the refresh it is due at as it begins, the game times
-  the frame by it, and the GL thread holds a frame that is ready early
-  ([Architecture](ARCHITECTURE.md#frame-pacing)). 92% of frames now show the
-  world as it is at the moment they are seen; the rest are a refresh late.
-  The frame rate is unchanged (47 to 49 fps in the walk either way).
+  first refresh after the GPU drew it, while the game blends between its
+  ticks by its clock at the frame's start. The H700's LCD timing controller
+  tells where the display is in its refresh, so each frame is now given the
+  refresh it is due at as it begins, the game times the frame by it, and the
+  GL thread holds a frame that is ready early
+  ([Architecture](ARCHITECTURE.md#frame-pacing)). Measured from the
+  framebuffer's pans over a two-minute walk through the b30 battle: paced,
+  the time from the moment a frame shows the world at to its showing stays
+  the same from one frame to the next on 83% of frames and steps by a
+  refresh on 17%; unpaced, it stays within 2 ms on 52%, moves by 2 to 12 ms
+  on 37% and by more on 11%. Most of the steps that remain come from the GPU
+  (below). The frame rate is unchanged (49 fps in the walk either way).
+
+- **Shaders translated beside the renderer** (`debug.async_shaders`). A new
+  area's shaders, about 0.5 ms each to translate, are translated on a
+  thread of their own, and what needs one is drawn once it is in: in the
+  first 600 frames of the b30 walk, shader time on the game's thread went
+  from 74 to 28 ms.
 
 - **A vertex shader's variant, found again.** Every draw looked for its
   vertex shader's variant among up to 32 (0.2% of the game's thread, mostly
@@ -367,6 +375,27 @@ Notes on the steps:
   1.2% of the game's thread in the b30 battle, called across files, so
   never inlined without link-time optimisation): no measurable change. Their
   cost is the cache misses on the game's data, not the calls.
+- **Pacing the GPU's time too.** A fence after each swap, waited for on a
+  thread of its own, told when the GPU had drawn each frame, and the due
+  refresh was predicted from it, alone or with the frames in flight
+  followed through the pipeline. Fewer frames were late, but a frame's due
+  refresh then lay more than three refreshes after its start, and with the
+  game a frame ahead of the GL thread that held the game back: 27 to 37
+  fps. Holding a frame at its pan (the framebuffer's flip) rather than its
+  swap, with three framebuffers, kept 49 fps but made 40 to 60% of frames
+  late: Mali begins a frame's last pass only once the frame before it is
+  shown.
+- **The battle's GPU time, taken apart.** In the b30 battle at render scale
+  0.75 the primary target's GPU time (about 18.7 ms a frame with the pass
+  timer) is mostly per-pixel: 10.9 ms at scale 0.5, 8.2 ms with flat
+  shading. Smaller mip levels (`HALO_DEBUG_LOD_BIAS=3`), no anisotropic or
+  trilinear filtering, simpler models (`display.model_detail` 0.25) and no
+  projective divide in the pixel shaders changed it by under 1.3 ms. Over 60
+  frames of the per-draw trace, translucent effects (smoke of some 400
+  alpha-blended triangles at 3 to 5 ms a frame, explosions and flashes of up
+  to 11 ms a draw) and the shiny character models lead. Below a render scale
+  of about 0.625 the game's thread limits the battle instead (51 fps at 0.5
+  and at 0.625).
 - **The ten-millisecond draw in the GPU's per-draw trace.** One draw of b30
   (a seven-vertex fan with additive blending) took 10 ms in the per-draw
   trace (`HALO_GPU_PASS_TIMING=3`); skipping every draw of its vertex

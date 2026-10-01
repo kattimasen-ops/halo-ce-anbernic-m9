@@ -110,6 +110,7 @@ launcher writes another value, the table says so.
 | [`debug.draw_callers`](#debugdraw_callers) | integer | `0` | | `HALO_DEBUG_DRAW_CALLERS` (value) |
 | [`debug.hitch_log`](#debughitch_log) | real | `0.0` | | `HALO_HITCH_LOG` (value) |
 | [`debug.async_textures`](#debugasync_textures) | boolean | `true` | | `HALO_ASYNC_TEXTURES` (value) |
+| [`debug.async_shaders`](#debugasync_shaders) | boolean | `true` | | `HALO_ASYNC_SHADERS` (value) |
 | [`audio.enabled`](#sound-and-language) | boolean | `true` | | `HALO_NO_AUDIO` (set is false) |
 | [`audio.volume`](#sound-and-language) | real | `1.0` | | `HALO_VOLUME` (value) |
 | [`game.language`](#sound-and-language) | string | `""` | | `HALO_LANGUAGE` (value) |
@@ -238,8 +239,12 @@ Draws a frame for every display refresh, blending between the game's 30
 ticks a second; `false` keeps the original 30 frames a second.
 
 **When to change it.** `false` holds the game at 30 frames a second, one a
-tick. With `display.frame_pacing`, a frame rate that varies between 30 and
-60 moves evenly too, so this is a matter of taste.
+tick: every frame stays on screen for two refreshes, the most even motion
+this display allows. `true` draws more frames (45 to 60 in most of the
+campaign at render scale 0.75), but where the GPU or the game's thread falls
+behind, a frame is shown a refresh later than it was drawn for, and the
+motion steps (in the b30 battle about one frame in six; see
+[Architecture](ARCHITECTURE.md#frame-pacing)). A matter of taste.
 
 ### `display.frame_pacing`
 
@@ -250,13 +255,18 @@ tick. With `display.frame_pacing`, a frame rate that varies between 30 and
 Shows each frame at the display refresh it was drawn for: the game takes
 the refresh a frame is due at as its clock for the frame, and the GL thread
 holds a frame that is ready early until then
-([Architecture](ARCHITECTURE.md#frame-pacing)). Motion then advances as the
-screen shows it, at any frame rate. It needs the Knulli host on an H700
+([Architecture](ARCHITECTURE.md#frame-pacing)). Most frames then show the
+world as it is when they are seen: in the b30 battle the time between the
+two stays the same from one frame to the next on 83% of frames, against 52%
+unpaced, and a frame the GPU finishes too late (and the frames after it)
+is shown a refresh late. It needs the Knulli host on an H700
 handheld's own screen (it reads where the display is in its refresh from
 the LCD timing controller) and vsync; elsewhere frames are not paced.
 
-**When to change it.** `false` shows each frame as soon as it is drawn, for
-comparison: the frame rate is the same, the motion less even.
+**When to change it.** `false` shows each frame as soon as it is drawn: the
+same frame rate, with small timing errors on a third of the frames instead
+of fewer, larger ones (in the b30 battle, whole-refresh steps on 11% of
+frames against 17% paced). Try both.
 
 ## Renderer switches
 
@@ -435,6 +445,19 @@ rewrites keeps its old contents until the new ones are in. It needs the
 Knulli host's GL thread (with `HALO_GL_THREAD=0` textures are uploaded as
 before).
 
+### `debug.async_shaders`
+
+| Type | Default | Variable |
+| --- | --- | --- |
+| boolean | `true` | `HALO_ASYNC_SHADERS` |
+
+Translates shaders on a thread of their own, drawing what uses one only
+once it is in, rather than on the game's thread when it is first drawn with
+(about 0.5 ms a shader, which a new area can need dozens of in a frame).
+What a new shader draws appears a frame or a few late the first time.
+Instanced variants are always translated on the game's thread, and so is
+every shader with `debug.gpu_dump_shaders`.
+
 ## Sound and language
 
 | Setting | Type | Default | Variable | Effect |
@@ -510,7 +533,7 @@ These are read directly by the host (`port/knulli/host/`,
 | `HALO_GL_THREAD_FRAMES=<n>` | `host_glthread.c` | `1` | How many frames the game may be ahead of the GL thread. |
 | `HALO_ASYNC_PROGRAMS=0` | `host_glthread.c` | on | Builds shader programs on the GL thread instead of the program builders' threads: a new program stalls the frame (about 2 ms from the cache, 220 to 250 ms compiled) instead of appearing late. |
 | `HALO_HITCH_LOG=<ms>` | `host_glthread.c`, `d3d8_gl.c` | off | The hitch log ([`debug.hitch_log`](#debughitch_log)). |
-| `HALO_PACING_LOG=1` | `host_glthread.c` | off | Logs every 300 frames how evenly the frames reached the display ([Profiling](PROFILING.md#halo_pacing_log)). |
+| `HALO_PACING_LOG=1` | `host_glthread.c` | off | Logs every 300 frames how evenly the frames reached the display, from the pans themselves; `2` also each late frame ([Profiling](PROFILING.md#halo_pacing_log)). |
 | `HALO_DEBUG_SKIP_GL=glA,glB` | `host_glthread.c` | none | The GL thread does not make these calls. Needs the GL thread. |
 | `HALO_SWAP_INTERVAL=<n>` | `host_sdl2.c` | the game's `display.vsync` | Overrides the swap interval; `0` turns vsync off. |
 | `HALO_AUDIO_SAMPLES=<n>` | `host_sdl2.c` | `1024` | SDL2's audio buffer, in sample frames. |

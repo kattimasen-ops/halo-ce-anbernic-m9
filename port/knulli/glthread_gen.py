@@ -104,7 +104,7 @@ def current_program_call(arguments):
 def direct_call(name, result, arguments, pointer_type):
     """the start of a recording function: on a thread with a context of its
     own, the driver's call itself"""
-    invocation = f"(({pointer_type})driver[glthread_{name}])({', '.join(argument for _, argument in arguments)})"
+    invocation = f"(({pointer_type})direct_driver[glthread_{name}])({', '.join(argument for _, argument in arguments)})"
     if result != "void":
         return f"\tif (glthread_direct)\n\t\treturn {invocation};"
     return f"\tif (glthread_direct)\n\t{{\n\t\t{invocation};\n\t\treturn;\n\t}}"
@@ -124,6 +124,8 @@ def main():
         emit(f"\tglthread_{name},")
     emit("\tglthread_function_count\n};\n")
     emit("static void *driver[glthread_function_count];\n")
+    emit("/* the same, not timed (HALO_GL_TIMING times the GL thread's calls only) */")
+    emit("static void *direct_driver[glthread_function_count];\n")
     cases = []
     for name in names:
         result, arguments = functions[name]
@@ -186,7 +188,8 @@ def main():
                 emit(f"\tcall->{argument} = {argument};")
         if payload:
             emit(f"\tif (payload)\n\t\tmemcpy(glthread_payload(call, sizeof(*call)), {payload[0]}, payload);")
-        emit("\tglthread_end();\n}\n")
+        # (a flush is told to the GL thread at once, not with the next 4 KB)
+        emit("\tglthread_end();\n\tglthread_publish();\n}\n" if name == "glFlush" else "\tglthread_end();\n}\n")
         replay = []
         for kind, argument in arguments:
             if payload and argument == payload[0]:
@@ -213,11 +216,11 @@ def main():
     for name in names:
         emit(f"\t{{ \"{name}\", (void *)record_{name} }},")
     emit("};\n")
-    emit("void *glthread_record_function(const char *name, void *function)\n{")
+    emit("void *glthread_record_function(const char *name, void *function, void *direct)\n{")
     emit("\tuint32_t index;\n")
     emit("\tfor (index = 0; index < glthread_function_count; index++)\n\t{")
     emit("\t\tif (!strcmp(functions[index].name, name))\n\t\t{")
-    emit("\t\t\tdriver[index] = function;\n\t\t\treturn functions[index].record;\n\t\t}\n\t}")
+    emit("\t\t\tdriver[index] = function;\n\t\t\tdirect_driver[index] = direct;\n\t\t\treturn functions[index].record;\n\t\t}\n\t}")
     emit("\treturn function;\n}\n")
     emit("const char *glthread_function_name(uint32_t function)\n{")
     emit("\treturn function < glthread_function_count ? functions[function].name : \"?\";\n}\n")

@@ -110,9 +110,11 @@ rm -rf "$SRC/port/knulli"
 cp -a "$HERE/port/knulli" "$SRC/port/knulli"
 rm -rf "$SRC/port/knulli/__pycache__"
 
-# port/knulli/build.sh rebuilds a host file when the file itself is newer
-# than its object, not when a header it includes changes: start the host's
-# objects afresh whenever the patch or port/knulli changes.
+# port/knulli/build.sh rebuilds an object when its source, a header it
+# included (its .d file), the script or the compiler's options change; not
+# for a new header that would now be found before another on the include
+# path. The host's objects start afresh whenever the patch or port/knulli
+# changes.
 stamp=$({
 	cat "$PATCH"
 	(cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 sha256sum)

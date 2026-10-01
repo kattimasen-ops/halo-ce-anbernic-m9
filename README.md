@@ -260,7 +260,7 @@ launcher's defaults for the handheld:
 | `display.fast_textures` | `true` | DXT1 and 16-bit Xbox textures sent to the GPU as 16-bit texels. |
 | `display.screen_width` | `640` | The columns of the 480-line picture (640 for the Xbox's 4:3). |
 | `display.interpolation` | `true` | Draws a frame for every display refresh, blending between the game's 30 ticks a second; `false` keeps 30 fps. |
-| `display.frame_pacing` | `true` | Shows each frame at the display refresh it was drawn for, so that motion stays even while the frame rate varies. |
+| `display.frame_pacing` | `true` | Shows each frame at the display refresh it was drawn for, so that most frames show the world as it is when they are seen. |
 | `display.vsync` | `true` | Waits for the display between frames. |
 | `update.auto` | `false` | The upstream updater, which fetches upstream's builds rather than this port's; off. |
 | `network.online` | `false` | Internet play through invite links; off. |

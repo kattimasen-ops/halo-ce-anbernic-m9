@@ -365,8 +365,11 @@ consumer (the GL thread). Each command has a 16-byte header (its type,
 flags, size and, for GL calls, which function) followed by its arguments and
 payload; sizes are multiples of 16, so that the room before the end of the
 ring always holds at least a header. A command that does not fit before the
-end is preceded by a wrap command. Payloads over 1 MB are allocated
-separately and freed by the consumer.
+end is preceded by a wrap command, which is told to the consumer before the
+producer waits for room at the start (so that the consumer can go past it).
+Payloads over 1 MB are allocated separately and freed by the consumer; the
+host's own buffer writes go in parts of at most 1 MB; and no command may be
+larger than half the ring, so that room for it always comes.
 
 The state is on three 64-byte cache lines, because a write to a line the
 other core reads takes the line from that core's cache: the producer's own
@@ -519,21 +522,48 @@ it. The game's clock for the frame is its performance counter plus that
 time, the moment the frame will be on screen (`halo_frame_due`,
 `main_update_time_unthrottled`), and the GL thread holds the frame's swap
 until the refresh before it has begun, so that a frame ready early is not
-shown early either. A frame that is late is shown at the first refresh
-after its swap. Over a two-minute walk through the b30 battle, 92% of
-frames now show the world as it is at the moment they are seen, against 40%
-before (in its heaviest stretches 83% against 8%), at the same frame rate;
-the others are a refresh late. The register is read only on an H616-family
+shown early either.
+
+A frame the GPU has not finished in time is shown a refresh late, and so
+are the frames after it. Mali's own display thread pans the framebuffer to
+a frame once the GPU has drawn it; a pan made after line 472 of the 521
+waits a further refresh; and Mali begins a frame's last pass, the one into
+the window, only once the frame before it is on screen. So one late frame
+delays the next ones too, until a frame is due two refreshes after the one
+before it. Measured from the pans themselves (`HALO_PACING_LOG` sees them
+through an `ioctl` the host defines over the C library's), over a two-minute
+walk through the b30 battle at 49 fps: paced, the time from the moment a
+frame shows the world at to the moment it is seen stays the same from one
+frame to the next on 83% of frames, and changes by a whole refresh on 17%;
+not paced, it stays within 2 ms on 52% of frames, changes by 2 to 12 ms on
+37% and by more on 11%. In the a30 opening (53 fps) the figures are 84% and
+16% against 54%, 37% and 9%. Pacing removes the small errors, at the cost of
+more whole-refresh ones where the GPU is the limit. Predicting the GPU's
+time as well (a fence after each swap, or the frames in flight followed
+through the pipeline) made fewer frames late, but needed more than three
+refreshes from a frame's start to its showing, which with the game a frame
+ahead of the GL thread cost a third of the frame rate; holding frames at
+their pan rather than their swap kept Mali from beginning the next frame.
+The register is read only on an H616-family
 SoC (the H700 is one), and pacing stops if its line count stops (the HDMI
 output); it is off with vsync off (the swap interval in effect,
-`HALO_SWAP_INTERVAL` included) and with `display.frame_pacing` off.
-`HALO_PACING_LOG=1` reports it ([Profiling](PROFILING.md#halo_pacing_log)).
+`HALO_SWAP_INTERVAL` included, as set: an interval the driver refused
+does not count) and with `display.frame_pacing` off. The refresh is measured
+over eight refreshes at start-up, and measured again (three tries at most)
+when one interval differs from the others by more than 5%, as when the
+thread was preempted across a wrap. `HALO_PACING_LOG=1` reports it
+([Profiling](PROFILING.md#halo_pacing_log)).
 
 ### Switches
 
 `HALO_GL_THREAD=0` makes every call on the game's thread, as the Android
 host does, and programs are then built there too. `HALO_ASYNC_PROGRAMS=0`
-keeps the GL thread but builds programs on it. The GPU pass timer (`HALO_GPU_PASS_TIMING`) and
+keeps the GL thread but builds programs on it. `HALO_GL_THREAD_FRAMES` (1 by
+default, 7 at most: the frame pacing keeps the eight frames before those in
+flight) is how many frames the game may be ahead of the GL thread. A
+recorded `glFlush` is told to the GL thread at once. The threads that make
+GL calls themselves (the texture worker) call the driver's functions
+without the GL timer's wrappers, which time the GL thread alone. The GPU pass timer (`HALO_GPU_PASS_TIMING`) and
 `HALO_DEBUG_SKIP_GL` work only with the GL thread, because they run in its
 replay loop; the GL timer (`HALO_GL_TIMING`) works with or without it.
 
@@ -646,9 +676,14 @@ write-combined memory on this driver, fast to write and very slow to read
 ([Mali-G31 notes](MALI-G31-NOTES.md#uncached-buffer-mappings)), so the
 renderer never reads the mappings back. Immutable
 storage cannot be orphaned, so a frame that streams more than a slot holds
-waits for the GPU with `glFinish` and starts the slot again. Each new frame
-and each such restart begins a new `stream_generation`, which tells the
-constant blocks (below) that what they wrote before is gone.
+waits for the GPU with `glFinish` and goes on in a spare buffer (made the
+first time), which takes the slot's place; the slot's buffer becomes the
+spare. What is already bound in it for draws not yet issued (held instanced
+draws, a batch of quads, the draw being prepared) stays as it is until the
+next such wait. (A draw would have to stream most of a buffer by itself to
+meet its own data again; the game's draws stream well under a megabyte each.) Each new frame and each such switch begins a new
+`stream_generation`, which tells the constant blocks (below) that what they
+wrote before is gone.
 
 ### Indexed draws
 
@@ -740,10 +775,11 @@ shader reads. `pixel_shader_inputs` finds which of the nine interpolated
 values (`xD0`, `xD1`, `xB0`, `xB1`, `xT0` to `xT3`, `xFog`) a translated
 pixel shader uses, and the vertex shader is translated for that set, with
 `gl_PointSize` only for point draws (`XGPU_OUTPUT_*` in `xgpu.h`). A vertex
-program keeps up to 24 such variants (`VERTEX_SHADER_VARIANTS`), each for a
-set of outputs and for either the declared streams or immediate mode; when
-they run out, it uses the variant with every output, which links with any
-pixel shader. The reason is the Mali compiler: a vertex shader that writes
+program keeps every such variant it is asked for, each for a set of outputs,
+for either the declared streams or immediate mode, and for the declaration's
+packed attributes, so that each is translated once however the draws
+alternate; its instanced variants stop at 32 (`INSTANCED_VARIANTS`), past
+which its draws are not instanced. The reason is the Mali compiler: a vertex shader that writes
 `gl_PointSize` is not split into a position shader and a varying shader, and
 every output written costs a store per vertex
 ([Mali-G31 notes](MALI-G31-NOTES.md#vertex-shader-outputs-and-gl_pointsize)).
@@ -755,12 +791,26 @@ general combiner stages, and the final combiner, with values clamped to
 [-1, 1] between stages as on the hardware. OpenGL ES samplers have no LOD
 bias, so the lookups pass `D3DTSS_MIPMAPLODBIAS` as a bias argument.
 
+**Translated beside the renderer.** With `debug.async_shaders` (the default
+under the Knulli host's GL thread), a vertex variant or a pixel shader the
+renderer has not seen is translated on a thread of its own
+(`shader_worker`), and the draws that need it are skipped until it is in
+(counted as `skipped_shader` in the GPU statistics): what they draw appears
+a frame or a few late the first time, instead of the frame taking about
+0.5 ms more for each new shader. The worker translates (`nv2a_*_to_glsl`)
+and prepares the shader's record (its uniforms' places); the render thread
+takes the record and makes the GL shader. Instanced variants, and every
+shader while `debug.gpu_dump_shaders` writes them out, are translated on the
+render thread.
+
 **Precision.** With `display.fast_shaders` (the default), the pixel
 shaders' default precision for floats and samplers is `mediump`: colours,
 texels and combiner arithmetic, all within [-1, 1], are computed in half
 precision. Texture coordinates, the fog value and the uniforms computed
 into coordinates (texture scales, bump matrices, fog parameters, LOD biases)
-stay `highp`. The vertex shaders declare their four colour outputs `mediump`,
+stay `highp`, and so do the coordinates a pixel shader computes itself (a
+bump-mapped stage's, the dot-product stages', a reflection): in half
+precision a coordinate of 100 is off by a sixteenth. The vertex shaders declare their four colour outputs `mediump`,
 which halves the memory the GPU writes and reads for them.
 
 **Two pixel shader variants of this port.** `blur_stage0` reads texture
@@ -769,7 +819,8 @@ apart diagonally, the blur of the shadows (below). With
 `debug.alpha_test_elision` (the default), a draw whose alpha test cannot
 fail uses a key without the test (`alpha_test_cannot_fail`): the alpha
 tested is a texture stage's, read as it is, from a texture whose every
-texel has an alpha of 1, no combiner writes that register's alpha, and the
+texel has an alpha of 1, no combiner writes that register's alpha, no
+border address mode brings in a border colour that is not opaque, and the
 comparison passes for 255. A shader that can discard loses Mali's hidden
 surface removal ([Mali-G31 notes](MALI-G31-NOTES.md#alpha-test-and-forward-pixel-kill)).
 
@@ -844,7 +895,9 @@ largest) goes with a copy of its palette. Until a texture's first upload is
 done, the draws that use it are skipped (`bind_textures` fails, and
 `prepare_draw` skips the draw); a texture uploaded again, after the game
 rewrote its memory, goes into a new GL texture and is drawn with its old
-contents until the new one is in. The worker's GL calls go through the same
+contents until the new one is in; the old one is deleted as the next frame
+begins (a draw may have found it for one stage before another stage's lookup
+took the new one). The worker's GL calls go through the same
 entry points as the game's thread's, whose hook (which draws the batched
 quads and held instanced draws before any other call) does nothing on
 another thread. With `debug.async_textures` off, textures are decoded on
@@ -864,14 +917,19 @@ the start of the next frame, which made the game wait for the GPU to finish
 every draw before, and with the GL thread for that thread to empty its
 queue: the game, the driver and the GPU in lockstep once a frame.
 
-In this port, `D3DDevice_EndVisibilityTest` records the pair of the game's
-test index and its counter (up to 512 a frame). At Present,
+In this port, `D3DDevice_EndVisibilityTest` records the game's test index,
+its counter and the test's area (below), up to 512 a frame. At Present,
 `host_gl_visibility_frame` copies the counter buffer into the next of three
 read-back buffers and reads the copy made three frames before, which the GPU
 has long finished, without waiting. `D3DDevice_GetVisibilityTestResult`
 returns the latest known count for the index (`host_gl_visibility_result`).
 A test's count is known two or three frames after it was drawn, as it was on
-the NV2A while the GPU was behind.
+the NV2A while the GPU was behind. The counter counts the render target's
+pixels, which at a render scale below 1 are fewer than the game's: the host
+divides each count by the area of a game pixel in its test's target, recorded
+with the test, as it reads the counter (so that a count read frames later is
+still divided by its own test's scale), since lens flares compare it with
+their own area in the game's pixels.
 
 ### Render targets sampled with their mip chain
 
@@ -1034,11 +1092,13 @@ its bump map is built at its draw, as before.
 `source/rasterizer/xbox/rasterizer_xbox_decals.c`. A decal's quads are drawn
 by themselves whenever its bitmap differs from the one before, which defeats
 the quad batching. Decals whose blend function does not depend on the order
-they are drawn in (all but alpha blending and alpha-multiply-add) are drawn
-grouped by blend function, shader map and bitmap within each run of such
-decals in the cluster's list (`decal_drawing_order`, an insertion sort
-keyed on those and the decal's place in the list, so the sort is stable).
-The picture is the same.
+they are drawn in (adding, subtracting, multiplying, minimum and maximum;
+not alpha blending, alpha-multiply-add or double multiplying, whose
+clamping does not commute) are drawn grouped by shader map and bitmap
+within each run of such decals of one blend function in the cluster's list
+(`decal_drawing_order`, an insertion sort keyed on those and the decal's
+place in the list, so the sort is stable); two blend functions do not
+commute with each other. The picture is the same.
 
 ### Model detail
 
