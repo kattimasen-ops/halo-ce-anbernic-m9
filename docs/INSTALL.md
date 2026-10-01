@@ -127,9 +127,10 @@ the game lists from EmulationStation's menu. The first launch:
 
 After the first launch the disc image can be deleted.
 
-The first time each combination of shaders is drawn, the driver compiles it,
-which takes about 60 ms: a short stutter. The compiled programs are kept in
-`halo/save/shaders/`, so later launches do not stutter there.
+The first time each combination of shaders is drawn, the driver compiles it
+on a thread of its own, and what it draws appears a moment late. The
+compiled programs are kept in `halo/save/shaders/`, so later launches load
+them instead.
 
 ## Playing
 
@@ -282,7 +283,7 @@ Read `halo/log.txt` first; most problems name themselves there.
 | The first launch shows a black screen for minutes | The extraction is running; its progress is in `log.txt`. |
 | The maps do not load | The PC version's files do not work. Use the Xbox version. |
 | The buttons are wrong | `sdl_mapping.py` builds the mapping from EmulationStation's controller configuration. Check that the handheld's controls are configured in EmulationStation. |
-| Short stutters the first time in a place | Each new shader combination is compiled once and cached in `save/shaders/`. |
+| Objects appear late the first time in a place | Each new shader combination is compiled once, beside the game, and cached in `save/shaders/`. |
 | The frame rate drops after a while | At 70 °C the kernel lowers the clocks. Lower `display.render_scale` for more headroom. |
 | The clocks stay high after a crash | The launcher restores them on exit; if it could not, a reboot does. |
 | Something else | Open an issue with `halo/log.txt`, the device, the Knulli release, and whether you installed from a disc image or a `maps/` folder. |

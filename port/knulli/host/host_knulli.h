@@ -78,6 +78,10 @@ enum host_gl_attribute
 host_exit writes what it recorded */
 void host_profile_start(const char *data_root);
 void host_profile_write(void);
+/* whether the profiler samples now, and a mark at the end of each of the
+game thread's frames, with its time */
+int host_profile_sampling(void);
+void host_profile_mark(uint32_t frame, uint32_t microseconds);
 
 /* the OpenGL call timer (host_gl_timing.c): HALO_GL_TIMING wraps the
 driver's functions; the report logs their calls and time per frame */

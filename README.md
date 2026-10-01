@@ -144,9 +144,10 @@ The resulting layout:
     └── save/            saved games and the shader cache
 ```
 
-The first time each shader combination is used, the driver compiles it
-(about 60 ms, a short stutter). The compiled programs are kept in
-`halo/save/shaders`, so later launches do not stutter there.
+The first time each shader combination is used, the driver compiles it, on
+a thread of its own: what it draws appears a moment late, rather than the
+game stopping for it. The compiled programs are kept in `halo/save/shaders`,
+so later launches load them instead.
 
 ## Build from source
 
@@ -283,8 +284,9 @@ A file `halo/init.txt` runs console commands at start-up, for example
 - **The buttons are wrong.** `sdl_mapping.py` builds the SDL mapping from
   EmulationStation's controller configuration. Check that the handheld's
   controls are configured in EmulationStation.
-- **Short stutters the first time.** Each new shader combination is compiled
-  once and cached in `halo/save/shaders`. Deleting that folder is safe; the
+- **Objects appear late the first time.** Each new shader combination is
+  compiled once, beside the game, and cached in `halo/save/shaders`; what
+  it draws is skipped until it is ready. Deleting that folder is safe; the
   programs are compiled again.
 - **The frame rate drops after a while.** At 70 °C the kernel lowers the CPU
   and GPU clocks. Lower `display.render_scale` for more headroom.

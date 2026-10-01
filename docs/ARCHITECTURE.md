@@ -374,11 +374,11 @@ temperature at which its clocks are lowered.
 | --- | --- | --- |
 | Queued | GL functions that return nothing and write through no pointer | Copies the arguments, and the memory their pointers refer to, into the queue, and goes on. |
 | Synchronous | Functions that return a value or write through a pointer (`glGetIntegerv`, `glGetError`, `glCreateShader`, `glLinkProgram`, `glGetProgramBinary`, `glFinish` and the others in `SYNC` in `glthread_gen.py`) | Queues the call and waits until the GL thread has made it. |
-| Reserved names | `glGenTextures`, `glGenBuffers`, `glGenFramebuffers`, `glGenSamplers` | Takes names from a reserve the GL thread keeps filled, without waiting. |
+| Reserved names | `glGenTextures`, `glGenBuffers`, `glGenFramebuffers`, `glGenSamplers`, `glCreateProgram` | Takes names from a reserve the GL thread keeps filled, without waiting. |
 | Host operations | The host functions that make GL calls for the guest (below) | Queued or synchronous, as each needs. |
 
-In a normal frame no call waits: the renderer's synchronous calls happen
-when a program or texture is made for the first time. `HALO_GL_TIMING`
+In a normal frame no call waits, and making a program or a texture does not
+wait either (below). `HALO_GL_TIMING`
 reports how often the game's thread waited and for how long
 ([Profiling](PROFILING.md)).
 
@@ -392,7 +392,8 @@ and the code that replays it. Its tables decide how each function is
 treated:
 
 - `SYNC`: the synchronous functions.
-- `RESERVED`: the `glGen*` functions served from the reserve.
+- `RESERVED`: the `glGen*` functions served from the reserve, and
+  `CREATED`, `glCreateProgram`, whose names are reserved the same way.
 - `PAYLOAD`: for each queued function with a pointer argument, the number of
   bytes to copy, as a C expression of the arguments. Image sizes follow the
   `GL_UNPACK_ALIGNMENT` that `glPixelStorei` set (`HOOKS`).
@@ -403,10 +404,16 @@ The generator stops with an error when a queued function has a pointer
 argument that no rule covers, so a new GL function cannot be queued with a
 dangling pointer by accident.
 
+The replay of `glUseProgram` (`REPLACED`: `host_glthread.c` makes it), of
+the draws (`DRAWS`) and of the calls that set the bound program's uniforms
+(those whose first parameter is a location) asks `host_glthread.c` first,
+for the programs being built beside the GL thread
+([below](#programs-built-beside-the-gl-thread)).
+
 ### Reserved names
 
 The GL thread keeps a reserve of up to 1024 names of each kind (textures,
-buffers, framebuffers, samplers). When a kind falls below 256, the game's
+buffers, framebuffers, samplers, programs). When a kind falls below 256, the game's
 thread queues a host operation that generates 512 more on the GL thread. If
 the reserve is ever empty, the call becomes synchronous. The reserve is
 first filled when the GL context is made.
@@ -421,6 +428,7 @@ replaces them as well:
 | --- | --- |
 | `host_gl_buffer_write`, `host_gl_buffer_write_to` | Queued with a copy of the data; the GL thread copies it into the mapped buffer. |
 | `host_gl_buffer_persistent` | Queued: gives a stream buffer its storage and maps it for good. |
+| `host_gl_program_build` | Queued with the cache file's path and both shaders' sources: hands the program to the program builders (below). |
 | `host_gl_fence_frame`, `host_gl_wait_frame` | Queued: fence the frame's GPU work; wait for the GPU to finish the frame that last used a ring slot. |
 | `host_gl_visibility_frame` | Queued with the frame's test list: copies the visibility counters for reading later. |
 | `host_sdl_gl_swap_window` | Queued; then the game's thread waits for frame pacing (below). |
@@ -428,6 +436,31 @@ replaces them as well:
 | `host_sdl_gl_create_context`, `host_sdl_gl_make_current`, `host_sdl_gl_set_swap_interval` | Synchronous. Creating the context starts the GL thread and fills the name reserve. |
 
 `host_gl_visibility_result` makes no GL call and runs on the game's thread.
+
+### Programs built beside the GL thread
+
+A program loads from the driver's binary in about 2 ms, and compiles and
+links in 220 to 250 ms when it has none: on the GL thread either stalled the
+frame, and the game's thread behind it. Two threads of their own build
+programs instead (`halo-load` and `halo-compile`), each on an EGL context
+that shares the GL thread's objects (`EGL_KHR_surfaceless_context`, so it
+needs no surface). The loader loads binaries and hands the programs that
+have none to the compiler, so a load never waits behind a compile; the
+compiler runs at a lower priority (nice 5).
+
+Until a program is built, the GL thread leaves it unbound:
+
+- `glUseProgram` of a program being built only notes it as the bound one;
+- a draw made with it is skipped, so what it draws appears a frame or more
+  late the first time (counted in the hitch log as draws skipped);
+- a uniform call made for it is kept, whole, and made once it is bound;
+- at the next `glUseProgram` or draw after the builder is done, the GL
+  thread binds it and makes the kept calls. A program that does not build
+  stays unbound and its draws are skipped.
+
+The builder finishes its context's work (`glFinish`) before it marks the
+program done, so the GL thread's context sees the finished program.
+`HALO_ASYNC_PROGRAMS=0` builds programs on the GL thread, as before.
 
 ### Frame pacing
 
@@ -442,7 +475,8 @@ driver has flushed.
 ### Switches
 
 `HALO_GL_THREAD=0` makes every call on the game's thread, as the Android
-host does. The GPU pass timer (`HALO_GPU_PASS_TIMING`) and
+host does, and programs are then built there too. `HALO_ASYNC_PROGRAMS=0`
+keeps the GL thread but builds programs on it. The GPU pass timer (`HALO_GPU_PASS_TIMING`) and
 `HALO_DEBUG_SKIP_GL` work only with the GL thread, because they run in its
 replay loop; the GL timer (`HALO_GL_TIMING`) works with or without it.
 
@@ -683,25 +717,35 @@ surface removal ([Mali-G31 notes](MALI-G31-NOTES.md#alpha-test-and-forward-pixel
 
 ### The program binary cache
 
-A program link takes about 60 ms on this GPU, a visible stutter in the
-middle of a frame. On ES the renderer therefore keeps linked programs as the
-driver's binaries in `save/shaders/`:
+On ES 3.1 and later the shaders place everything a program would otherwise
+be asked for: `explicit_layouts` gives each uniform the renderer sets a
+location (`layout(location = N)`), each uniform block its binding and each
+sampler `texN` binding N. The renderer then never asks a linked program
+anything, and the program can be made where nothing waits for it:
 
-- `compile_shader` only keeps a shader's source and a 64-bit FNV-1a hash of
-  it, and returns a handle (`LAZY_SHADER`); nothing is compiled yet.
-- `program_get` computes the program's key from the two sources' hashes,
-  the driver's `GL_VERSION` and `GL_RENDERER` strings and
-  `PROGRAM_CACHE_VERSION`, and looks for `save/shaders/<key>.bin`. A file
-  holds the binary's format and length followed by the binary.
-- If the file loads (`glProgramBinary` and a successful link status), no
-  shader is compiled. If not, the shaders are compiled, the program linked
-  with `GL_PROGRAM_BINARY_RETRIEVABLE_HINT`, and its binary written to a
-  `.part` file that is then renamed into place. A binary the driver rejects,
-  for example after a driver update, is deleted and made again.
+- `compile_shader` keeps the shader's source with the layouts placed and a
+  64-bit FNV-1a hash of it, and notes what a program needs of the shader:
+  the placed uniforms it uses and the sizes of its constant blocks. Nothing
+  is compiled. Placing the layouts and noting the sizes is one pass over the
+  places where the source says `uniform `.
+- `program_build` takes a program name from the reserve, sets the program's
+  locations and block sizes from its two shaders' notes, and queues
+  `host_gl_program_build` with the cache file's path and the two sources.
+  The key is the two sources' hashes, the driver's `GL_VERSION` and
+  `GL_RENDERER` strings and `PROGRAM_CACHE_VERSION`; the file is
+  `save/shaders/<key>.bin`, the binary's format and length followed by the
+  binary.
+- On the host, the program builders (above) load the file with
+  `glProgramBinary`, or else compile both shaders (each once, for every
+  program that uses it), link with `GL_PROGRAM_BINARY_RETRIEVABLE_HINT` and
+  write the binary to a `.part` file that is then renamed into place. A
+  binary the driver rejects, for example after a driver update, is deleted
+  and made again.
 
-`debug.no_program_cache` turns the cache off. In the logs, a cached program
-costs one `glProgramBinary` call of about 1 ms on the GL thread (for
-example `glProgramBinary ... 960.8 us each` under `HALO_GL_TIMING`).
+On the game's thread a new program costs about 0.04 ms; a new shader, its
+translation, about 0.7 to 0.9 ms. Before ES 3.1 (no explicit locations) the
+renderer links on its own thread and asks the program for its locations, as
+before. `debug.no_program_cache` turns the cache off.
 
 ### Samplers
 
@@ -720,15 +764,20 @@ textures are decoded on the CPU. BGRA texels go to the GPU with a texture
 swizzle that exchanges red and blue.
 
 With `display.fast_textures` (the default), textures whose texels hold no
-more than 16 bits' worth go to the GPU as 16-bit texels (`texels_pack`):
-DXT1 as 565, or 5551 when its largest level has a texel with an alpha below
-1; the Xbox's R5G6B5, X1R5G5B5 and R6G5B5 formats as 565; A1R5G5B5 and
-R5G5B5A1 as 5551; A4R4G4B4 and R4G4B4A4 as 4444. The picture is the same, and the texture memory is halved.
+more than 16 bits' worth go to the GPU as 16-bit texels: DXT1 as 565, or
+5551 when its largest level has a texel with an alpha below 1; the Xbox's
+R5G6B5, X1R5G5B5 and R6G5B5 formats as 565; A1R5G5B5 and R5G5B5A1 as 5551;
+A4R4G4B4 and R4G4B4A4 as 4444. The picture is the same, and the texture
+memory is halved. These are decoded straight to their 16-bit texels: DXT1
+a block's four colours at a time (`dxt1_decode_level16`), with the alpha
+decided from the blocks' data rather than by decoding them, and the 16-bit
+formats by moving their bits (`decode_level16`), never through 32-bit texels.
+The decoded texels' memory is kept from one upload to the next.
 While decoding, the uploader also notes whether every texel has an alpha of
 1 (`description.opaque`), which the alpha test elision uses.
 
-Textures are decoded on the game's thread; `glTexImage2D` is queued to the
-GL thread with a copy of the texels. A cached texture stays valid until a
+Textures are decoded on the game's thread, when a draw first uses them;
+`glTexImage2D` is queued to the GL thread with a copy of the texels. A cached texture stays valid until a
 page it was read from is written (the memory watch above); textures unused
 for 1800 frames are dropped.
 

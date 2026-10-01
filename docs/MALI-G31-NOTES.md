@@ -25,6 +25,7 @@ history is in [Performance](PERFORMANCE.md).
 - [Depth, stencil and clears](#depth-stencil-and-clears)
 - [What was not the limit](#what-was-not-the-limit)
 - [Shader programs](#shader-programs)
+- [Texture uploads](#texture-uploads)
 - [Clocks and heat](#clocks-and-heat)
 - [The CPU side](#the-cpu-side)
 
@@ -303,13 +304,46 @@ became the limit: the GL thread then waits in `glClear` and
 
 ## Shader programs
 
-A program link takes about 60 ms on this GPU, a visible stutter when a new
-combination of shaders first appears. The driver's program binaries
-(`glGetProgramBinary`, `glProgramBinary`) load in about 1 ms, so the port
-keeps them on disk, keyed by a hash of both shaders' sources and the
-driver's version and renderer strings; a binary the driver rejects is made
-again. Compile a shader only when its program is linked, so that a cached
-program needs no compilation at all.
+Compiling and linking one of the port's programs takes 220 to 250 ms of the
+A53's time, most of it in `glLinkProgram` (the Mali compiler works at link
+time). The driver's program binaries (`glGetProgramBinary`,
+`glProgramBinary`) load in about 2 ms, so the port keeps them on disk, keyed
+by a hash of both shaders' sources and the driver's version and renderer
+strings; a binary the driver rejects is made again. Compile a shader only
+when its program is linked, so that a cached program needs no compilation
+at all.
+
+The driver has no `GL_KHR_parallel_shader_compile`, but it has
+`EGL_KHR_surfaceless_context` and `EGL_KHR_create_context`: a context that
+shares the rendering context's objects can be made current on another thread
+without a surface, and programs linked or loaded there are used by the
+rendering context once the other one has finished (`glFinish`) and the
+rendering context binds them. Building programs on such threads, and not
+drawing with a program until it is built, takes their cost out of the
+frame. Place every uniform, block and sampler in the shaders
+(`layout(location)`, `layout(binding)`, ES 3.1) so that nothing has to be
+asked of a program after it is linked.
+
+## Texture uploads
+
+Measured with `tools/microbench/glupload.c` (24 textures, all their mip
+levels, the CPU time of the calls), uploads are cheaper than the game's
+frames suggest:
+
+| Texture | `glTexImage2D` | `glTexStorage2D` + `glTexSubImage2D` |
+| --- | --- | --- |
+| 256x256 RGB565 | 0.36 ms | 0.32 ms |
+| 256x256 RGBA8 | 0.49 ms | 0.45 ms |
+| 512x512 RGB565 | 0.87 ms | 0.92 ms |
+| 512x512 RGBA8 | 1.59 ms | 1.70 ms |
+| 512x512 ASTC 4x4 (compressed) | 1.39 ms | 1.06 ms |
+
+Compressed textures are not much cheaper to upload: the driver's own work
+per level dominates, not the bytes. In the game the average
+`glTexImage2D` call costs 0.1 to 0.3 ms, with the occasional one at 3 to 6
+ms while the GPU is busy. The CPU's decoding of the Xbox's formats (DXT has
+no hardware decoder here) cost more than the uploads, until it was made to
+write the 16-bit texels directly.
 
 ## Clocks and heat
 

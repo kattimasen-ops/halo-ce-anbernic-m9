@@ -64,6 +64,12 @@ of the memory their pointers refer to; calls that return a value wait.
 `glGen*` names come from a reserve the GL thread keeps filled. The game can be
 one frame ahead (`HALO_GL_THREAD_FRAMES`). `HALO_GL_THREAD=0` turns it off.
 
+Shader programs are built beside it: two threads (`halo-load`, `halo-compile`)
+load them from the cache or compile them on EGL contexts that share the GL
+thread's, and the GL thread skips the draws made with a program until it is
+built, keeping the uniforms set for it. `HALO_ASYNC_PROGRAMS=0` builds them on
+the GL thread instead, stalling the frame for each.
+
 ### Changes to the renderer for this GPU
 
 These are in `port/linux/src`, for `HALO_ANDROID` builds:
@@ -168,7 +174,9 @@ kernel's thermal governor still lowers both at 70 °C.
 | `HALO_FPS_LOG=<seconds>` | The frame rate, the longest frame, memory, temperature and clocks in the log. |
 | `HALO_GL_TIMING=1` | Each GL function's calls and time per frame (on the GL thread). |
 | `HALO_GPU_PASS_TIMING=1` | Finishes the GPU at each change of render target and logs the time of each target's passes, split into the calls that made them and the GPU's work. `2` also logs one frame's passes in order; `3` also the GPU's time for each draw of that frame; `4` logs, for one frame, how long each change of render target waited in the driver, with the GPU running as it does (nothing finished). |
-| `HALO_PROFILE_HZ=<rate>`, `HALO_PROFILE_DELAY=<seconds>` | Samples every thread; `profile.py` reports the result. |
+| `HALO_PROFILE_HZ=<rate>`, `HALO_PROFILE_DELAY=<seconds>` | Samples every thread; `profile.py` reports the result, `--frames-over <ms>` only the samples of the game thread's frames longer than that. |
+| `HALO_HITCH_LOG=<ms>` | Logs every frame longer than that from the renderer, the game's thread and the GL thread: what the frame made (programs, textures, shaders, geometry), the waits, the slowest calls and the draws skipped for programs being built. |
+| `HALO_TEST_INPUT=walk[:<seed>]` | A bot that walks, turns, looks around and jumps, never firing: traversal benchmarks for the hitch log. |
 | `HALO_DEBUG_DRAW_CALLERS=1` | The draws each caller of the draw functions makes, per frame (`2`: their callers' callers; `3` also counts the indexed draws that repeat another draw's geometry and state; `4` skips those, a wrong picture). |
 | `HALO_GPU_DUMP_SHADERS=<folder>` | Writes the generated GLSL, to analyse with Arm's Mali Offline Compiler (`malioc -c Mali-G31`). |
 | `HALO_DEBUG_FREEZE=textures,program,raster` | Draws keep the state they find, to measure what setting it costs. |

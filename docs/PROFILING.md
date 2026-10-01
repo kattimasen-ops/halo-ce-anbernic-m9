@@ -26,6 +26,7 @@ current performance.
 - [debug.gpu_stats](#debuggpu_stats)
 - [HALO_GL_TIMING](#halo_gl_timing)
 - [HALO_GPU_PASS_TIMING](#halo_gpu_pass_timing)
+- [The hitch log](#the-hitch-log)
 - [HALO_PROFILE_HZ and profile.py](#halo_profile_hz-and-profilepy)
 - [HALO_DEBUG_DRAW_CALLERS](#halo_debug_draw_callers)
 - [Switches that remove work](#switches-that-remove-work)
@@ -92,6 +93,7 @@ before `./halo`) and read `halo/log.txt` after the run.
 | GPU time per pass | `HALO_GPU_PASS_TIMING=1` | `gpu:` lines | Large: the GPU is finished at every change of target |
 | One frame's passes, draws | `HALO_GPU_PASS_TIMING=2`, `3` | `trace:`, `draw:` lines | Large, for one frame |
 | Slow calls | `HALO_GPU_PASS_TIMING=4` | `call:` lines | Small, for three frames |
+| Long frames and what they did | `HALO_HITCH_LOG=<ms>` | `hitch:`, `hitch summary` and `programs:` lines | Small |
 | Sampling profiler | `HALO_PROFILE_HZ=<rate>` | `profile.txt`, read with `profile.py` | A signal per thread per sample |
 | Draw callers, repeated draws, sorting | `HALO_DEBUG_DRAW_CALLERS=1` to `4` | `draw callers`, `draw signatures`, `sorted models` lines | Small; 4 removes draws |
 | Frozen state | `HALO_DEBUG_FREEZE=textures,program,raster` | frame rate | Wrong picture |
@@ -320,6 +322,42 @@ milliseconds is the driver waiting for the GPU. This is how a stall in the
 middle of the frame shows itself, such as the water's render-target copies
 ([Mali-G31 notes](MALI-G31-NOTES.md#copies-between-render-targets)).
 
+## The hitch log
+
+A frame rate can be high while the game still stutters: what is felt is the
+occasional long frame, most of them when the player comes upon something
+new (a program, a texture, a shader not yet made). `HALO_HITCH_LOG=<ms>`
+(`debug.hitch_log`) logs every frame longer than that, from three places.
+From a b30 traversal with the walk bot (`HALO_TEST_INPUT=walk:1`) and
+`HALO_HITCH_LOG=50`:
+
+```
+hitch: 110.9 ms frame: game 12.0, drawing 98.8, waiting before it 0.1; programs 0 made here 17 handed to the host (0.6 ms), textures 28 (1602 KB, 44.0 ms), shaders 3 vertex 9 pixel (9.1 ms), geometry 340 KB (2.2 ms), ring waits 0; rest of the drawing 42.8
+hitch: game thread 111.1 ms frame; waited 0.0 ms for room in the queue (0 times), 1.3 ms in 1 synchronous calls, 0.0 ms for the frame before
+hitch: GL thread 122.7 ms frame, 86.2 ms in 6947 calls; slowest glBindFramebuffer 13.8, glTexImage2D 3.3, glTexImage2D 2.9; 17 draws skipped
+```
+
+- The renderer's line (`d3d8_gl.c`) splits the game's thread's frame into
+  the game's own work before its first draw, the drawing up to `Present`,
+  and the wait in the `Present` before it. It counts what the frame made:
+  programs (made on the game's thread before ES 3.1, handed to the host
+  otherwise, and the time the game's thread spent on them), textures
+  decoded and uploaded (their bytes and time), shaders translated, geometry
+  copied into the mirror, and the rings' waits for the GPU. The rest of the
+  drawing is the drawing's time not in those.
+- The host's game thread line (`host_glthread.c`) has its waits: for room
+  in the GL thread's queue, in synchronous calls, and for the frame before.
+- The GL thread's line has the time it spent in calls, its three slowest
+  calls or host operations (`program build` when programs are built on it,
+  with `HALO_ASYNC_PROGRAMS=0`), and the draws it skipped because their
+  program was still being built.
+
+Every 600 frames the renderer logs a `hitch summary` of the frames over the
+threshold and everything made, and the GL thread a `programs:` line: the
+programs the builders made (compiled ones apart) and the draws skipped
+while they did. The host's two lines need the variable; the setting in
+`config.toml` reaches only the renderer's.
+
 ## HALO_PROFILE_HZ and profile.py
 
 The handheld has no `perf`. `HALO_PROFILE_HZ=<rate>`
@@ -371,6 +409,12 @@ python3 port/knulli/profile.py bench/a30-profile/profile.txt \
 - It needs `llvm-symbolizer-22` (or `llvm-symbolizer`) and `llvm-nm-22`.
   It calls the symbolizer with `--no-inlines`, so that each address gives
   one line and inlined frames in the host do not shift the names.
+- `--frames-over <ms>`: only the samples taken during the game thread's
+  frames longer than that. The host marks the end of each of its frames
+  among the samples (as thread -1, with the frame's time), so a hitch's
+  work can be told from a smooth frame's. With the walk bot and a rate of
+  150 to 250 a second, a two-minute traversal gives a few hundred samples
+  of long frames.
 
 The report lists the samples per thread, with each thread's CPU ticks, and
 then for the four busiest threads (or `--thread`) two tables: **self**, the

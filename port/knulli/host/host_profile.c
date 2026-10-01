@@ -41,6 +41,8 @@ struct profile_sample
 static struct profile_sample *samples;
 static volatile uint32_t sample_count;
 static int profiling;
+/* set once the delay is over */
+static volatile int sampling;
 static char profile_path[1024];
 static unsigned int profile_delay;
 
@@ -87,6 +89,7 @@ static void *profile_thread(void *context)
 	pid_t process = getpid();
 
 	sleep(profile_delay);
+	sampling = 1;
 	for (;;)
 	{
 		struct timespec interval = { interval_ns / 1000000000L, interval_ns % 1000000000L };
@@ -140,6 +143,29 @@ void host_profile_start(const char *data_root)
 	if (pthread_create(&thread, NULL, profile_thread, (void *)(uintptr_t)(1000000000L / hertz)) == 0)
 		pthread_detach(thread);
 	host_logf(HOST_LOG_INFO, "profiling at %ld Hz into %s", hertz, profile_path);
+}
+
+int host_profile_sampling(void)
+{
+	return sampling;
+}
+
+/* a mark among the samples, as a sample of thread -1: the game thread's
+frame that ended there and its time (port/knulli/profile.py and the scripts
+that pick the long frames out read them) */
+void host_profile_mark(uint32_t frame, uint32_t microseconds)
+{
+	uint32_t index;
+
+	if (!sampling || sample_count >= PROFILE_CAPACITY)
+		return;
+	index = __sync_fetch_and_add(&sample_count, 1);
+	if (index >= PROFILE_CAPACITY)
+		return;
+	samples[index].tid = -1;
+	samples[index].depth = 0;
+	samples[index].pc = frame;
+	samples[index].lr = microseconds;
 }
 
 static void copy_file(FILE *output, const char *path)

@@ -5,7 +5,12 @@ samples were in (self) and the functions on their stacks (inclusive).
 
     profile.py <profile.txt> --guest build/knulli/halo_guest.elf
                --lib <folder with the device's libraries and the host>
-               [--top 40] [--thread <tid>]
+               [--top 40] [--thread <tid>] [--frames-over <ms>]
+
+--frames-over keeps only the samples taken during the game thread's frames
+longer than that: the host marks the end of each of its frames among the
+samples (host_profile_mark, written as thread -1), so that a hitch's work
+can be told from a smooth frame's.
 
 Addresses in the guest image are symbolized with llvm-symbolizer against
 the guest ELF; addresses in the host and the libraries against the files of
@@ -152,8 +157,23 @@ def main():
     parser.add_argument("--lib", required=True)
     parser.add_argument("--top", type=int, default=40)
     parser.add_argument("--thread", type=int)
+    parser.add_argument("--frames-over", type=float, metavar="MS")
     arguments = parser.parse_args()
     maps, threads, samples = parse(arguments.profile)
+    if arguments.frames_over is not None:
+        # the samples between a frame's mark and the one before, for the long frames
+        kept, start, frames, milliseconds = [], 0, 0, 0.0
+        for index, (tid, stack) in enumerate(samples):
+            if tid != -1:
+                continue
+            if stack[1] / 1000.0 > arguments.frames_over:
+                kept.extend(samples[start:index])
+                frames += 1
+                milliseconds += stack[1] / 1000.0
+            start = index + 1
+        print(f"{frames} frames over {arguments.frames_over:g} ms, {milliseconds:.0f} ms in all")
+        samples = kept
+    samples = [sample for sample in samples if sample[0] != -1]
     by_thread = collections.Counter(tid for tid, _ in samples)
     print(f"{len(samples)} samples")
     print("thread           samples   cpu ticks (user+system)")

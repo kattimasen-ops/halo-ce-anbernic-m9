@@ -34,7 +34,7 @@ environment variables the game understands are listed in
 
 ## Microbenchmarks
 
-`microbench/` holds two small OpenGL ES programs that measure the Mali
+`microbench/` holds three small OpenGL ES programs that measure the Mali
 driver in isolation. Their results are in
 [the Mali-G31 notes](../docs/MALI-G31-NOTES.md).
 
@@ -45,6 +45,9 @@ driver in isolation. Their results are in
 - `glmap.c`: writing into persistently mapped buffers, per call and per
   byte, flushed or not, for four combinations of mapping flags, and how fast
   the mapping reads back (which shows whether the CPU caches it).
+- `glupload.c`: the CPU time of making a texture with all its mip levels,
+  with `glTexImage2D`, with immutable storage and `glTexSubImage2D`, and
+  compressed (ASTC, ETC2), for the sizes and formats the port uploads.
 
 Build them with the cross compiler, the SDL2 headers and the device's
 libraries that [the build guide](../docs/BUILDING.md) sets up, then copy

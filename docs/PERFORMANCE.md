@@ -258,6 +258,36 @@ Notes on the steps:
   drawn in the middle of the primary target's pass, which splits it: Mali
   writes the whole target out and reads it back in.
 
+- **Hitches when moving around.** A frame rate says little about what is
+  felt when walking into a new area: the long frames there. A walk bot
+  (`HALO_TEST_INPUT=walk:1`, 120 seconds of b30) and a hitch log
+  (`HALO_HITCH_LOG`, [Profiling](PROFILING.md#the-hitch-log)) found where
+  they came from, and with the profiler's frame marks (`profile.py
+  --frames-over`) what the game's thread did in them:
+  - Every new shader program was compiled and linked on the GL thread:
+    220 to 250 ms each, five in a run with a warm cache, more with a cold
+    one, and each cached one still about 2 ms there. Two threads of their
+    own now build programs on contexts that share the GL thread's, and the
+    GL thread skips the draws made with a program until it is built
+    ([Architecture](ARCHITECTURE.md#programs-built-beside-the-gl-thread)).
+  - Making a program on the game's thread cost 0.7 ms: about 60 `strstr`
+    scans of its shaders' sources for the uniforms they use. The shaders
+    are scanned once each now, in one pass, and a program costs 0.04 ms.
+  - Translating a shader cost about 1.5 ms, most of it `vsnprintf` copying
+    whole sources while placing their layouts. One pass over the places a
+    source says `uniform `, and copies with `memcpy`, brought it to about
+    0.8 ms.
+  - Decoding a texture cost about 2.2 ms: DXT1's top level was decoded twice
+    (once only to see whether it had transparent texels), every level went
+    through 32-bit texels before it was packed to 16 bits, and each upload
+    allocated, faulted in and freed its own buffer. DXT1 and the 16-bit
+    formats are now decoded straight to their 16-bit texels, the alpha is
+    read from the blocks, and the buffer is kept: about 1 ms a texture.
+
+  Frames over 50 ms in the walk went from 25 to 10 to 13 between runs,
+  their time from about 3.1 to about 0.7 seconds, and the longest during
+  play from about 260 to about 110 ms; a30's frame rate did not change.
+
 ## What did not help, or was not the limit
 
 - **The shadows' textures at the start of the window.** Drawing every

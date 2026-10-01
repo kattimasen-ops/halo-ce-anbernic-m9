@@ -87,7 +87,8 @@ Set `display.render_scale` in `config.toml`, from 0.5 to 1.0. The default,
 
 The first launch copies the `maps/` folder out of your disc image, which
 takes a few minutes. After that, each new combination of shaders is compiled
-once, a short stutter, and kept in `save/shaders` for later launches.
+once, beside the game (what it draws appears a moment late), and kept in
+`save/shaders` for later launches.
 
 ## Do I need to keep the disc image?
 

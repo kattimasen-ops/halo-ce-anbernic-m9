@@ -28,12 +28,14 @@ HALO_GL_THREAD=0 makes the calls on the game's thread, as before.
 #include "host_glthread.h"
 #include "host_knulli.h"
 
+#include <EGL/egl.h>
 #include <linux/futex.h>
 #include <pthread.h>
 #include <sched.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/syscall.h>
 #include <time.h>
 #include <unistd.h>
@@ -169,23 +171,15 @@ static uint32_t bind_frames;
 static uint64_t bind_frame_start;
 static uint32_t pass_copies, pass_frames_total, pass_index;
 
-static uint64_t monotonic_ns(void)
-{
-	struct timespec now;
-
-	clock_gettime(CLOCK_MONOTONIC, &now);
-	return (uint64_t)now.tv_sec * 1000000000ull + (uint64_t)now.tv_nsec;
-}
-
 static void pass_end(void)
 {
 	uint64_t now, flushed;
 	int index;
 
 	glthread_driver_flush();
-	flushed = monotonic_ns();
+	flushed = host_monotonic_ns();
 	glthread_driver_finish();
-	now = monotonic_ns();
+	now = host_monotonic_ns();
 	for (index = 0; index < pass_count && passes[index].framebuffer != pass_framebuffer; index++)
 		;
 	if (index == pass_count && pass_count < PASS_SLOTS)
@@ -262,9 +256,9 @@ static void draw_traced(const struct command *command)
 		return;
 	}
 	glthread_driver_flush();
-	flushed = monotonic_ns();
+	flushed = host_monotonic_ns();
 	glthread_driver_finish();
-	now = monotonic_ns();
+	now = host_monotonic_ns();
 	host_logf(HOST_LOG_INFO, "draw: pass %2u framebuffer %3u program %4d count %6d gpu %7.3f ms",
 		pass_index, pass_framebuffer, glthread_driver_integer(GL_CURRENT_PROGRAM),
 		glthread_draw_count(command->function, command + 1), (now - flushed) / 1e6);
@@ -310,14 +304,81 @@ swaps) call the driver directly, and are timed here. */
 #define HOST_OPERATION_SLOTS 8
 
 static int timing;                 /* HALO_GL_TIMING, read as the thread starts */
-/* the game's thread's waits for the GL thread (HALO_GL_TIMING): calls that
-wait for their result, room in the queue, and the frame pacing */
-static struct
+/* the game's thread's waits for the GL thread: calls that wait for their
+result, room in the queue, and the frame pacing. frame_waits has this
+frame's, measured when HALO_GL_TIMING (which adds them up in producer_waits
+for its report) or HALO_HITCH_LOG is on (measure_waits) */
+struct waits
 {
 	uint64_t syncs, sync_ns;
 	uint64_t room_waits, room_ns;
 	uint64_t frame_waits, frame_ns;
-} producer_waits;
+};
+static struct waits producer_waits, frame_waits;
+static int measure_waits;
+/* the start of the game's thread's frame (its last swap) */
+static uint64_t game_frame_start;
+
+/* HALO_HITCH_LOG=<ms>: the frames longer than that, as each thread sees them.
+The game's thread's: its waits. The GL thread's: how much of it it spent on
+commands, and its slowest ones (port/linux/src/d3d8_gl.c logs the game's
+side) */
+static double hitch_ms;
+static int hitch_on;
+enum
+{
+	_slow_none,
+	_slow_call,
+	_slow_sync,
+	_slow_host,
+};
+static struct
+{
+	uint64_t frame_start, busy_ns;
+	unsigned int calls, skipped;
+	struct
+	{
+		uint64_t ns;
+		int kind;
+		uint32_t function;              /* _slow_call's */
+		void (*run)(const void *);      /* _slow_host's */
+	} slowest[3];
+} gl_hitch;
+/* HALO_GPU_PASS_TIMING=4's frames, in which slow calls are logged */
+static int call_trace;
+
+/* the start of a command, for the hitch log and the call trace: 0 when
+neither is on */
+static uint64_t command_start(void)
+{
+	return hitch_on || call_trace ? host_monotonic_ns() : 0;
+}
+
+/* the GL thread: one command's time, for the hitch log */
+static void hitch_command(int kind, uint32_t function, void (*run)(const void *), uint64_t ns)
+{
+	int slot;
+
+	if (!hitch_on)
+		return;
+	gl_hitch.busy_ns += ns;
+	gl_hitch.calls++;
+	for (slot = 0; slot < 3; slot++)
+	{
+		if (ns > gl_hitch.slowest[slot].ns)
+		{
+			int move;
+
+			for (move = 2; move > slot; move--)
+				gl_hitch.slowest[move] = gl_hitch.slowest[move - 1];
+			gl_hitch.slowest[slot].ns = ns;
+			gl_hitch.slowest[slot].kind = kind;
+			gl_hitch.slowest[slot].function = function;
+			gl_hitch.slowest[slot].run = run;
+			break;
+		}
+	}
+}
 
 static void adjacency_call(uint32_t kind);
 static void run_buffer_write(const void *data);
@@ -450,7 +511,6 @@ static void *gl_thread_main(void *unused)
 	unsigned int count = 0;
 
 	(void)unused;
-	timing = host_gl_timing_enabled();
 	for (;;)
 	{
 		uint64_t end = wait_for_work(position);
@@ -462,27 +522,30 @@ static void *gl_thread_main(void *unused)
 			switch (command->type)
 			{
 			case _command_call:
+			{
+				uint64_t start;
+
 				if (timing)
 					adjacency_call((uint32_t)glthread_call_kind(command->function));
 				if (pass_timing)
 					pass_call(command);
-				if (bind_trace && bind_frames >= 1500 && bind_frames < 1503)
+				start = command_start();
+				glthread_replay(command->function, command + 1);
+				if (start)
 				{
-					const GLuint *arguments = (const GLuint *)(command + 1);
-					uint64_t start = monotonic_ns(), spent;
+					uint64_t spent = host_monotonic_ns() - start;
 
-					glthread_replay(command->function, command + 1);
-					spent = monotonic_ns() - start;
-					if (spent > 300000 ||
-						glthread_call_kind(command->function) == _glthread_call_bind_framebuffer)
+					hitch_command(_slow_call, command->function, NULL, spent);
+					if (call_trace && (spent > 300000 ||
+						glthread_call_kind(command->function) == _glthread_call_bind_framebuffer))
 					{
+						const GLuint *arguments = (const GLuint *)(command + 1);
+
 						host_logf(HOST_LOG_INFO, "call: at %6.2f ms function %3u kind %d (%u %u) %7.3f ms",
 							(start - bind_frame_start) / 1e6, command->function,
 							glthread_call_kind(command->function), arguments[0], arguments[1], spent / 1e6);
 					}
 				}
-				else
-				glthread_replay(command->function, command + 1);
 				if (pass_timing)
 					draw_traced(command);
 				if (command->flags & COMMAND_EXTERNAL)
@@ -493,12 +556,16 @@ static void *gl_thread_main(void *unused)
 					free(*external);
 				}
 				break;
+			}
 			case _command_sync:
 			{
 				const struct sync_call *call = (const struct sync_call *)(command + 1);
 				uint32_t *done = call->done;
+				uint64_t start = command_start();
 
 				call->run(call->context);
+				if (start)
+					hitch_command(_slow_sync, 0, NULL, host_monotonic_ns() - start);
 				__atomic_store_n(done, 1, __ATOMIC_SEQ_CST);
 				futex_wake(done);
 				break;
@@ -506,19 +573,18 @@ static void *gl_thread_main(void *unused)
 			case _command_host:
 			{
 				const struct host_call *call = (const struct host_call *)(command + 1);
+				uint64_t start = command_start();
 
-				if (bind_trace && bind_frames >= 1500 && bind_frames < 1503)
+				host_operation_run(call);
+				if (start)
 				{
-					uint64_t start = monotonic_ns(), spent;
+					uint64_t spent = host_monotonic_ns() - start;
 
-					host_operation_run(call);
-					spent = monotonic_ns() - start;
-					if (spent > 300000)
+					hitch_command(_slow_host, 0, call->run, spent);
+					if (call_trace && spent > 300000)
 						host_logf(HOST_LOG_INFO, "call: at %6.2f ms host %s %7.3f ms", (start - bind_frame_start) / 1e6,
 							host_operation_name(call->run), spent / 1e6);
 				}
-				else
-					host_operation_run(call);
 				break;
 			}
 			default:
@@ -609,13 +675,13 @@ static struct command *reserve(uint32_t type, uint32_t size)
 	}
 	else
 	{
-		if (timing && !has_room(size))
+		if (measure_waits && !has_room(size))
 		{
-			uint64_t start = monotonic_ns();
+			uint64_t start = host_monotonic_ns();
 
 			PRODUCER_WAIT(has_room(size));
-			producer_waits.room_waits++;
-			producer_waits.room_ns += monotonic_ns() - start;
+			frame_waits.room_waits++;
+			frame_waits.room_ns += host_monotonic_ns() - start;
 		}
 		else
 		{
@@ -679,13 +745,13 @@ void glthread_sync(void (*run)(void *), void *context)
 	call->done = &done;
 	producer.head += command->size;
 	publish();
-	if (timing)
+	if (measure_waits)
 	{
-		uint64_t start = monotonic_ns();
+		uint64_t start = host_monotonic_ns();
 
 		wait_while_equal(&done, 0, SPIN_LIMIT * 4);
-		producer_waits.syncs++;
-		producer_waits.sync_ns += monotonic_ns() - start;
+		frame_waits.syncs++;
+		frame_waits.sync_ns += host_monotonic_ns() - start;
 	}
 	else
 	{
@@ -844,6 +910,11 @@ uint32_t host_gl_read_buffer_word(uint32_t buffer, uint32_t offset);
 void host_gl_buffer_write(uint32_t target, uint32_t offset, uint32_t size, const void *data);
 void host_gl_buffer_persistent(uint32_t target, uint32_t size);
 void host_gl_buffer_write_to(uint32_t buffer, uint32_t target, uint32_t offset, uint32_t size, const void *data);
+void host_gl_program_build(uint32_t program, const char *cache_path, const char *vertex_source, long long vertex_hash,
+	const char *fragment_source, long long fragment_hash);
+int host_gl_program_load(uint32_t program, const char *cache_path);
+int host_gl_program_compile(uint32_t program, const char *cache_path, const char *vertex_source, long long vertex_hash,
+	const char *fragment_source, long long fragment_hash);
 void host_gl_fence_frame(uint32_t slot);
 void host_gl_wait_frame(uint32_t slot);
 uint32_t host_sdl_gl_create_context(uint32_t window);
@@ -897,6 +968,326 @@ static void queued_gl_buffer_write_to(uint32_t buffer, uint32_t target, uint32_t
 	write->size = size;
 	memcpy(write + 1, data, size);
 	glthread_end();
+}
+
+/* ---------- programs built beside the GL thread
+
+A program the guest makes (host_gl_program_build) took the GL thread about
+2 ms to load from the driver's binary, and 220-250 ms to compile and link
+when it had none: a stall of the frame, and of the game's thread behind it.
+Threads of their own build them instead, on contexts that share the GL
+thread's objects: the loader loads binaries and hands what has none to the
+compiler, so that a load never waits for a compile. Until a program is
+built the GL thread leaves it unbound: the draws made with it are skipped
+(what it draws appears a frame or more late, the first time), and the
+uniforms set for it are kept, to be set once it is bound. The generated
+replay asks for that (glthread_program_use, _draw and _uniform).
+HALO_ASYNC_PROGRAMS=0 builds them on the GL thread, as before. */
+
+/* the call: its strings follow, the cache file's path, the vertex shader's
+source and the fragment shader's */
+struct program_build
+{
+	uint32_t program;
+	uint32_t path_size, vertex_size, fragment_size;
+	long long vertex_hash, fragment_hash;
+};
+
+/* a program being built; the call's strings follow it */
+struct program_job
+{
+	struct program_job *next;       /* in a builder's queue */
+	uint32_t done;                  /* set by the builder: built, or found it cannot be */
+	uint32_t linked;
+	/* the uniform calls made for it meanwhile, whole commands */
+	unsigned char *deferred;
+	size_t deferred_size, deferred_capacity;
+	struct program_build build;
+};
+
+struct builder
+{
+	const char *name;
+	int nice;
+	pthread_mutex_t lock;
+	pthread_cond_t wake;
+	struct program_job *first, *last;
+	EGLContext context;
+	uint32_t state;                 /* 0 starting, 1 running, 2 without its context */
+};
+
+static struct builder loader = { "halo-load", 0, PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER };
+static struct builder compiler = { "halo-compile", 5, PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER };
+static EGLDisplay builder_display;
+static int builders_running;
+/* the programs being built, by name; one that cannot be stays unbuildable,
+its draws skipped */
+static struct program_job **jobs;
+static uint32_t job_capacity;
+static struct program_job unbuildable = { .done = 1 };
+/* the program the guest bound last, and whether it is being built */
+static uint32_t bound_program;
+int glthread_program_blocked;
+/* for HALO_HITCH_LOG: the programs the builders made, and the draws skipped
+while they did and the frames they were in */
+static uint32_t programs_built, programs_compiled;
+static unsigned long skipped_draws, skipped_frames, program_frames;
+
+static void builder_push(struct builder *builder, struct program_job *job)
+{
+	job->next = NULL;
+	pthread_mutex_lock(&builder->lock);
+	if (builder->last)
+		builder->last->next = job;
+	else
+		builder->first = job;
+	builder->last = job;
+	pthread_cond_signal(&builder->wake);
+	pthread_mutex_unlock(&builder->lock);
+}
+
+static struct program_job *builder_pop(struct builder *builder)
+{
+	struct program_job *job;
+
+	pthread_mutex_lock(&builder->lock);
+	while (!builder->first)
+		pthread_cond_wait(&builder->wake, &builder->lock);
+	job = builder->first;
+	builder->first = job->next;
+	if (!builder->first)
+		builder->last = NULL;
+	pthread_mutex_unlock(&builder->lock);
+	return job;
+}
+
+static void *builder_main(void *argument)
+{
+	struct builder *builder = argument;
+	int current = eglMakeCurrent(builder_display, EGL_NO_SURFACE, EGL_NO_SURFACE, builder->context);
+
+	setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), builder->nice);
+	__atomic_store_n(&builder->state, current ? 1u : 2u, __ATOMIC_SEQ_CST);
+	futex_wake(&builder->state);
+	if (!current)
+		return NULL;
+	for (;;)
+	{
+		struct program_job *job = builder_pop(builder);
+		const char *path = (const char *)(job + 1);
+		const char *vertex = path + job->build.path_size;
+
+		if (builder == &loader)
+		{
+			if (!host_gl_program_load(job->build.program, path))
+			{
+				builder_push(&compiler, job);
+				continue;
+			}
+			job->linked = 1;
+		}
+		else
+		{
+			job->linked = (uint32_t)host_gl_program_compile(job->build.program, path, vertex, job->build.vertex_hash,
+				vertex + job->build.vertex_size, job->build.fragment_hash);
+			__atomic_add_fetch(&programs_compiled, 1, __ATOMIC_RELAXED);
+		}
+		/* complete on this context before the GL thread's binds it */
+		glFinish();
+		__atomic_add_fetch(&programs_built, 1, __ATOMIC_RELAXED);
+		__atomic_store_n(&job->done, 1, __ATOMIC_RELEASE);
+	}
+	return NULL;
+}
+
+/* on the GL thread, once its context is made: the builders, on contexts
+that share its objects */
+static void builders_start(void)
+{
+	struct builder *builders[] = { &loader, &compiler };
+	const char *setting = getenv("HALO_ASYNC_PROGRAMS");
+	EGLContext shared = eglGetCurrentContext();
+	EGLint config_id = 0, version = 3, count = 0;
+	EGLint config_attributes[] = { EGL_CONFIG_ID, 0, EGL_NONE };
+	EGLint context_attributes[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
+	EGLConfig config;
+	unsigned int index = 0;
+
+	if (builders_running || (setting && *setting == '0'))
+		return;
+	builder_display = eglGetCurrentDisplay();
+	eglQueryContext(builder_display, shared, EGL_CONFIG_ID, &config_id);
+	eglQueryContext(builder_display, shared, EGL_CONTEXT_CLIENT_VERSION, &version);
+	config_attributes[1] = config_id;
+	context_attributes[1] = version;
+	if (eglChooseConfig(builder_display, config_attributes, &config, 1, &count) && count == 1)
+	{
+		for (; index < 2; index++)
+		{
+			pthread_t builder_thread;
+
+			builders[index]->context = eglCreateContext(builder_display, config, shared, context_attributes);
+			if (builders[index]->context == EGL_NO_CONTEXT ||
+				pthread_create(&builder_thread, NULL, builder_main, builders[index]) != 0)
+				break;
+			pthread_setname_np(builder_thread, builders[index]->name);
+		}
+	}
+	/* each makes its context current on its own thread */
+	builders_running = index == 2;
+	while (index > 0)
+	{
+		index--;
+		wait_while_equal(&builders[index]->state, 0, SPIN_LIMIT);
+		if (builders[index]->state != 1)
+			builders_running = 0;
+	}
+	if (builders_running)
+		host_logf(HOST_LOG_INFO, "programs are built by threads of their own");
+	else
+		host_logf(HOST_LOG_WARN, "cannot start the program builders (EGL error 0x%x): programs are built on the GL thread",
+			eglGetError());
+}
+
+static void run_program_build(const void *data)
+{
+	const struct program_build *build = data;
+	const char *strings = (const char *)(build + 1);
+	struct program_job *job;
+	size_t size;
+
+	if (!builders_running)
+	{
+		host_gl_program_build(build->program, strings, strings + build->path_size, build->vertex_hash,
+			strings + build->path_size + build->vertex_size, build->fragment_hash);
+		return;
+	}
+	size = build->path_size + build->vertex_size + build->fragment_size;
+	job = malloc(sizeof(*job) + size);
+	memset(job, 0, sizeof(*job));
+	job->build = *build;
+	memcpy(job + 1, strings, size);
+	if (build->program >= job_capacity)
+	{
+		uint32_t capacity = job_capacity ? job_capacity : 1024;
+
+		while (capacity <= build->program)
+			capacity *= 2;
+		jobs = realloc(jobs, capacity * sizeof(*jobs));
+		memset(jobs + job_capacity, 0, (capacity - job_capacity) * sizeof(*jobs));
+		job_capacity = capacity;
+	}
+	jobs[build->program] = job;
+	builder_push(&loader, job);
+}
+
+static void queued_gl_program_build(uint32_t program, const char *cache_path, const char *vertex_source,
+	long long vertex_hash, const char *fragment_source, long long fragment_hash)
+{
+	size_t path_size = strlen(cache_path) + 1, vertex_size = strlen(vertex_source) + 1;
+	size_t fragment_size = strlen(fragment_source) + 1;
+	struct program_build *build = host_begin(run_program_build,
+		sizeof(*build) + path_size + vertex_size + fragment_size);
+	char *strings = (char *)(build + 1);
+
+	build->program = program;
+	build->path_size = (uint32_t)path_size;
+	build->vertex_size = (uint32_t)vertex_size;
+	build->fragment_size = (uint32_t)fragment_size;
+	build->vertex_hash = vertex_hash;
+	build->fragment_hash = fragment_hash;
+	memcpy(strings, cache_path, path_size);
+	memcpy(strings + path_size, vertex_source, vertex_size);
+	memcpy(strings + path_size + vertex_size, fragment_source, fragment_size);
+	glthread_end();
+}
+
+/* whether the program may be bound: it is not being built. One found not to
+build becomes unbuildable */
+static int program_ready(uint32_t program)
+{
+	struct program_job *job = program < job_capacity ? jobs[program] : NULL;
+
+	if (!job)
+		return 1;
+	if (job == &unbuildable || !__atomic_load_n(&job->done, __ATOMIC_ACQUIRE))
+		return 0;
+	if (!job->linked)
+	{
+		free(job->deferred);
+		free(job);
+		jobs[program] = &unbuildable;
+		return 0;
+	}
+	return 1;
+}
+
+/* binds the program, now built, and makes the uniform calls kept for it */
+static void program_bind(uint32_t program)
+{
+	struct program_job *job = program < job_capacity ? jobs[program] : NULL;
+	size_t offset;
+
+	glthread_program_blocked = 0;
+	glthread_driver_use_program(program);
+	if (!job)
+		return;
+	jobs[program] = NULL;
+	for (offset = 0; offset < job->deferred_size;)
+	{
+		const struct command *command = (const struct command *)(job->deferred + offset);
+
+		glthread_replay(command->function, command + 1);
+		offset += command->size;
+	}
+	free(job->deferred);
+	free(job);
+}
+
+/* binds the bound program if it is built now: whether it could */
+static int program_unblock(void)
+{
+	if (!program_ready(bound_program))
+		return 0;
+	program_bind(bound_program);
+	return 1;
+}
+
+void glthread_program_use(GLuint program)
+{
+	bound_program = program;
+	glthread_program_blocked = !program_unblock();
+}
+
+int glthread_program_draw(void)
+{
+	if (program_unblock())
+		return 1;
+	gl_hitch.skipped++;
+	return 0;
+}
+
+/* a uniform call's command is kept whole (a uniform's payload is always in
+the queue, never allocated) */
+int glthread_program_uniform(const void *call)
+{
+	const struct command *command = (const struct command *)call - 1;
+	struct program_job *job;
+
+	if (program_unblock())
+		return 1;
+	job = jobs[bound_program];
+	if (job == &unbuildable)
+		return 0;
+	if (job->deferred_size + command->size > job->deferred_capacity)
+	{
+		while (job->deferred_size + command->size > job->deferred_capacity)
+			job->deferred_capacity = job->deferred_capacity ? job->deferred_capacity * 2 : 1024;
+		job->deferred = realloc(job->deferred, job->deferred_capacity);
+	}
+	memcpy(job->deferred + job->deferred_size, command, command->size);
+	job->deferred_size += command->size;
+	return 0;
 }
 
 struct buffer_persistent
@@ -1039,6 +1430,7 @@ static void run_create_context(void *context)
 			if (!reserves[kind].count)
 				refill(kind, RESERVE_REFILL);
 		}
+		builders_start();
 	}
 }
 
@@ -1059,6 +1451,8 @@ static const char *host_operation_name(void (*run)(const void *))
 		return "swap";
 	if (run == run_refill)
 		return "reserve names";
+	if (run == run_program_build)
+		return "program build";
 	return "?";
 }
 
@@ -1101,50 +1495,117 @@ static int synced_sdl_gl_set_swap_interval(int interval)
 	return (int)call.result;
 }
 
+/* the name of one of the GL thread's slowest commands of the frame */
+static const char *slow_name(int slot)
+{
+	switch (gl_hitch.slowest[slot].kind)
+	{
+	case _slow_call:
+		return glthread_function_name(gl_hitch.slowest[slot].function);
+	case _slow_sync:
+		return "a synchronous call";
+	case _slow_host:
+		return host_operation_name(gl_hitch.slowest[slot].run);
+	default:
+		return "-";
+	}
+}
+
 static void run_swap(const void *data)
 {
 	if (bind_trace)
 	{
-		uint64_t start = monotonic_ns();
+		uint64_t start = host_monotonic_ns();
 
 		if (bind_frames >= 1500 && bind_frames < 1503)
 			host_logf(HOST_LOG_INFO, "call: at %6.2f ms the swap", (start - bind_frame_start) / 1e6);
 		bind_frames++;
 		bind_frame_start = start;
+		call_trace = bind_frames >= 1500 && bind_frames < 1503;
 	}
 	if (pass_timing)
 		pass_frame();
+	if (hitch_on)
+	{
+		uint64_t now = host_monotonic_ns();
+
+		if (gl_hitch.frame_start && (now - gl_hitch.frame_start) / 1e6 > hitch_ms)
+		{
+			host_logf(HOST_LOG_INFO, "hitch: GL thread %.1f ms frame, %.1f ms in %u calls; slowest %s %.1f, %s %.1f, "
+				"%s %.1f; %u draws skipped", (now - gl_hitch.frame_start) / 1e6, gl_hitch.busy_ns / 1e6, gl_hitch.calls,
+				slow_name(0), gl_hitch.slowest[0].ns / 1e6, slow_name(1), gl_hitch.slowest[1].ns / 1e6,
+				slow_name(2), gl_hitch.slowest[2].ns / 1e6, gl_hitch.skipped);
+		}
+		/* the program builders' work, every 600 frames */
+		skipped_draws += gl_hitch.skipped;
+		if (gl_hitch.skipped)
+			skipped_frames++;
+		if (++program_frames % 600 == 0)
+			host_logf(HOST_LOG_INFO, "programs: %u built beside the GL thread (%u compiled); %lu draws skipped, "
+				"in %lu frames, while theirs were", __atomic_load_n(&programs_built, __ATOMIC_RELAXED),
+				__atomic_load_n(&programs_compiled, __ATOMIC_RELAXED), skipped_draws, skipped_frames);
+	}
 	host_sdl_gl_swap_window(*(const uint32_t *)data);
+	if (hitch_on)
+	{
+		memset(&gl_hitch, 0, sizeof(gl_hitch));
+		gl_hitch.frame_start = host_monotonic_ns();
+	}
 	__atomic_add_fetch(&consumer.frames_done, 1, __ATOMIC_SEQ_CST);
 	futex_wake(&consumer.frames_done);
+}
+
+static void waits_add(struct waits *total, const struct waits *frame)
+{
+	total->syncs += frame->syncs;
+	total->sync_ns += frame->sync_ns;
+	total->room_waits += frame->room_waits;
+	total->room_ns += frame->room_ns;
+	total->frame_waits += frame->frame_waits;
+	total->frame_ns += frame->frame_ns;
 }
 
 static int queued_sdl_gl_swap_window(uint32_t window)
 {
 	uint32_t submitted = ++producer.frames_submitted;
+	uint64_t start, now;
 
 	glthread_host(run_swap, &window, sizeof(window));
 	publish();
 	/* at most frames_ahead frames queued behind the one on screen: the
 	counter is the futex, so that only swaps wake the game, not every
 	command the GL thread makes */
+	start = measure_waits ? host_monotonic_ns() : 0;
+	for (;;)
 	{
-		uint64_t start = timing ? monotonic_ns() : 0;
+		uint32_t done = __atomic_load_n(&consumer.frames_done, __ATOMIC_ACQUIRE);
 
-		for (;;)
-		{
-			uint32_t done = __atomic_load_n(&consumer.frames_done, __ATOMIC_ACQUIRE);
-
-			if (submitted - done <= frames_ahead)
-				break;
-			wait_while_equal(&consumer.frames_done, done, SPIN_LIMIT);
-		}
-		if (timing)
-		{
-			producer_waits.frame_waits++;
-			producer_waits.frame_ns += monotonic_ns() - start;
-		}
+		if (submitted - done <= frames_ahead)
+			break;
+		wait_while_equal(&consumer.frames_done, done, SPIN_LIMIT);
 	}
+	if (!measure_waits && !host_profile_sampling())
+		return 1;
+	now = host_monotonic_ns();
+	if (measure_waits)
+	{
+		frame_waits.frame_waits++;
+		frame_waits.frame_ns += now - start;
+		if (timing)
+			waits_add(&producer_waits, &frame_waits);
+		if (hitch_on && game_frame_start && (now - game_frame_start) / 1e6 > hitch_ms)
+		{
+			host_logf(HOST_LOG_INFO, "hitch: game thread %.1f ms frame; waited %.1f ms for room in the queue (%u times), "
+				"%.1f ms in %u synchronous calls, %.1f ms for the frame before", (now - game_frame_start) / 1e6,
+				frame_waits.room_ns / 1e6, (unsigned int)frame_waits.room_waits, frame_waits.sync_ns / 1e6,
+				(unsigned int)frame_waits.syncs, (now - start) / 1e6);
+		}
+		memset(&frame_waits, 0, sizeof(frame_waits));
+	}
+	/* for the profiler: where each frame ends among its samples */
+	if (game_frame_start)
+		host_profile_mark(submitted, (uint32_t)((now - game_frame_start) / 1000));
+	game_frame_start = now;
 	return 1;
 }
 
@@ -1157,6 +1618,10 @@ static int glthread_enabled(void)
 		const char *setting = getenv("HALO_GL_THREAD");
 		const char *frames = getenv("HALO_GL_THREAD_FRAMES");
 		const char *timing = getenv("HALO_GPU_PASS_TIMING");
+		const char *hitch = getenv("HALO_HITCH_LOG");
+
+		hitch_ms = hitch ? atof(hitch) : 0.0;
+		hitch_on = hitch_ms > 0.0;
 
 		enabled = !(setting && *setting == '0');
 		pass_timing = timing && *timing && *timing != '0';
@@ -1178,6 +1643,8 @@ static void start(void)
 	ring = mmap(NULL, RING_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	if (ring == MAP_FAILED)
 		host_fatal("cannot make the GL thread's queue");
+	timing = host_gl_timing_enabled();
+	measure_waits = timing || hitch_on;
 	if (pthread_create(&thread, NULL, gl_thread_main, NULL) != 0)
 		host_fatal("cannot start the GL thread");
 	pthread_setname_np(thread, "halo-gl");
@@ -1202,6 +1669,7 @@ void *host_import_wrap(const char *name, void *function)
 		{ "host_gl_read_buffer_word", (void *)synced_gl_read_buffer_word },
 		{ "host_gl_buffer_write", (void *)queued_gl_buffer_write },
 		{ "host_gl_buffer_persistent", (void *)queued_gl_buffer_persistent },
+		{ "host_gl_program_build", (void *)queued_gl_program_build },
 		{ "host_gl_buffer_write_to", (void *)queued_gl_buffer_write_to },
 		{ "host_gl_fence_frame", (void *)queued_gl_fence_frame },
 		{ "host_gl_wait_frame", (void *)queued_gl_wait_frame },

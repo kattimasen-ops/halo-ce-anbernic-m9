@@ -107,6 +107,7 @@ launcher writes another value, the table says so.
 | [`debug.tiny_scissor`](#debugtiny_scissor) | boolean | `false` | | `HALO_DEBUG_TINY_SCISSOR` (set is true) |
 | [`debug.lod_bias`](#debuglod_bias) | real | `0.0` | | `HALO_DEBUG_LOD_BIAS` (value) |
 | [`debug.draw_callers`](#debugdraw_callers) | integer | `0` | | `HALO_DEBUG_DRAW_CALLERS` (value) |
+| [`debug.hitch_log`](#debughitch_log) | real | `0.0` | | `HALO_HITCH_LOG` (value) |
 | [`audio.enabled`](#sound-and-language) | boolean | `true` | | `HALO_NO_AUDIO` (set is false) |
 | [`audio.volume`](#sound-and-language) | real | `1.0` | | `HALO_VOLUME` (value) |
 | [`game.language`](#sound-and-language) | string | `""` | | `HALO_LANGUAGE` (value) |
@@ -315,8 +316,9 @@ the Mali-G31 driver has).
 | boolean | `false` | `HALO_NO_PROGRAM_CACHE` |
 
 Does not keep linked shader programs in `save/shaders/`; every start
-compiles them again, with a stutter of about 60 ms for each new
-combination. Use it only to test the compiler path; deleting
+compiles them again, about 220 to 250 ms of a core for each new
+combination, on the program builder's thread: what they draw appears late
+the first time. Use it only to test the compiler path; deleting
 `save/shaders/` clears the cache without it.
 
 ### `debug.freeze`
@@ -382,6 +384,22 @@ The addresses are in the guest image; [Profiling](PROFILING.md#halo_debug_draw_c
 shows how to read them. The value must be a whole number: `1.0` is
 rejected with a message in the log.
 
+### `debug.hitch_log`
+
+| Type | Default | Variable |
+| --- | --- | --- |
+| real | `0.0` | `HALO_HITCH_LOG` |
+
+Logs every frame longer than this many milliseconds, with what it did that
+a smooth frame does not, and every 600 frames a summary; 0 never. The
+renderer's line splits the frame into the game's work, the drawing and the
+wait before it, and counts the programs, textures (with their bytes and
+time), shaders and geometry made in it. The host reads the variable for its
+two lines (the game's thread's waits, and the GL thread's slowest calls and
+the draws it skipped), so set `HALO_HITCH_LOG` rather than the file's
+setting to have all three. [Profiling](PROFILING.md#the-hitch-log) has
+examples.
+
 ## Sound and language
 
 | Setting | Type | Default | Variable | Effect |
@@ -435,7 +453,8 @@ most useful here are described in [Profiling](PROFILING.md).
 | `debug.sample_seconds` | real | `0.0` | `HALO_SAMPLE` (value) | Logs where every game thread is, this often in seconds (upstream's `host_debug.c`). On the handheld the host reads it from `config.toml` only; the variable does not start it. |
 | `debug.exit_after` | real | `0.0` | `HALO_EXIT_AFTER` (value) | Quits this many seconds after the window opens; 0 never. `tools/device/run.sh` uses it to end benchmark runs. |
 | `debug.null_renderer` | boolean | `false` | `HALO_NULL_RENDERER` (set is true) | Runs without a window, drawing nothing. |
-| `debug.network_test`, `debug.network_test_start`, `_kill`, `_shoot`, `_vehicle`, `_pickup`, `debug.network_latency`, `debug.network_loss`, `debug.test_input` | | | `HALO_NETWORK_TEST`, ... | Upstream's automated network tests. Not used on the handheld. |
+| `debug.test_input` | string | `""` | `HALO_TEST_INPUT` (value) | `walk[:seed]`: a bot that walks forward, turns every 4 seconds, looks around and jumps now and then, and never fires, for traversal benchmarks. `bot[:seed]`: upstream's network test input. |
+| `debug.network_test`, `debug.network_test_start`, `_kill`, `_shoot`, `_vehicle`, `_pickup`, `debug.network_latency`, `debug.network_loss` | | | `HALO_NETWORK_TEST`, ... | Upstream's automated network tests. Not used on the handheld. |
 
 ## Environment variables outside config.toml
 
@@ -449,9 +468,11 @@ These are read directly by the host (`port/knulli/host/`,
 | `HALO_GPU_PASS_TIMING=1`, `2`, `3`, `4` | `host_glthread.c` | off | Finishes the GPU at each change of render target and times each pass; 2 and 3 trace one frame's passes and draws; 4 traces slow calls instead. Needs the GL thread. |
 | `HALO_PROFILE_HZ=<rate>` | `host_profile.c` | off | Samples every thread at this rate; the samples are written when the game exits. |
 | `HALO_PROFILE_DELAY=<seconds>` | `host_profile.c` | `0` | Starts the sampling this long after start-up. |
-| `HALO_PROFILE_FILE=<path>` | `host_profile.c` | `profile.txt` in the data folder | Where the profile goes. |
+| `HALO_PROFILE_FILE=<path>` | `host_profile.c` | `profile.txt` in the data folder | Where the profile goes. Each of the game thread's frames is marked among the samples (`profile.py --frames-over`). |
 | `HALO_GL_THREAD=0` | `host_glthread.c` | on | Makes the GL calls on the game's thread, without the GL thread. |
 | `HALO_GL_THREAD_FRAMES=<n>` | `host_glthread.c` | `1` | How many frames the game may be ahead of the GL thread. |
+| `HALO_ASYNC_PROGRAMS=0` | `host_glthread.c` | on | Builds shader programs on the GL thread instead of the program builders' threads: a new program stalls the frame (about 2 ms from the cache, 220 to 250 ms compiled) instead of appearing late. |
+| `HALO_HITCH_LOG=<ms>` | `host_glthread.c`, `d3d8_gl.c` | off | The hitch log ([`debug.hitch_log`](#debughitch_log)). |
 | `HALO_DEBUG_SKIP_GL=glA,glB` | `host_glthread.c` | none | The GL thread does not make these calls. Needs the GL thread. |
 | `HALO_SWAP_INTERVAL=<n>` | `host_sdl2.c` | the game's `display.vsync` | Overrides the swap interval; `0` turns vsync off. |
 | `HALO_AUDIO_SAMPLES=<n>` | `host_sdl2.c` | `1024` | SDL2's audio buffer, in sample frames. |

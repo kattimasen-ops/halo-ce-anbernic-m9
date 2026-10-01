@@ -13,9 +13,13 @@ GL thread:
   synchronous: the calling thread waits while the GL thread makes the call;
 - the others are queued, with a copy of the memory their pointer arguments
   refer to (PAYLOAD gives its size), and the calling thread goes on;
-- glGenTextures, glGenBuffers, glGenFramebuffers and glGenSamplers take
-  names reserved ahead of time by the GL thread (host_glthread.c), so that
-  making an object mid-frame does not wait either.
+- glGenTextures, glGenBuffers, glGenFramebuffers, glGenSamplers and
+  glCreateProgram take names reserved ahead of time by the GL thread
+  (host_glthread.c), so that making an object mid-frame does not wait either;
+- glUseProgram (REPLACED), the draws and the calls that set the bound
+  program's uniforms ask host_glthread.c first: a program stays unbound while
+  threads of its own build it, the draws made with it are skipped and the
+  uniforms set for it kept.
 """
 
 import os
@@ -29,7 +33,7 @@ from android_gl_stubs import prototypes, split_parameter  # noqa: E402
 SYNC = {
     "glGetUniformBlockIndex", "glGetActiveUniformBlockiv",
     "glGetIntegerv", "glGetError", "glReadPixels", "glFinish", "glCheckFramebufferStatus",
-    "glGenVertexArrays", "glCreateShader", "glGetShaderiv", "glGetShaderInfoLog", "glCreateProgram",
+    "glGenVertexArrays", "glCreateShader", "glGetShaderiv", "glGetShaderInfoLog",
     "glGetProgramiv", "glGetProgramInfoLog", "glGetUniformLocation", "glGenQueries",
     "glGetQueryObjectuiv", "glShaderSource", "glBindAttribLocation", "glCompileShader", "glLinkProgram",
     "glProgramBinary", "glGetProgramBinary",
@@ -37,6 +41,8 @@ SYNC = {
 # names reserved ahead of time (host_glthread.c)
 RESERVED = {"glGenTextures": "textures", "glGenBuffers": "buffers", "glGenFramebuffers": "framebuffers",
             "glGenSamplers": "samplers"}
+# objects made one at a time (GLuint f(void)) whose names are reserved too
+CREATED = {"glCreateProgram": "programs"}
 # queued functions' pointer arguments: the bytes to copy (a C expression of the arguments)
 PAYLOAD = {
     "glDeleteTextures": ("textures", "(size_t)n * sizeof(GLuint)"),
@@ -62,6 +68,11 @@ PAYLOAD = {
 HOOKS = {
     "glPixelStorei": "glthread_pixel_store(pname, param);",
 }
+# the draws
+DRAWS = ("glDrawArrays", "glDrawElements", "glDrawElementsBaseVertex", "glDrawRangeElementsBaseVertex",
+         "glDrawElementsInstancedBaseVertex")
+# queued calls that host_glthread.c makes instead of the driver, with the same arguments
+REPLACED = {"glUseProgram": "glthread_program_use"}
 # pointer arguments that are offsets into a bound buffer, passed as they are
 OFFSETS = {
     ("glVertexAttribPointer", "pointer"), ("glVertexAttribIPointer", "pointer"),
@@ -79,6 +90,12 @@ def parse_prototypes(header):
 
 def is_pointer(kind):
     return "*" in kind
+
+
+def current_program_call(arguments):
+    """whether a call sets the bound program's state: its first parameter is
+    a uniform's location (glUniform*)"""
+    return bool(arguments) and arguments[0][1] == "location"
 
 
 def main():
@@ -118,6 +135,13 @@ def main():
                 emit("\treturn call.result;")
             emit("}\n")
             continue
+        if name in CREATED:
+            emit(f"static GLuint GL_APIENTRY record_{name}(void)\n{{")
+            emit(f"\tGLuint name;\n\n\tglthread_reserved_names(_glthread_{CREATED[name]}, 1, &name);\n\treturn name;\n}}\n")
+            emit(f"static void glthread_generate_{CREATED[name]}(GLsizei n, GLuint *names)\n{{")
+            emit(f"\tGLsizei index;\n\n\tfor (index = 0; index < n; index++)")
+            emit(f"\t\tnames[index] = ((GLuint (GL_APIENTRY *)(void))driver[glthread_{name}])();\n}}\n")
+            continue
         if name in RESERVED:
             # (GLsizei n, GLuint *names)
             emit(f"static void GL_APIENTRY record_{name}(GLsizei n, GLuint *names)\n{{")
@@ -155,29 +179,42 @@ def main():
                 replay.append(f"({kind})call->{argument}")
             else:
                 replay.append(f"call->{argument}")
+        # while the bound program is being built (host_glthread.c)
+        gate = ""
+        if name in DRAWS:
+            gate = "\t\tif (glthread_program_blocked && !glthread_program_draw())\n\t\t\tbreak;\n"
+        elif current_program_call(arguments):
+            gate = "\t\tif (glthread_program_blocked && !glthread_program_uniform(data))\n\t\t\tbreak;\n"
+        target = REPLACED.get(name, f"(({pointer_type})driver[glthread_{name}])")
         cases.append(
             f"\tcase glthread_{name}:\n\t{{\n\t\tconst struct queued_{name} *call = data;\n\n\t\t(void)call;\n"
-            f"\t\t(({pointer_type})driver[glthread_{name}])({', '.join(replay)});\n\t\tbreak;\n\t}}")
+            f"{gate}\t\t{target}({', '.join(replay)});\n\t\tbreak;\n\t}}")
     emit("void glthread_replay(uint32_t function, const void *data)\n{\n\tswitch (function)\n\t{")
     out.extend(cases)
     emit("\tdefault:\n\t\tbreak;\n\t}\n}\n")
-    emit("void *glthread_record_function(const char *name, void *function)\n{")
-    emit("\tstatic const struct { const char *name; int index; void *record; } functions[] =\n\t{")
+    emit("/* the functions' names and recording functions, in the order of the enum */")
+    emit("static const struct\n{\n\tconst char *name;\n\tvoid *record;\n} functions[glthread_function_count] =\n{")
     for name in names:
-        emit(f"\t\t{{ \"{name}\", glthread_{name}, (void *)record_{name} }},")
-    emit("\t};\n\tunsigned long index;\n")
-    emit("\tfor (index = 0; index < sizeof(functions) / sizeof(functions[0]); index++)\n\t{")
+        emit(f"\t{{ \"{name}\", (void *)record_{name} }},")
+    emit("};\n")
+    emit("void *glthread_record_function(const char *name, void *function)\n{")
+    emit("\tuint32_t index;\n")
+    emit("\tfor (index = 0; index < glthread_function_count; index++)\n\t{")
     emit("\t\tif (!strcmp(functions[index].name, name))\n\t\t{")
-    emit("\t\t\tdriver[functions[index].index] = function;\n\t\t\treturn functions[index].record;\n\t\t}\n\t}")
+    emit("\t\t\tdriver[index] = function;\n\t\t\treturn functions[index].record;\n\t\t}\n\t}")
     emit("\treturn function;\n}\n")
+    emit("const char *glthread_function_name(uint32_t function)\n{")
+    emit("\treturn function < glthread_function_count ? functions[function].name : \"?\";\n}\n")
     emit("void glthread_generate_names(int kind, GLsizei n, GLuint *names)\n{\n\tswitch (kind)\n\t{")
-    for name, kind in RESERVED.items():
+    for name, kind in list(RESERVED.items()) + list(CREATED.items()):
         if name in names:
             emit(f"\tcase _glthread_{kind}:\n\t\tglthread_generate_{kind}(n, names);\n\t\tbreak;")
     emit("\t}\n}")
     # what the GPU pass timer (host_glthread.c) needs to know of the calls
     emit("\nvoid glthread_driver_finish(void)\n{")
     emit("\t((void (GL_APIENTRY *)(void))driver[glthread_glFinish])();\n}\n")
+    emit("void glthread_driver_use_program(GLuint program)\n{")
+    emit("\t((void (GL_APIENTRY *)(GLuint))driver[glthread_glUseProgram])(program);\n}\n")
     emit("void glthread_driver_flush(void)\n{")
     emit("\t((void (GL_APIENTRY *)(void))driver[glthread_glFlush])();\n}\n")
     emit("GLint glthread_driver_integer(GLenum name)\n{")
@@ -185,15 +222,13 @@ def main():
     emit("\t((void (GL_APIENTRY *)(GLenum, GLint *))driver[glthread_glGetIntegerv])(name, &value);")
     emit("\treturn value;\n}\n")
     emit("int glthread_draw_count(uint32_t function, const void *data)\n{\n\tswitch (function)\n\t{")
-    for name in ("glDrawArrays", "glDrawElements", "glDrawElementsBaseVertex", "glDrawRangeElementsBaseVertex",
-                 "glDrawElementsInstancedBaseVertex"):
+    for name in DRAWS:
         if name in names:
             emit(f"\tcase glthread_{name}:\n\t\treturn (int)((const struct queued_{name} *)data)->count;")
     emit("\tdefault:\n\t\treturn 0;\n\t}\n}\n")
     emit("int glthread_call_kind(uint32_t function)\n{\n\tswitch (function)\n\t{")
     emit("\tcase glthread_glBindFramebuffer:\n\t\treturn _glthread_call_bind_framebuffer;")
-    for name in ("glDrawArrays", "glDrawElements", "glDrawElementsBaseVertex", "glDrawRangeElementsBaseVertex",
-                 "glDrawElementsInstancedBaseVertex"):
+    for name in DRAWS:
         if name in names:
             emit(f"\tcase glthread_{name}:")
     emit("\t\treturn _glthread_call_draw;\n\tcase glthread_glClear:\n\t\treturn _glthread_call_clear;")
@@ -202,8 +237,8 @@ def main():
         if name in names:
             emit(f"\tcase glthread_{name}:")
     emit("\t\treturn _glthread_call_geometry;")
-    for name in ("glUniform1i", "glUniform1iv", "glUniform1f", "glUniform4fv", "glUniform2f"):
-        if name in names:
+    for name in names:
+        if current_program_call(functions[name][1]):
             emit(f"\tcase glthread_{name}:")
     emit("\t\treturn _glthread_call_uniform;")
     for name in ("glCopyImageSubData", "glBlitFramebuffer", "glCopyTexSubImage2D", "glReadPixels",

@@ -119,9 +119,10 @@ and NV2A register combiners on OpenGL ES 3. The patch adds these changes for
 - **Render scale** (`display.render_scale`): the 3D picture is drawn at a
   fraction of the screen's resolution and scaled up at Present.
 - **Program binary cache**: linked shader programs are saved as the driver's
-  binaries in `save/shaders`. A link takes about 60 ms on this GPU, a
-  visible stutter; with the cache each combination is linked once. If the
-  driver rejects a saved binary, the program is compiled again.
+  binaries in `save/shaders`. A compile and link takes 220 to 250 ms on this
+  CPU, so it is done once for each combination, and on threads of their own
+  beside the GL thread, which skips the program's draws until it is ready.
+  If the driver rejects a saved binary, the program is compiled again.
 - **fp16 shaders** (`display.fast_shaders`): colours and combiner arithmetic
   in half precision; texture coordinates stay in single precision.
 - **16-bit textures** (`display.fast_textures`): Mali has no S3TC, so DXT

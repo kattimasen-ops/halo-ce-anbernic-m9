@@ -119,6 +119,11 @@ Reports from other devices and firmware are welcome
   skips its movies.
 - **Network play.** The launcher turns internet play off
   (`network.online = false`).
-- **Shader stutter.** The first time each combination of shaders is drawn,
-  it is compiled (about 60 ms); the cache in `save/shaders/` keeps it for
-  later launches.
+- **Late objects.** The first time each combination of shaders is drawn,
+  it is compiled on the program builder's thread (220 to 250 ms) and what
+  it draws is skipped until then; the cache in `save/shaders/` keeps it for
+  later launches. Loading a cached program takes about 2 ms, also beside
+  the GL thread.
+- **New-area frames.** A frame that brings many new textures and shaders
+  still takes 50 to 110 ms: the textures are decoded and the shaders
+  translated on the game's thread (about 1 ms and 0.7 to 0.9 ms each).
