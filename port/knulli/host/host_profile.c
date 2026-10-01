@@ -3,10 +3,11 @@ HOST_PROFILE.C
 
 A sampling profiler for the Knulli port, to find where a frame's time goes
 on the handheld, which has no perf. HALO_PROFILE_HZ=<rate> interrupts
-every thread of the process at that rate, after HALO_PROFILE_DELAY seconds
-(default 0), and records its program counter,
-link register and frame chain (the guest's frame records, and those of the
-host code that keeps them); HALO_PROFILE_FILE (default profile.txt in the
+every thread of the process at that rate (HALO_PROFILE_THREADS=game: the
+game's thread only), after HALO_PROFILE_DELAY seconds (default 0), and
+records its program counter, link register and frame chain (the guest's
+frame records, and those of the host code that keeps them), up to
+HALO_PROFILE_SAMPLES samples; HALO_PROFILE_FILE (default profile.txt in the
 data folder) receives them when the game exits, after the process's
 mappings and each thread's name and CPU time. port/knulli/profile.py turns
 the file into a report.
@@ -26,7 +27,8 @@ the file into a report.
 #include <unistd.h>
 
 #define PROFILE_SIGNAL SIGPROF
-#define PROFILE_DEPTH 8
+#define PROFILE_DEPTH 16
+/* samples kept, unless HALO_PROFILE_SAMPLES says otherwise (152 bytes each) */
 #define PROFILE_CAPACITY (256 * 1024)
 
 struct profile_sample
@@ -39,10 +41,16 @@ struct profile_sample
 };
 
 static struct profile_sample *samples;
+static uint32_t capacity = PROFILE_CAPACITY;
 static volatile uint32_t sample_count;
 static int profiling;
 /* set once the delay is over */
 static volatile int sampling;
+/* HALO_PROFILE_THREADS=game: only the game's thread (the one that starts
+the profiler) is interrupted, so that a high rate costs the others nothing
+and fills the samples with its own */
+static int game_only;
+static pid_t game_thread;
 static char profile_path[1024];
 static unsigned int profile_delay;
 
@@ -57,10 +65,10 @@ static void profile_handler(int signal_number, siginfo_t *information, void *con
 
 	(void)signal_number;
 	(void)information;
-	if (index >= PROFILE_CAPACITY)
+	if (index >= capacity)
 		return;
 	sample = &samples[index];
-	sample->tid = (int32_t)syscall(SYS_gettid);
+	sample->tid = game_only ? (int32_t)game_thread : (int32_t)syscall(SYS_gettid);
 	sample->pc = registers->pc;
 	sample->lr = registers->regs[30];
 	/* frame records on the stacks the host made for guest threads (below
@@ -97,8 +105,13 @@ static void *profile_thread(void *context)
 		struct dirent *entry;
 
 		nanosleep(&interval, NULL);
-		if (sample_count >= PROFILE_CAPACITY)
+		if (sample_count >= capacity)
 			continue;
+		if (game_only)
+		{
+			syscall(SYS_tgkill, process, game_thread, PROFILE_SIGNAL);
+			continue;
+		}
 		tasks = opendir("/proc/self/task");
 		if (!tasks)
 			continue;
@@ -119,6 +132,8 @@ void host_profile_start(const char *data_root)
 	const char *rate = getenv("HALO_PROFILE_HZ");
 	const char *file = getenv("HALO_PROFILE_FILE");
 	const char *delay = getenv("HALO_PROFILE_DELAY");
+	const char *kept = getenv("HALO_PROFILE_SAMPLES");
+	const char *which = getenv("HALO_PROFILE_THREADS");
 	struct sigaction action;
 	pthread_t thread;
 	long hertz;
@@ -126,7 +141,12 @@ void host_profile_start(const char *data_root)
 	hertz = rate && *rate ? atol(rate) : 0;
 	if (hertz <= 0)
 		return;
-	samples = calloc(PROFILE_CAPACITY, sizeof(*samples));
+	game_only = which && !strcmp(which, "game");
+	/* (the game's thread starts the profiler, before the guest's main) */
+	game_thread = (pid_t)syscall(SYS_gettid);
+	if (kept && *kept)
+		capacity = (uint32_t)atol(kept);
+	samples = calloc(capacity, sizeof(*samples));
 	if (!samples)
 		return;
 	if (file && *file)
@@ -157,10 +177,10 @@ void host_profile_mark(uint32_t frame, uint32_t microseconds)
 {
 	uint32_t index;
 
-	if (!sampling || sample_count >= PROFILE_CAPACITY)
+	if (!sampling || sample_count >= capacity)
 		return;
 	index = __sync_fetch_and_add(&sample_count, 1);
-	if (index >= PROFILE_CAPACITY)
+	if (index >= capacity)
 		return;
 	samples[index].tid = -1;
 	samples[index].depth = 0;
@@ -191,7 +211,7 @@ void host_profile_write(void)
 		return;
 	profiling = 0;
 	signal(PROFILE_SIGNAL, SIG_IGN);
-	count = sample_count < PROFILE_CAPACITY ? sample_count : PROFILE_CAPACITY;
+	count = sample_count < capacity ? sample_count : capacity;
 	output = fopen(profile_path, "w");
 	if (!output)
 		return;

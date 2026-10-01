@@ -124,6 +124,12 @@ Reports from other devices and firmware are welcome
   it draws is skipped until then; the cache in `save/shaders/` keeps it for
   later launches. Loading a cached program takes about 2 ms, also beside
   the GL thread.
-- **New-area frames.** A frame that brings many new textures and shaders
-  still takes 50 to 110 ms: the textures are decoded and the shaders
-  translated on the game's thread (about 1 ms and 0.7 to 0.9 ms each).
+- **New-area frames.** A frame that brings many new shaders can still take
+  50 to 60 ms: shaders are translated on the game's thread (about 0.5 ms
+  each). Textures are decoded and uploaded beside it, and what they are
+  drawn on appears a frame or a few late the first time.
+- **Checkpoints.** A checkpoint copies the 16 MB game state in about 14 ms
+  of the game's thread.
+- **Late frames.** A frame that takes longer than the last few is shown a
+  refresh after the one it was drawn for (in the b30 battle, up to one
+  frame in ten).

@@ -26,6 +26,11 @@ enum
 	_glthread_name_kinds
 };
 
+/* set on a thread with a context of its own that shares the GL thread's
+objects (the guest's texture worker): its calls go straight to the driver,
+on that context, rather than to the GL thread */
+extern __thread int glthread_direct;
+
 /* starts recording a queued call: room for its arguments (size bytes) and
 payload bytes after them; glthread_end queues it */
 void *glthread_begin(uint32_t function, size_t size, size_t payload);

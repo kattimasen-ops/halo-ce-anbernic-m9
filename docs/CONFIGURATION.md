@@ -97,6 +97,7 @@ launcher writes another value, the table says so.
 | [`display.screen_width`](#displayscreen_width) | integer | `0` | `640` | `HALO_SCREEN_WIDTH` (value) |
 | [`display.vsync`](#displayvsync) | boolean | `true` | | `HALO_NO_VSYNC` (set is false) |
 | [`display.interpolation`](#displayinterpolation) | boolean | `true` | `true` | `HALO_INTERPOLATION` (value) |
+| [`display.frame_pacing`](#displayframe_pacing) | boolean | `true` | | `HALO_FRAME_PACING` (value) |
 | [`debug.sort_models`](#debugsort_models) | boolean | `true` | | `HALO_SORT_MODELS` (value) |
 | [`debug.instance_models`](#debuginstance_models) | boolean | `true` | | `HALO_INSTANCE_MODELS` (value) |
 | [`debug.alpha_test_elision`](#debugalpha_test_elision) | boolean | `true` | | `HALO_ALPHA_TEST_ELISION` (value) |
@@ -108,6 +109,7 @@ launcher writes another value, the table says so.
 | [`debug.lod_bias`](#debuglod_bias) | real | `0.0` | | `HALO_DEBUG_LOD_BIAS` (value) |
 | [`debug.draw_callers`](#debugdraw_callers) | integer | `0` | | `HALO_DEBUG_DRAW_CALLERS` (value) |
 | [`debug.hitch_log`](#debughitch_log) | real | `0.0` | | `HALO_HITCH_LOG` (value) |
+| [`debug.async_textures`](#debugasync_textures) | boolean | `true` | | `HALO_ASYNC_TEXTURES` (value) |
 | [`audio.enabled`](#sound-and-language) | boolean | `true` | | `HALO_NO_AUDIO` (set is false) |
 | [`audio.volume`](#sound-and-language) | real | `1.0` | | `HALO_VOLUME` (value) |
 | [`game.language`](#sound-and-language) | string | `""` | | `HALO_LANGUAGE` (value) |
@@ -219,7 +221,8 @@ screen instead.
 
 Waits for the display between frames (a swap interval of 1); `false` draws
 as fast as possible. The host's `HALO_SWAP_INTERVAL` overrides the swap
-interval the game asks for.
+interval the game asks for. Frames are paced to the display only with vsync
+([`display.frame_pacing`](#displayframe_pacing)).
 
 **When to change it.** For measurements only. When a thread or the GPU is
 the limit, turning it off changes little: in the a30 opening on an earlier
@@ -234,8 +237,26 @@ build, every frame took 22 to 28 ms with and without vsync.
 Draws a frame for every display refresh, blending between the game's 30
 ticks a second; `false` keeps the original 30 frames a second.
 
-**When to change it.** `false` holds the game at 30 evenly paced frames a
-second, if you prefer that to a frame rate that varies between 30 and 60.
+**When to change it.** `false` holds the game at 30 frames a second, one a
+tick. With `display.frame_pacing`, a frame rate that varies between 30 and
+60 moves evenly too, so this is a matter of taste.
+
+### `display.frame_pacing`
+
+| Type | Default | Launcher | Variable |
+| --- | --- | --- | --- |
+| boolean | `true` | | `HALO_FRAME_PACING` |
+
+Shows each frame at the display refresh it was drawn for: the game takes
+the refresh a frame is due at as its clock for the frame, and the GL thread
+holds a frame that is ready early until then
+([Architecture](ARCHITECTURE.md#frame-pacing)). Motion then advances as the
+screen shows it, at any frame rate. It needs the Knulli host on an H700
+handheld's own screen (it reads where the display is in its refresh from
+the LCD timing controller) and vsync; elsewhere frames are not paced.
+
+**When to change it.** `false` shows each frame as soon as it is drawn, for
+comparison: the frame rate is the same, the motion less even.
 
 ## Renderer switches
 
@@ -400,6 +421,20 @@ the draws it skipped), so set `HALO_HITCH_LOG` rather than the file's
 setting to have all three. [Profiling](PROFILING.md#the-hitch-log) has
 examples.
 
+### `debug.async_textures`
+
+| Type | Default | Variable |
+| --- | --- | --- |
+| boolean | `true` | `HALO_ASYNC_TEXTURES` |
+
+Decodes textures and uploads them on a thread of their own, with a GL
+context of its own, rather than on the game's thread with the uploads
+queued to the GL thread. What a texture is drawn on appears once the
+texture is in, a frame or a few after it is first needed; a texture the game
+rewrites keeps its old contents until the new ones are in. It needs the
+Knulli host's GL thread (with `HALO_GL_THREAD=0` textures are uploaded as
+before).
+
 ## Sound and language
 
 | Setting | Type | Default | Variable | Effect |
@@ -444,7 +479,7 @@ most useful here are described in [Profiling](PROFILING.md).
 | `debug.gpu_debug_expression` | string | `""` | `HALO_GPU_DEBUG_EXPR` (value) | A GLSL expression every pixel shader shows instead of its result. |
 | `debug.gpu_debug_texture0` | boolean | `false` | `HALO_GPU_DEBUG_T0` (set is true) | Pixel shaders show their first texture. |
 | `debug.gpu_debug_flat` | boolean | `false` | `HALO_GPU_DEBUG_FLAT` (set is true) | Pixel shaders show their vertex colour. |
-| `debug.gl_debug` | boolean | `false` | `HALO_GL_DEBUG` (set is true) | Reports OpenGL errors in the log. |
+| `debug.gl_debug` | boolean | `false` | `HALO_GL_DEBUG` (set is true) | Reports OpenGL errors in the log, and checks each new framebuffer's completeness (a call that waits for the GL thread). |
 | `debug.screenshot_directory` | string | `""` | `HALO_SCREENSHOT_DIR` (value) | A folder to save frames to, with `screenshot_every`. |
 | `debug.screenshot_every` | integer | `0` | `HALO_SCREENSHOT_EVERY` (value) | Save every this many frames; 0 none. |
 | `debug.texture_dump_directory` | string | `""` | `HALO_TEXTURE_DUMP` (value) | A folder to write every texture to as it is uploaded. |
@@ -468,11 +503,14 @@ These are read directly by the host (`port/knulli/host/`,
 | `HALO_GPU_PASS_TIMING=1`, `2`, `3`, `4` | `host_glthread.c` | off | Finishes the GPU at each change of render target and times each pass; 2 and 3 trace one frame's passes and draws; 4 traces slow calls instead. Needs the GL thread. |
 | `HALO_PROFILE_HZ=<rate>` | `host_profile.c` | off | Samples every thread at this rate; the samples are written when the game exits. |
 | `HALO_PROFILE_DELAY=<seconds>` | `host_profile.c` | `0` | Starts the sampling this long after start-up. |
+| `HALO_PROFILE_SAMPLES=<count>` | `host_profile.c` | `262144` | The samples kept (152 bytes each); the sampling stops when they are taken. |
+| `HALO_PROFILE_THREADS=game` | `host_profile.c` | every thread | Samples only the game's thread (the one that marks its frames), so that a high rate costs the other threads nothing. |
 | `HALO_PROFILE_FILE=<path>` | `host_profile.c` | `profile.txt` in the data folder | Where the profile goes. Each of the game thread's frames is marked among the samples (`profile.py --frames-over`). |
 | `HALO_GL_THREAD=0` | `host_glthread.c` | on | Makes the GL calls on the game's thread, without the GL thread. |
 | `HALO_GL_THREAD_FRAMES=<n>` | `host_glthread.c` | `1` | How many frames the game may be ahead of the GL thread. |
 | `HALO_ASYNC_PROGRAMS=0` | `host_glthread.c` | on | Builds shader programs on the GL thread instead of the program builders' threads: a new program stalls the frame (about 2 ms from the cache, 220 to 250 ms compiled) instead of appearing late. |
 | `HALO_HITCH_LOG=<ms>` | `host_glthread.c`, `d3d8_gl.c` | off | The hitch log ([`debug.hitch_log`](#debughitch_log)). |
+| `HALO_PACING_LOG=1` | `host_glthread.c` | off | Logs every 300 frames how evenly the frames reached the display ([Profiling](PROFILING.md#halo_pacing_log)). |
 | `HALO_DEBUG_SKIP_GL=glA,glB` | `host_glthread.c` | none | The GL thread does not make these calls. Needs the GL thread. |
 | `HALO_SWAP_INTERVAL=<n>` | `host_sdl2.c` | the game's `display.vsync` | Overrides the swap interval; `0` turns vsync off. |
 | `HALO_AUDIO_SAMPLES=<n>` | `host_sdl2.c` | `1024` | SDL2's audio buffer, in sample frames. |

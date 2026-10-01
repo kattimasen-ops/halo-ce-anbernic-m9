@@ -133,7 +133,12 @@ I halo: guest image 88000000-88c38000, 203 imports (0 unavailable)
 
 Only types whose layout and register use agree between the two ABIs cross
 between guest and host: 32-bit and 64-bit integers, floats, and pointers,
-which `arm64_32` always passes zero-extended. Shared structures are made of
+which `arm64_32` always passes zero-extended in registers. A host function
+the guest imports directly (`port/android/host_imports.list`) takes at most
+eight integer arguments: a ninth goes on the stack, packed by its size,
+where the host reads an 8-byte slot, so that a pointer there arrives with
+the upper half of its slot undefined. The GL entry points widen such
+arguments (`tools/android_gl_stubs.py`). Shared structures are made of
 fixed-width members. SDL objects are 64-bit pointers in the host, so the
 guest holds small integer handles instead (`guest_sdl.c` on the guest's
 side, `port/knulli/host/host_sdl2.c` on the host's). `SDL_Event` has the
@@ -186,11 +191,26 @@ address into a pointer by setting the top bit
 
 musl's system calls go to `host_syscall` (`port/android/host/host_syscall.c`),
 which translates the guest's structures and calls the kernel. Files and
-sockets go through `posix_*` imports. The patch changes one thing here:
+sockets go through `posix_*` imports. The patch changes two things here:
 `clock_gettime` and `clock_getres` go through glibc, which reads the clock
 in the vDSO without entering the kernel, because the game reads the clock
-very often. The guest's musl has no time-zone database, so the host passes
+very often; and `QueryPerformanceCounter` (`xbox_kernel.c`) reads the CPU's
+generic timer (`CNTVCT_EL0`) itself, without a call into the host, since
+the game's profile timers read it around every texture it sets. It counts
+the same microseconds as `CLOCK_MONOTONIC`, from an offset taken at
+start-up, and reads again a value whose low bits are all ones or all zeros
+(as Linux does for some Allwinner timers). The guest's musl has no
+time-zone database, so the host passes
 the local offset as a POSIX `TZ` string.
+
+The game keeps its checkpoint, a copy of its game state (16 MB in the
+port), in `z:\savegame.bin`, as the Xbox did on its hard disk's cache
+partition. Here that is a file of the save folder, which on Knulli is a
+FUSE file system, and writing it took the game's thread about 80 ms at
+each checkpoint. The checkpoint is only read back in the session that wrote
+it (a revert; saved games proper are the profile's persistent storage), so
+`game_state_xbox.c` keeps it in memory instead: a 14 ms copy, into a buffer
+whose pages are made at start-up.
 
 ### Watching guest memory
 
@@ -429,6 +449,8 @@ replaces them as well:
 | `host_gl_buffer_write`, `host_gl_buffer_write_to` | Queued with a copy of the data; the GL thread copies it into the mapped buffer. |
 | `host_gl_buffer_persistent` | Queued: gives a stream buffer its storage and maps it for good. |
 | `host_gl_program_build` | Queued with the cache file's path and both shaders' sources: hands the program to the program builders (below). |
+| `host_gl_texture_thread` | Made on the calling thread, not queued: gives the guest's texture worker a context of its own (below), on which its GL calls are then made directly. |
+| `host_gl_frame_due` | Answered on the calling thread, not queued: how long until the refresh the frame the game begins is due at ([Frame pacing](#frame-pacing)), or 0. |
 | `host_gl_fence_frame`, `host_gl_wait_frame` | Queued: fence the frame's GPU work; wait for the GPU to finish the frame that last used a ring slot. |
 | `host_gl_visibility_frame` | Queued with the frame's test list: copies the visibility counters for reading later. |
 | `host_sdl_gl_swap_window` | Queued; then the game's thread waits for frame pacing (below). |
@@ -462,6 +484,12 @@ The builder finishes its context's work (`glFinish`) before it marks the
 program done, so the GL thread's context sees the finished program.
 `HALO_ASYNC_PROGRAMS=0` builds programs on the GL thread, as before.
 
+The same shared contexts serve the guest's texture worker
+([Textures](#textures)): `host_gl_texture_thread` makes one current on the
+calling thread, the guest's own, and marks the thread (`glthread_direct`,
+thread-local): the recording functions pass its calls straight to the
+driver, on its own context, rather than to the GL thread's queue.
+
 ### Frame pacing
 
 The game may be at most `HALO_GL_THREAD_FRAMES` frames (default 1) ahead of
@@ -471,6 +499,35 @@ counter of finished frames is itself the futex, so only swaps wake the
 game's thread, not every command. With one frame ahead, the game builds
 frame N+1 while the GL thread replays frame N and the GPU draws what the
 driver has flushed.
+
+Frames also wait for their refresh. Mali's swap on the framebuffer waits
+only while the display holds both buffers (above 60 frames a second), and
+the display takes the new buffer as its next refresh begins, so below 60 a
+frame reached the screen an unseen 0 to 16.7 ms after its swap. The game,
+meanwhile, blends between its 30 Hz ticks by its clock at the frame's
+start: frames begun 25 ms apart were shown 17 and 33 ms apart, and motion
+lurched. The kernel's `FBIO_WAITFORVSYNC` and `FBIOGET_VBLANK` do nothing
+on this device, but the H700's LCD timing controller has a debug register
+with the line being sent to the panel (`TCON_LCD0` at `0x06511000`, offset
+`0xfc`, bits 27 to 16). The GL thread maps it read-only through `/dev/mem`
+and measures a refresh at start-up (521 lines, 16.683 ms). As a frame
+begins, the game asks `host_gl_frame_due` how long it is until the refresh
+the frame is due at: the first it can be ready for, by the time the game's
+and the GL thread took to a frame's swap lately (the second longest of the
+last eight, and 1.5 ms for the swap), after the refresh of the frame before
+it. The game's clock for the frame is its performance counter plus that
+time, the moment the frame will be on screen (`halo_frame_due`,
+`main_update_time_unthrottled`), and the GL thread holds the frame's swap
+until the refresh before it has begun, so that a frame ready early is not
+shown early either. A frame that is late is shown at the first refresh
+after its swap. Over a two-minute walk through the b30 battle, 92% of
+frames now show the world as it is at the moment they are seen, against 40%
+before (in its heaviest stretches 83% against 8%), at the same frame rate;
+the others are a refresh late. The register is read only on an H616-family
+SoC (the H700 is one), and pacing stops if its line count stops (the HDMI
+output); it is off with vsync off (the swap interval in effect,
+`HALO_SWAP_INTERVAL` included) and with `display.frame_pacing` off.
+`HALO_PACING_LOG=1` reports it ([Profiling](PROFILING.md#halo_pacing_log)).
 
 ### Switches
 
@@ -548,7 +605,8 @@ be one level of a mipmapped texture (see
    not write them out to memory;
 3. clears the window's framebuffer and blits the back buffer into it,
    flipped and scaled up with linear filtering;
-4. swaps (queued to the GL thread);
+4. swaps (queued to the GL thread, which holds the swap until the refresh
+   before the frame's own: [Frame pacing](#frame-pacing));
 5. hands the frame's visibility tests to `host_gl_visibility_frame`, fences
    the frame's GPU work, moves to the next stream-buffer slot and waits (on
    the GL thread) until the GPU has finished the frame that last used it.
@@ -776,8 +834,22 @@ The decoded texels' memory is kept from one upload to the next.
 While decoding, the uploader also notes whether every texel has an alpha of
 1 (`description.opaque`), which the alpha test elision uses.
 
-Textures are decoded on the game's thread, when a draw first uses them;
-`glTexImage2D` is queued to the GL thread with a copy of the texels. A cached texture stays valid until a
+A texture is decoded when a draw first uses it. With
+`debug.async_textures` (the default, under the Knulli host's GL thread) a
+thread of the guest's own decodes it and uploads it on a context of its own
+that shares the GL thread's objects, finishing the upload (`glFinish`)
+before it marks the texture done: neither the game's thread nor the GL
+thread spends time on it. A palettized texture (Halo's bump maps, among the
+largest) goes with a copy of its palette. Until a texture's first upload is
+done, the draws that use it are skipped (`bind_textures` fails, and
+`prepare_draw` skips the draw); a texture uploaded again, after the game
+rewrote its memory, goes into a new GL texture and is drawn with its old
+contents until the new one is in. The worker's GL calls go through the same
+entry points as the game's thread's, whose hook (which draws the batched
+quads and held instanced draws before any other call) does nothing on
+another thread. With `debug.async_textures` off, textures are decoded on
+the game's thread and their `glTexImage2D` queued to the GL thread with a
+copy of the texels. A cached texture stays valid until a
 page it was read from is written (the memory watch above); textures unused
 for 1800 frames are dropped.
 

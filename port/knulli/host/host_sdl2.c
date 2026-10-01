@@ -222,6 +222,9 @@ int host_sdl_gl_make_current(uint32_t window, uint32_t context)
 	return SDL_GL_MakeCurrent(handle_get(window, _handle_window), handle_get(context, _handle_context)) == 0;
 }
 
+/* the swap interval in effect (host_sdl_gl_swap_interval) */
+static int swap_interval = 1;
+
 int host_sdl_gl_set_swap_interval(int interval)
 {
 	/* HALO_SWAP_INTERVAL overrides the game's display.vsync */
@@ -229,7 +232,15 @@ int host_sdl_gl_set_swap_interval(int interval)
 
 	if (setting && *setting)
 		interval = atoi(setting);
+	swap_interval = interval;
 	return SDL_GL_SetSwapInterval(interval) == 0;
+}
+
+/* whether swaps wait for the display, for frame pacing (host_glthread.c):
+the interval set last, the override included */
+int host_sdl_gl_swap_interval(void)
+{
+	return swap_interval;
 }
 
 /* the first number in a sysfs file, or 0 */

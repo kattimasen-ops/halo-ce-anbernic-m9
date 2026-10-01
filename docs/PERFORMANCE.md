@@ -288,6 +288,52 @@ Notes on the steps:
   their time from about 3.1 to about 0.7 seconds, and the longest during
   play from about 260 to about 110 ms; a30's frame rate did not change.
 
+- **Textures beside the renderer, and a cheaper clock.** The walk's long
+  frames were then mostly textures (about 1 ms each to decode on the game's
+  thread, and 0.1 to 6 ms each in `glTexImage2D` on the GL thread, tens of
+  them in a frame) and shader translation. A thread of the guest's own now
+  decodes textures and uploads them on a context of its own
+  ([Architecture](ARCHITECTURE.md#textures)), palettized ones (Halo's bump
+  maps, 14 to 16 ms each to decode on the game's thread at the largest)
+  with a copy of their palette: the walk's first 600 frames went from 46 ms
+  of textures on the game's thread to 1. The shader translators format
+  their text without `printf` (their own `%s`, `%c`, `%d`, `%u` and `%lu`,
+  and `xgpu_format` for the pixel translator's operands) and the layouts are
+  placed with one allocation and a table-driven scan of the identifiers:
+  shader translation went from 138 to 74 ms in those frames. A sampled
+  profile of the b30 battle showed the game's thread as its limit (it
+  hardly waits for the GL thread, which has 6 to 8 ms of slack), and 3% of
+  it in `QueryPerformanceCounter`, read around every texture set by the
+  game's profile timers through a call into the host; it now reads the
+  CPU's timer directly (21 ns). A framebuffer's completeness check, a call
+  that waited for the GL thread the first time a target was drawn into (the
+  sun's glow in b30), is made only with `debug.gl_debug`.
+
+- **The checkpoint.** The walk's longest frame during play, about 100 ms,
+  was the game's checkpoint: `game_state_save` writing its 16 MB game state
+  to `z:\savegame.bin`, a file on Knulli's FUSE file system, in 80 ms on
+  the game's thread. The checkpoint is kept in memory now
+  ([Architecture](ARCHITECTURE.md#system-calls-files-and-time)): a 14 ms
+  copy, into a buffer whose pages are made at start-up (the first copy into
+  fresh pages took 30 ms).
+
+- **Frames paced to the display.** With the hitches gone, what remained in
+  motion was its timing. Below 60 fps a frame reached the screen at the
+  first refresh after its swap, 0 to 16.7 ms later, while the game blends
+  between its ticks by its clock at the frame's start; over a two-minute
+  walk through the b30 battle the time between the two changed by more than
+  2 ms on 60% of frames, and by more than 12 ms on 25%. The H700's LCD
+  timing controller tells where the display is in its refresh, so each
+  frame is now given the refresh it is due at as it begins, the game times
+  the frame by it, and the GL thread holds a frame that is ready early
+  ([Architecture](ARCHITECTURE.md#frame-pacing)). 92% of frames now show the
+  world as it is at the moment they are seen; the rest are a refresh late.
+  The frame rate is unchanged (47 to 49 fps in the walk either way).
+
+- **A vertex shader's variant, found again.** Every draw looked for its
+  vertex shader's variant among up to 32 (0.2% of the game's thread, mostly
+  cache misses); it tries the one it found last first.
+
 ## What did not help, or was not the limit
 
 - **The shadows' textures at the start of the window.** Drawing every
@@ -312,7 +358,20 @@ Notes on the steps:
   close to the battle's run-to-run noise. No single feature was expensive;
   the cost is spread over many draws.
 - **Three framebuffers instead of two.** No change (a30 at 0.75: 24.0 and
-  23.9 fps).
+  23.9 fps). Measured again in the b30 battle at about 40 fps: no change
+  either.
+- **A swap interval of 2.** Mali's fbdev driver ignores it (still 60 fps);
+  the frame pacing above does what it would have.
+- **`-O3` for the guest.** No change in the b30 battle (within its noise).
+- **Inlining `datum_get` and `tag_block_get_element_with_size`** (5.5% and
+  1.2% of the game's thread in the b30 battle, called across files, so
+  never inlined without link-time optimisation): no measurable change. Their
+  cost is the cache misses on the game's data, not the calls.
+- **The ten-millisecond draw in the GPU's per-draw trace.** One draw of b30
+  (a seven-vertex fan with additive blending) took 10 ms in the per-draw
+  trace (`HALO_GPU_PASS_TIMING=3`); skipping every draw of its vertex
+  shader gained 1 to 3 fps. The trace finishes the GPU after each draw, so a
+  draw can carry work queued before it.
 - **Letting the game run two frames ahead of the GL thread**
   (`HALO_GL_THREAD_FRAMES=2`). No change (25.7 fps either way).
 - **Clearing the blur target first**, so that the tiler does not read its old
@@ -343,5 +402,8 @@ of them have to come down. The ideas with the most expected payoff:
    upstream's x86 Linux profile).
 
 Since then the game's thread has become cheaper (see the last notes in the
-history above), and a30 runs at 53 to 57 fps, limited by the GPU.
+history above), and a30 runs at 53 to 57 fps, limited by the GPU. In the
+b30 battle the game's thread is the limit: of its time, about 48% is
+drawing (the game's renderer and the Direct3D translation), 23% the game's
+tick (objects, AI, collision) and 14% waiting for the GL thread.
 [Roadmap](ROADMAP.md) keeps the current list of limits and planned work.

@@ -29,6 +29,7 @@ HALO_GL_THREAD=0 makes the calls on the game's thread, as before.
 #include "host_knulli.h"
 
 #include <EGL/egl.h>
+#include <fcntl.h>
 #include <linux/futex.h>
 #include <pthread.h>
 #include <sched.h>
@@ -316,8 +317,261 @@ struct waits
 };
 static struct waits producer_waits, frame_waits;
 static int measure_waits;
-/* the start of the game's thread's frame (its last swap) */
-static uint64_t game_frame_start;
+/* ---------- frame pacing
+
+The game blends between its 30 Hz ticks by its clock at the start of a
+frame (port/linux/game/render_interpolation.c), and the frame reaches the
+display at the first refresh after the GL thread swaps it: on the
+framebuffer, Mali's swap waits only while the display holds both buffers
+(above 60 frames a second), and the display takes the new one as its next
+refresh begins. So a frame shows the world as it was a varying time before
+it is seen, its time on the two threads and up to a refresh more, and
+frames begun 25 ms apart are shown 17 and 33 ms apart: motion lurches.
+
+The H700's LCD timing controller tells where the display is in its refresh:
+its debug register holds the line being sent to the panel, and a buffer
+swapped is shown from the next line 0. With it each frame is given, as it
+begins, the refresh it is due at: the first it can be ready for (by the
+time the game's and the GL thread took to a frame's swap lately, the
+second longest of eight) after the one of the frame before it. The game
+times the frame by it (host_gl_frame_due), and the GL thread holds the
+frame's swap until the refresh before it has begun, so that a frame ready
+early is not shown early either. A frame that is late is shown at the first
+refresh after its swap. Frames are not paced without the timing controller
+(another device, the HDMI output, a line count that stopped), with vsync
+off, or with display.frame_pacing off (the game does not ask).
+
+HALO_PACING_LOG=1 reports every 300 frames how many refreshes the frames
+stayed on screen, and how the time from the moment a frame shows the world
+at (its due refresh, or unpaced its start) to the refresh it was shown at
+changed from one frame to the next: motion is even while it stays the
+same. */
+
+#define FRAME_HISTORY 16
+/* time the swap itself takes, before the refresh it is for begins: a swap
+that took longer waited for the display */
+#define SWAP_GUARD_NS 1500000ull
+/* how far into the refresh before its own a held swap is made */
+#define HOLD_MARGIN_NS 300000ull
+
+/* the H700's LCD timing controller: its debug register's bits 27 to 16
+hold the line being sent to the panel */
+#define TCON_LCD0 0x06511000
+#define TCON_DEBUG 0xFC
+
+static volatile const uint32_t *scanout;
+static uint32_t scanout_lines;
+static uint64_t refresh_ns;
+/* set once the line count is found stopped */
+static int scanout_stopped;
+/* whether swaps wait for the display: the swap interval in effect is not 0 */
+static int vsync_on = 1;
+static int pacing_log;
+
+/* the latest frames, by number (producer.frames_submitted): the game's
+thread notes when it began each and the refresh it is due at, the GL
+thread when it reached the frame's swap */
+struct frame_times
+{
+	uint64_t start, due, ready;
+};
+static struct frame_times frame_times[FRAME_HISTORY];
+
+struct swap_call
+{
+	uint32_t window;
+	uint32_t frame;
+};
+
+static uint32_t scanout_line(void)
+{
+	return scanout[TCON_DEBUG / 4] >> 16 & 0xfff;
+}
+
+/* when the refresh the display is in began, and the time now */
+static uint64_t refresh_begun(uint64_t *now)
+{
+	uint32_t line = scanout_line();
+
+	*now = host_monotonic_ns();
+	return *now - (uint64_t)line * refresh_ns / scanout_lines;
+}
+
+/* whether the SoC is of the H616 family (the H700 is one), whose LCD timing
+controller the register is */
+static int scanout_soc(void)
+{
+	char compatible[256];
+	int fd = open("/proc/device-tree/compatible", O_RDONLY);
+	ssize_t length = fd < 0 ? -1 : read(fd, compatible, sizeof(compatible));
+
+	if (fd >= 0)
+		close(fd);
+	return length > 0 && memmem(compatible, (size_t)length, "sun50iw9", 8) != NULL;
+}
+
+/* maps the register (read only) and measures a refresh, on the GL thread
+at start-up */
+static void scanout_open(void)
+{
+	uint64_t wraps[2] = { 0, 0 }, start, moved;
+	uint32_t previous = 0, lines = 0;
+	void *page = MAP_FAILED;
+	int fd, count = 0;
+
+	if (scanout_soc() && (fd = open("/dev/mem", O_RDONLY | O_SYNC)) >= 0)
+	{
+		page = mmap(NULL, 0x1000, PROT_READ, MAP_SHARED, fd, TCON_LCD0);
+		close(fd);
+	}
+	if (page != MAP_FAILED)
+	{
+		/* two wraps of the line count, a refresh apart, and the last line;
+		a count that stays for 2 ms (a line takes 32 us) is not scanning */
+		scanout = page;
+		start = moved = host_monotonic_ns();
+		while (count < 2)
+		{
+			uint32_t line = scanout_line();
+			uint64_t now = host_monotonic_ns();
+
+			if (line != previous)
+				moved = now;
+			if (now - moved > 2000000ull || now - start > 60000000ull)
+				break;
+			if (line < previous)
+				wraps[count++] = now;
+			if (line > lines)
+				lines = line;
+			previous = line;
+		}
+	}
+	if (count < 2 || lines < 100 || wraps[1] - wraps[0] < 10000000ull || wraps[1] - wraps[0] > 30000000ull)
+	{
+		if (page != MAP_FAILED)
+			munmap(page, 0x1000);
+		scanout = NULL;
+		host_logf(HOST_LOG_INFO, "frames are not paced: no display timing to read");
+		return;
+	}
+	scanout_lines = lines + 1;
+	refresh_ns = wraps[1] - wraps[0];
+	host_logf(HOST_LOG_INFO, "frames are paced to the display: %u lines, %.3f ms a refresh", scanout_lines,
+		refresh_ns / 1e6);
+}
+
+/* host_gl_frame_due, on the game's thread as a frame begins: how long from
+now until the refresh it is due at, in microseconds, or 0 */
+static long long threaded_gl_frame_due(void)
+{
+	static uint32_t last_line, stalls;
+	static uint64_t last_time;
+	uint32_t frame = producer.frames_submitted + 1, line;
+	uint32_t done = __atomic_load_n(&consumer.frames_done, __ATOMIC_ACQUIRE);
+	const struct frame_times *previous = &frame_times[(frame - 1) % FRAME_HISTORY];
+	uint64_t longest = 0, second = 0, now, begun, due;
+	int index;
+
+	if (!scanout || scanout_stopped || !vsync_on || done < FRAME_HISTORY)
+		return 0;
+	line = scanout_line();
+	now = host_monotonic_ns();
+	/* the line count stopped (the display went to another output): the same
+	line again, after a time that is no whole number of refreshes */
+	if (line == last_line)
+	{
+		uint64_t phase = (now - last_time) % refresh_ns, tolerance = 2 * refresh_ns / scanout_lines;
+
+		if (phase > tolerance && phase < refresh_ns - tolerance && ++stalls == 3)
+		{
+			scanout_stopped = 1;
+			host_logf(HOST_LOG_INFO, "frames are no longer paced: the display timing stopped");
+			return 0;
+		}
+	}
+	else
+		stalls = 0;
+	last_line = line;
+	last_time = now;
+	for (index = 0; index < 8; index++)
+	{
+		const struct frame_times *past = &frame_times[(done - (uint32_t)index) % FRAME_HISTORY];
+		uint64_t latency = past->ready - past->start;
+
+		if (latency > longest)
+		{
+			second = longest;
+			longest = latency;
+		}
+		else if (latency > second)
+			second = latency;
+	}
+	begun = now - (uint64_t)line * refresh_ns / scanout_lines;
+	due = begun + (now + second + SWAP_GUARD_NS - begun + refresh_ns - 1) / refresh_ns * refresh_ns;
+	if (previous->due && due < previous->due + refresh_ns)
+		due = previous->due + refresh_ns;
+	frame_times[frame % FRAME_HISTORY].due = due;
+	return (long long)((due - now) / 1000);
+}
+
+/* on the GL thread, before a frame's swap: held until the refresh before
+the one it is due at has begun (give or take a line) */
+static void frame_hold(uint32_t frame)
+{
+	uint64_t due = frame_times[frame % FRAME_HISTORY].due, now;
+	struct timespec until;
+
+	if (!due)
+		return;
+	until.tv_sec = (time_t)((due - refresh_ns + HOLD_MARGIN_NS) / 1000000000ull);
+	until.tv_nsec = (long)((due - refresh_ns + HOLD_MARGIN_NS) % 1000000000ull);
+	while (refresh_begun(&now) + refresh_ns / 2 < due - refresh_ns)
+		clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &until, NULL);
+}
+
+/* on the GL thread, a frame's swap made at swapped and done: HALO_PACING_LOG's
+counts of the refresh it was shown at */
+static void frame_shown(uint32_t frame, uint64_t swapped)
+{
+	static uint64_t previous_shown;
+	static int64_t previous_lag;
+	static unsigned long frames, refreshes[4], changes[4], late;
+	const struct frame_times *times = &frame_times[frame % FRAME_HISTORY];
+	uint64_t now, begun, shown, moment;
+	int64_t lag;
+
+	if (!scanout || !pacing_log)
+		return;
+	begun = refresh_begun(&now);
+	/* a swap that waited for the display returns as the refresh showing it
+	begins; one that did not is shown from the next */
+	shown = now - swapped > SWAP_GUARD_NS ? begun : begun + refresh_ns;
+	moment = times->due ? times->due : times->start;
+	lag = (int64_t)(shown - moment);
+	if (previous_shown)
+	{
+		uint64_t count = (shown - previous_shown + refresh_ns / 2) / refresh_ns;
+		double change = (double)llabs(lag - previous_lag) / 1e6;
+
+		refreshes[count <= 1 ? 0 : count == 2 ? 1 : count == 3 ? 2 : 3]++;
+		changes[change < 2.0 ? 0 : change < 6.0 ? 1 : change < 12.0 ? 2 : 3]++;
+		late += times->due && shown > times->due + refresh_ns / 2;
+		if (++frames == 300)
+		{
+			host_logf(HOST_LOG_INFO, "pacing: shown for 1 refresh %lu, 2 %lu, 3 %lu, more %lu; %s, the time from "
+				"what a frame shows to its showing changing by under 2 ms %lu times, 2 to 6 ms %lu, 6 to 12 ms %lu, "
+				"more %lu", refreshes[0], refreshes[1], refreshes[2], refreshes[3],
+				times->due ? "paced" : "not paced", changes[0], changes[1], changes[2], changes[3]);
+			if (times->due)
+				host_logf(HOST_LOG_INFO, "pacing: %lu of 300 frames shown after their refresh", late);
+			frames = late = 0;
+			memset(refreshes, 0, sizeof(refreshes));
+			memset(changes, 0, sizeof(changes));
+		}
+	}
+	previous_shown = shown;
+	previous_lag = lag;
+}
 
 /* HALO_HITCH_LOG=<ms>: the frames longer than that, as each thread sees them.
 The game's thread's: its waits. The GL thread's: how much of it it spent on
@@ -920,6 +1174,7 @@ void host_gl_wait_frame(uint32_t slot);
 uint32_t host_sdl_gl_create_context(uint32_t window);
 int host_sdl_gl_make_current(uint32_t window, uint32_t context);
 int host_sdl_gl_set_swap_interval(int interval);
+int host_sdl_gl_swap_interval(void);
 int host_sdl_gl_swap_window(uint32_t window);
 
 struct buffer_write
@@ -1018,8 +1273,14 @@ struct builder
 
 static struct builder loader = { "halo-load", 0, PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER };
 static struct builder compiler = { "halo-compile", 5, PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER };
-static EGLDisplay builder_display;
 static int builders_running;
+/* the GL thread's context, whose objects the contexts made current on other
+threads share (the program builders, and the guest's texture worker) */
+static EGLDisplay share_display;
+static EGLContext share_context = EGL_NO_CONTEXT;
+static EGLConfig share_config;
+static EGLint share_attributes[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
+__thread int glthread_direct;
 /* the programs being built, by name; one that cannot be stays unbuildable,
 its draws skipped */
 static struct program_job **jobs;
@@ -1061,10 +1322,51 @@ static struct program_job *builder_pop(struct builder *builder)
 	return job;
 }
 
+/* on the GL thread, once its context is made */
+static void share_initialize(void)
+{
+	EGLint config_id = 0, version = 3, count = 0;
+	EGLint config_attributes[] = { EGL_CONFIG_ID, 0, EGL_NONE };
+
+	share_display = eglGetCurrentDisplay();
+	share_context = eglGetCurrentContext();
+	eglQueryContext(share_display, share_context, EGL_CONFIG_ID, &config_id);
+	eglQueryContext(share_display, share_context, EGL_CONTEXT_CLIENT_VERSION, &version);
+	config_attributes[1] = config_id;
+	share_attributes[1] = version;
+	if (!eglChooseConfig(share_display, config_attributes, &share_config, 1, &count) || count != 1)
+		share_context = EGL_NO_CONTEXT;
+}
+
+/* a context that shares the GL thread's objects, or EGL_NO_CONTEXT */
+static EGLContext share_new(void)
+{
+	return share_context == EGL_NO_CONTEXT ? EGL_NO_CONTEXT :
+		eglCreateContext(share_display, share_config, share_context, share_attributes);
+}
+
+/* such a context current on the calling thread, without a surface
+(EGL_KHR_surfaceless_context): whether it is */
+static int share_make_current(EGLContext context)
+{
+	return context != EGL_NO_CONTEXT && eglMakeCurrent(share_display, EGL_NO_SURFACE, EGL_NO_SURFACE, context);
+}
+
+/* host_gl_texture_thread: a shared context of its own, current on the
+guest's texture worker's thread (xbox_textures.c), which then makes its GL
+calls itself */
+static int threaded_gl_texture_thread(void)
+{
+	if (!share_make_current(share_new()))
+		return 0;
+	glthread_direct = 1;
+	return 1;
+}
+
 static void *builder_main(void *argument)
 {
 	struct builder *builder = argument;
-	int current = eglMakeCurrent(builder_display, EGL_NO_SURFACE, EGL_NO_SURFACE, builder->context);
+	int current = share_make_current(builder->context);
 
 	setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), builder->nice);
 	__atomic_store_n(&builder->state, current ? 1u : 2u, __ATOMIC_SEQ_CST);
@@ -1106,32 +1408,19 @@ static void builders_start(void)
 {
 	struct builder *builders[] = { &loader, &compiler };
 	const char *setting = getenv("HALO_ASYNC_PROGRAMS");
-	EGLContext shared = eglGetCurrentContext();
-	EGLint config_id = 0, version = 3, count = 0;
-	EGLint config_attributes[] = { EGL_CONFIG_ID, 0, EGL_NONE };
-	EGLint context_attributes[] = { EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE };
-	EGLConfig config;
 	unsigned int index = 0;
 
 	if (builders_running || (setting && *setting == '0'))
 		return;
-	builder_display = eglGetCurrentDisplay();
-	eglQueryContext(builder_display, shared, EGL_CONFIG_ID, &config_id);
-	eglQueryContext(builder_display, shared, EGL_CONTEXT_CLIENT_VERSION, &version);
-	config_attributes[1] = config_id;
-	context_attributes[1] = version;
-	if (eglChooseConfig(builder_display, config_attributes, &config, 1, &count) && count == 1)
+	for (; index < 2; index++)
 	{
-		for (; index < 2; index++)
-		{
-			pthread_t builder_thread;
+		pthread_t builder_thread;
 
-			builders[index]->context = eglCreateContext(builder_display, config, shared, context_attributes);
-			if (builders[index]->context == EGL_NO_CONTEXT ||
-				pthread_create(&builder_thread, NULL, builder_main, builders[index]) != 0)
-				break;
-			pthread_setname_np(builder_thread, builders[index]->name);
-		}
+		builders[index]->context = share_new();
+		if (builders[index]->context == EGL_NO_CONTEXT ||
+			pthread_create(&builder_thread, NULL, builder_main, builders[index]) != 0)
+			break;
+		pthread_setname_np(builder_thread, builders[index]->name);
 	}
 	/* each makes its context current on its own thread */
 	builders_running = index == 2;
@@ -1430,6 +1719,8 @@ static void run_create_context(void *context)
 			if (!reserves[kind].count)
 				refill(kind, RESERVE_REFILL);
 		}
+		share_initialize();
+		scanout_open();
 		builders_start();
 	}
 }
@@ -1485,6 +1776,8 @@ static void run_swap_interval(void *context)
 	struct word_call *call = context;
 
 	call->result = (uint32_t)host_sdl_gl_set_swap_interval(call->c);
+	/* frames that do not wait for the display have no refresh to be due at */
+	vsync_on = host_sdl_gl_swap_interval() != 0;
 }
 
 static int synced_sdl_gl_set_swap_interval(int interval)
@@ -1513,6 +1806,12 @@ static const char *slow_name(int slot)
 
 static void run_swap(const void *data)
 {
+	const struct swap_call *call = data;
+	uint64_t swapped = 0;
+
+	/* (frame pacing: when the GL thread reached the frame's swap) */
+	if (scanout)
+		frame_times[call->frame % FRAME_HISTORY].ready = host_monotonic_ns();
 	if (bind_trace)
 	{
 		uint64_t start = host_monotonic_ns();
@@ -1545,7 +1844,13 @@ static void run_swap(const void *data)
 				"in %lu frames, while theirs were", __atomic_load_n(&programs_built, __ATOMIC_RELAXED),
 				__atomic_load_n(&programs_compiled, __ATOMIC_RELAXED), skipped_draws, skipped_frames);
 	}
-	host_sdl_gl_swap_window(*(const uint32_t *)data);
+	if (scanout)
+	{
+		frame_hold(call->frame);
+		swapped = host_monotonic_ns();
+	}
+	host_sdl_gl_swap_window(call->window);
+	frame_shown(call->frame, swapped);
 	if (hitch_on)
 	{
 		memset(&gl_hitch, 0, sizeof(gl_hitch));
@@ -1568,14 +1873,17 @@ static void waits_add(struct waits *total, const struct waits *frame)
 static int queued_sdl_gl_swap_window(uint32_t window)
 {
 	uint32_t submitted = ++producer.frames_submitted;
-	uint64_t start, now;
+	struct swap_call call = { window, submitted };
+	/* when this frame began (its previous swap's wait ended), and the next */
+	uint64_t start = frame_times[submitted % FRAME_HISTORY].start, waited, now;
+	struct frame_times *next = &frame_times[(submitted + 1) % FRAME_HISTORY];
 
-	glthread_host(run_swap, &window, sizeof(window));
+	glthread_host(run_swap, &call, sizeof(call));
 	publish();
 	/* at most frames_ahead frames queued behind the one on screen: the
 	counter is the futex, so that only swaps wake the game, not every
 	command the GL thread makes */
-	start = measure_waits ? host_monotonic_ns() : 0;
+	waited = measure_waits ? host_monotonic_ns() : 0;
 	for (;;)
 	{
 		uint32_t done = __atomic_load_n(&consumer.frames_done, __ATOMIC_ACQUIRE);
@@ -1584,28 +1892,27 @@ static int queued_sdl_gl_swap_window(uint32_t window)
 			break;
 		wait_while_equal(&consumer.frames_done, done, SPIN_LIMIT);
 	}
-	if (!measure_waits && !host_profile_sampling())
-		return 1;
 	now = host_monotonic_ns();
+	next->start = now;
+	next->due = 0;
 	if (measure_waits)
 	{
 		frame_waits.frame_waits++;
-		frame_waits.frame_ns += now - start;
+		frame_waits.frame_ns += now - waited;
 		if (timing)
 			waits_add(&producer_waits, &frame_waits);
-		if (hitch_on && game_frame_start && (now - game_frame_start) / 1e6 > hitch_ms)
+		if (hitch_on && start && (now - start) / 1e6 > hitch_ms)
 		{
 			host_logf(HOST_LOG_INFO, "hitch: game thread %.1f ms frame; waited %.1f ms for room in the queue (%u times), "
-				"%.1f ms in %u synchronous calls, %.1f ms for the frame before", (now - game_frame_start) / 1e6,
+				"%.1f ms in %u synchronous calls, %.1f ms for the frame before", (now - start) / 1e6,
 				frame_waits.room_ns / 1e6, (unsigned int)frame_waits.room_waits, frame_waits.sync_ns / 1e6,
-				(unsigned int)frame_waits.syncs, (now - start) / 1e6);
+				(unsigned int)frame_waits.syncs, (now - waited) / 1e6);
 		}
 		memset(&frame_waits, 0, sizeof(frame_waits));
 	}
 	/* for the profiler: where each frame ends among its samples */
-	if (game_frame_start)
-		host_profile_mark(submitted, (uint32_t)((now - game_frame_start) / 1000));
-	game_frame_start = now;
+	if (start && host_profile_sampling())
+		host_profile_mark(submitted, (uint32_t)((now - start) / 1000));
 	return 1;
 }
 
@@ -1619,9 +1926,11 @@ static int glthread_enabled(void)
 		const char *frames = getenv("HALO_GL_THREAD_FRAMES");
 		const char *timing = getenv("HALO_GPU_PASS_TIMING");
 		const char *hitch = getenv("HALO_HITCH_LOG");
+		const char *pacing = getenv("HALO_PACING_LOG");
 
 		hitch_ms = hitch ? atof(hitch) : 0.0;
 		hitch_on = hitch_ms > 0.0;
+		pacing_log = pacing && *pacing && *pacing != '0';
 
 		enabled = !(setting && *setting == '0');
 		pass_timing = timing && *timing && *timing != '0';
@@ -1670,6 +1979,8 @@ void *host_import_wrap(const char *name, void *function)
 		{ "host_gl_buffer_write", (void *)queued_gl_buffer_write },
 		{ "host_gl_buffer_persistent", (void *)queued_gl_buffer_persistent },
 		{ "host_gl_program_build", (void *)queued_gl_program_build },
+		{ "host_gl_texture_thread", (void *)threaded_gl_texture_thread },
+		{ "host_gl_frame_due", (void *)threaded_gl_frame_due },
 		{ "host_gl_buffer_write_to", (void *)queued_gl_buffer_write_to },
 		{ "host_gl_fence_frame", (void *)queued_gl_fence_frame },
 		{ "host_gl_wait_frame", (void *)queued_gl_wait_frame },

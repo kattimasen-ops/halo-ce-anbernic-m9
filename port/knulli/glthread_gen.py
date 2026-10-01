@@ -20,6 +20,9 @@ GL thread:
   program's uniforms ask host_glthread.c first: a program stays unbound while
   threads of its own build it, the draws made with it are skipped and the
   uniforms set for it kept.
+
+A thread with a context of its own (glthread_direct, the guest's texture
+worker) calls the driver's function directly instead.
 """
 
 import os
@@ -98,6 +101,15 @@ def current_program_call(arguments):
     return bool(arguments) and arguments[0][1] == "location"
 
 
+def direct_call(name, result, arguments, pointer_type):
+    """the start of a recording function: on a thread with a context of its
+    own, the driver's call itself"""
+    invocation = f"(({pointer_type})driver[glthread_{name}])({', '.join(argument for _, argument in arguments)})"
+    if result != "void":
+        return f"\tif (glthread_direct)\n\t\treturn {invocation};"
+    return f"\tif (glthread_direct)\n\t{{\n\t\t{invocation};\n\t\treturn;\n\t}}"
+
+
 def main():
     imports_path, header, output = sys.argv[1:4]
     names = [line.strip()[len("hostgl_"):] for line in open(imports_path) if line.startswith("hostgl_")]
@@ -128,6 +140,7 @@ def main():
             invocation = f"(({pointer_type})driver[glthread_{name}])({', '.join('call->' + a for _, a in arguments)})"
             emit(f"\t(void)call;\n\t{'call->result = ' if result != 'void' else ''}{invocation};\n}}\n")
             emit(f"static {result} GL_APIENTRY record_{name}({parameters})\n{{")
+            emit(direct_call(name, result, arguments, pointer_type))
             initial = ", ".join(f".{a} = {a}" for _, a in arguments)
             emit(f"\tstruct sync_{name} call = {{ {initial} }};\n" if initial else f"\tstruct sync_{name} call = {{ 0 }};\n")
             emit(f"\tglthread_sync(sync_run_{name}, &call);")
@@ -137,7 +150,8 @@ def main():
             continue
         if name in CREATED:
             emit(f"static GLuint GL_APIENTRY record_{name}(void)\n{{")
-            emit(f"\tGLuint name;\n\n\tglthread_reserved_names(_glthread_{CREATED[name]}, 1, &name);\n\treturn name;\n}}\n")
+            emit(f"\tGLuint name;\n\n{direct_call(name, result, arguments, pointer_type)}")
+            emit(f"\tglthread_reserved_names(_glthread_{CREATED[name]}, 1, &name);\n\treturn name;\n}}\n")
             emit(f"static void glthread_generate_{CREATED[name]}(GLsizei n, GLuint *names)\n{{")
             emit(f"\tGLsizei index;\n\n\tfor (index = 0; index < n; index++)")
             emit(f"\t\tnames[index] = ((GLuint (GL_APIENTRY *)(void))driver[glthread_{name}])();\n}}\n")
@@ -145,6 +159,7 @@ def main():
         if name in RESERVED:
             # (GLsizei n, GLuint *names)
             emit(f"static void GL_APIENTRY record_{name}(GLsizei n, GLuint *names)\n{{")
+            emit(direct_call(name, result, [("GLsizei", "n"), ("GLuint *", "names")], pointer_type))
             emit(f"\tglthread_reserved_names(_glthread_{RESERVED[name]}, n, names);\n}}\n")
             emit(f"static void glthread_generate_{RESERVED[name]}(GLsizei n, GLuint *names)\n{{")
             emit(f"\t((void (GL_APIENTRY *)(GLsizei, GLuint *))driver[glthread_{name}])(n, names);\n}}\n")
@@ -158,6 +173,7 @@ def main():
             f"\t{'uintptr_t' if is_pointer(kind) else kind} {argument};\n" for kind, argument in arguments)
         emit(f"struct queued_{name}\n{{\n{fields or chr(9) + 'char unused;' + chr(10)}}};\n")
         emit(f"static void GL_APIENTRY record_{name}({parameters})\n{{")
+        emit(direct_call(name, result, arguments, pointer_type))
         if name in HOOKS:
             emit(f"\t{HOOKS[name]}")
         size = payload[1] if payload else "0"

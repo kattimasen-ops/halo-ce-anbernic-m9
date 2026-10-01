@@ -94,7 +94,8 @@ before `./halo`) and read `halo/log.txt` after the run.
 | One frame's passes, draws | `HALO_GPU_PASS_TIMING=2`, `3` | `trace:`, `draw:` lines | Large, for one frame |
 | Slow calls | `HALO_GPU_PASS_TIMING=4` | `call:` lines | Small, for three frames |
 | Long frames and what they did | `HALO_HITCH_LOG=<ms>` | `hitch:`, `hitch summary` and `programs:` lines | Small |
-| Sampling profiler | `HALO_PROFILE_HZ=<rate>` | `profile.txt`, read with `profile.py` | A signal per thread per sample |
+| How evenly frames reach the display | `HALO_PACING_LOG=1` | `pacing:` lines | None measurable |
+| Sampling profiler | `HALO_PROFILE_HZ=<rate>` | `profile.txt`, read with `profile.py` | A signal per thread per sample (`HALO_PROFILE_THREADS=game`: the game's thread only) |
 | Draw callers, repeated draws, sorting | `HALO_DEBUG_DRAW_CALLERS=1` to `4` | `draw callers`, `draw signatures`, `sorted models` lines | Small; 4 removes draws |
 | Frozen state | `HALO_DEBUG_FREEZE=textures,program,raster` | frame rate | Wrong picture |
 | No pixels | `HALO_DEBUG_TINY_SCISSOR=1` | frame rate, GPU time | Wrong picture |
@@ -358,16 +359,40 @@ programs the builders made (compiled ones apart) and the draws skipped
 while they did. The host's two lines need the variable; the setting in
 `config.toml` reaches only the renderer's.
 
+## HALO_PACING_LOG
+
+`HALO_PACING_LOG=1` (`host_glthread.c`) logs every 300 frames how they
+reached the display, from the H700's display timing
+([Architecture](ARCHITECTURE.md#frame-pacing)): how many refreshes each
+frame stayed on screen, and how the time from the moment a frame shows the
+world at (its due refresh when paced, its start when not) to the refresh it
+was shown at changed from one frame to the next. Motion is even while that
+time stays the same. From the b30 battle with the walk bot, paced and then
+not (`HALO_FRAME_PACING=0`):
+
+```
+pacing: shown for 1 refresh 203, 2 93, 3 4, more 0; paced, the time from what a frame shows to its showing changing by under 2 ms 266 times, 2 to 6 ms 0, 6 to 12 ms 0, more 34
+pacing: 22 of 300 frames shown after their refresh
+pacing: shown for 1 refresh 194, 2 102, 3 4, more 0; not paced, the time from what a frame shows to its showing changing by under 2 ms 102 times, 2 to 6 ms 51, 6 to 12 ms 10, more 137
+```
+
+Paced, the time changes only when a frame is late, and then by a refresh;
+not paced, it changes on most frames.
+
 ## HALO_PROFILE_HZ and profile.py
 
 The handheld has no `perf`. `HALO_PROFILE_HZ=<rate>`
 (`port/knulli/host/host_profile.c`) starts a thread that sends `SIGPROF` to
 every thread of the process at that rate, after `HALO_PROFILE_DELAY`
 seconds. Each sample records the thread, the program counter, the link
-register and up to eight frame records. Frame records are followed only on
-stacks the host made for guest threads, so the game's threads get their
+register and up to sixteen frame records. Frame records are followed only
+on stacks the host made for guest threads, so the game's threads get their
 call chains, and the GL thread and the driver's threads get their function
-and its caller only. Up to 262,144 samples are kept.
+and its caller only. Up to 262,144 samples are kept (`HALO_PROFILE_SAMPLES`,
+152 bytes each). `HALO_PROFILE_THREADS=game` interrupts only the game's
+thread, the one that marks its frames: at 2,000 samples a second a
+two-minute walk gives about 200,000 of its samples, 30 to 80 in each long
+frame, without the cost of interrupting the others.
 
 The samples are written when the game exits, to `HALO_PROFILE_FILE`
 (default `profile.txt` in the data folder), after the process's memory map
@@ -414,7 +439,15 @@ python3 port/knulli/profile.py bench/a30-profile/profile.txt \
   among the samples (as thread -1, with the frame's time), so a hitch's
   work can be told from a smooth frame's. With the walk bot and a rate of
   150 to 250 a second, a two-minute traversal gives a few hundred samples
-  of long frames.
+  of long frames, and ten times that with `HALO_PROFILE_THREADS=game`.
+
+Line by line: the guest image has no debug information, but a build with
+`-gline-tables-only` added to the guest's flags (`tools/android_build.py`)
+keeps a `.debug_line` table (the assembly converter passes the `.loc`
+directives through) without changing the code. `llvm-symbolizer` does not
+use a line table without `.debug_info`, but `llvm-dwarfdump --debug-line
+halo_guest.elf` prints its rows, and a sample's address maps to the row
+with the highest address at or below it.
 
 The report lists the samples per thread, with each thread's CPU ticks, and
 then for the four busiest threads (or `--thread`) two tables: **self**, the
