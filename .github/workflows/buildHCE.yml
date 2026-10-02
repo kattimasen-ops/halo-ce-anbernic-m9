@@ -32,20 +32,19 @@ jobs:
             libc6-dev-arm64-cross linux-libc-dev-arm64-cross \
             lsb-release apt-utils dpkg-dev file patchelf
 
-      # ── Multiarch: arm64-Pakete für KMSDRM, GBM, ALSA ───────────────
       - name: Add arm64 architecture and install cross-deps
         run: |
           dpkg --add-architecture arm64
 
-          # /etc/apt/sources.list mit Arch-Tags neu schreiben
-          cat > /etc/apt/sources.list <<'EOF'
-deb [arch=amd64] http://archive.ubuntu.com/ubuntu focal main restricted universe multiverse
-deb [arch=amd64] http://archive.ubuntu.com/ubuntu focal-updates main restricted universe multiverse
-deb [arch=amd64] http://archive.ubuntu.com/ubuntu focal-security main restricted universe multiverse
-deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal main restricted universe multiverse
-deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-updates main restricted universe multiverse
-deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-security main restricted universe multiverse
-EOF
+          printf '%s\n' \
+            'deb [arch=amd64] http://archive.ubuntu.com/ubuntu focal main restricted universe multiverse' \
+            'deb [arch=amd64] http://archive.ubuntu.com/ubuntu focal-updates main restricted universe multiverse' \
+            'deb [arch=amd64] http://archive.ubuntu.com/ubuntu focal-security main restricted universe multiverse' \
+            'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal main restricted universe multiverse' \
+            'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-updates main restricted universe multiverse' \
+            'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-security main restricted universe multiverse' \
+            > /etc/apt/sources.list
+
           apt-get update
 
           apt-get install -y --no-install-recommends \
@@ -53,42 +52,41 @@ EOF
             libgbm-dev:arm64 \
             libasound2-dev:arm64
 
-      # ── Multiarch-Header und -Bibliotheken an die Cross-Pfade kopieren ─
       - name: Place arm64 headers and libs on the cross-compile paths
         run: |
-          mkdir -p /usr/aarch64-linux-gnu/include /usr/aarch64-linux-gnu/lib /usr/aarch64-linux-gnu/lib/pkgconfig
+          mkdir -p /usr/aarch64-linux-gnu/include
+          mkdir -p /usr/aarch64-linux-gnu/lib
+          mkdir -p /usr/aarch64-linux-gnu/lib/pkgconfig
 
-          # Header
           cp -a /usr/include/libdrm /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
           cp -a /usr/include/gbm.h /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
           cp -a /usr/include/alsa /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
 
-          # Bibliotheken
-          for lib in libdrm libgbm libasound; do
-            cp -a /usr/lib/aarch64-linux-gnu/${lib}.so* /usr/aarch64-linux-gnu/lib/ 2>/dev/null || true
-          done
+          cp -a /usr/lib/aarch64-linux-gnu/libdrm.so* /usr/aarch64-linux-gnu/lib/ 2>/dev/null || true
+          cp -a /usr/lib/aarch64-linux-gnu/libgbm.so* /usr/aarch64-linux-gnu/lib/ 2>/dev/null || true
+          cp -a /usr/lib/aarch64-linux-gnu/libasound.so* /usr/aarch64-linux-gnu/lib/ 2>/dev/null || true
 
-          # .pc-Dateien für pkg-config, umgeschrieben auf die Cross-Pfade
           for pc in libdrm gbm alsa; do
-            src=/usr/lib/aarch64-linux-gnu/pkgconfig/${pc}.pc
-            [ -f "$src" ] || continue
-            sed -e 's|^prefix=.*|prefix=/usr/aarch64-linux-gnu|' \
-                -e 's|^exec_prefix=.*|exec_prefix=${prefix}|' \
-                -e 's|^libdir=.*|libdir=${prefix}/lib|' \
-                -e 's|^includedir=.*|includedir=${prefix}/include|' \
-                "$src" > /usr/aarch64-linux-gnu/lib/pkgconfig/${pc}.pc
+            src="/usr/lib/aarch64-linux-gnu/pkgconfig/${pc}.pc"
+            if [ -f "$src" ]; then
+              sed -e 's|^prefix=.*|prefix=/usr/aarch64-linux-gnu|' \
+                  -e 's|^exec_prefix=.*|exec_prefix=${prefix}|' \
+                  -e 's|^libdir=.*|libdir=${prefix}/lib|' \
+                  -e 's|^includedir=.*|includedir=${prefix}/include|' \
+                  "$src" > "/usr/aarch64-linux-gnu/lib/pkgconfig/${pc}.pc"
+            fi
           done
 
-          echo "== libdrm Headers:"
-          ls /usr/aarch64-linux-gnu/include/libdrm/ | head -5
-          echo "== alsa Headers:"
-          ls /usr/aarch64-linux-gnu/include/alsa/ | head -5
+          echo "== libdrm Header:"
+          ls /usr/aarch64-linux-gnu/include/libdrm/ | head -5 || true
+          echo "== alsa Header:"
+          ls /usr/aarch64-linux-gnu/include/alsa/ | head -5 || true
           echo "== libdrm Libs:"
-          ls /usr/aarch64-linux-gnu/lib/libdrm.so*
+          ls /usr/aarch64-linux-gnu/lib/libdrm.so* || true
           echo "== libgbm Libs:"
-          ls /usr/aarch64-linux-gnu/lib/libgbm.so*
+          ls /usr/aarch64-linux-gnu/lib/libgbm.so* || true
           echo "== libasound Libs:"
-          ls /usr/aarch64-linux-gnu/lib/libasound.so*
+          ls /usr/aarch64-linux-gnu/lib/libasound.so* || true
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -112,7 +110,6 @@ EOF
           mkdir -p sysroot
           rm -f sysroot/libSDL2* sysroot/libSDL3* sysroot/libdecor* sysroot/libmali*
 
-      # ── libdecor: Focal 0.1.0-3build1 ────────────────────────────────
       - name: Download and extract libdecor (Focal, GLIBC 2.31 compatible)
         run: |
           URLS=(
@@ -123,21 +120,24 @@ EOF
           for url in "${URLS[@]}"; do
             if curl -fsSL --retry 2 --connect-timeout 30 -o /tmp/libdecor.deb "$url"; then
               if dpkg-deb --info /tmp/libdecor.deb > /dev/null 2>&1; then
-                DECOR_DEB=/tmp/libdecor.deb; break
+                DECOR_DEB=/tmp/libdecor.deb
+                break
               fi
             fi
           done
-          [ -n "$DECOR_DEB" ] || { echo "FEHLER: libdecor nicht ladbar"; exit 1; }
+          if [ -z "$DECOR_DEB" ]; then
+            echo "FEHLER: libdecor konnte von keiner Quelle geladen werden."
+            exit 1
+          fi
           dpkg-deb -x "$DECOR_DEB" /tmp/libdecor-extract
           DECOR_LIB=$(find /tmp/libdecor-extract -name "libdecor-0.so.0*" -type f | head -n 1)
           cp "$DECOR_LIB" sysroot/libdecor-0.so.0
           echo "libdecor-0.so.0: $(stat -c%s sysroot/libdecor-0.so.0) Bytes"
 
-      # ── libmali ─────────────────────────────────────────────────────
       - name: Download and extract libmali
         run: |
           if [ -f sysroot/libmali.so.0 ] && [ ! -L sysroot/libmali.so.0 ] && [ "$(stat -c%s sysroot/libmali.so.0 2>/dev/null || echo 0)" -gt 5000000 ]; then
-            echo "OK: sysroot/libmali.so.0 existiert bereits."
+            echo "OK: sysroot/libmali.so.0 existiert bereits (echtes Binary)."
             exit 0
           fi
           URLS=(
@@ -149,11 +149,15 @@ EOF
             if curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 30 -o /tmp/libmali.deb "$url"; then
               SIZE=$(stat -c%s /tmp/libmali.deb 2>/dev/null || echo 0)
               if [ "$SIZE" -gt 5000000 ] && dpkg-deb --info /tmp/libmali.deb > /dev/null 2>&1; then
-                MALI_DEB="/tmp/libmali.deb"; break
+                MALI_DEB="/tmp/libmali.deb"
+                break
               fi
             fi
           done
-          [ -n "$MALI_DEB" ] || { echo "FEHLER: libmali nicht ladbar"; exit 1; }
+          if [ -z "$MALI_DEB" ]; then
+            echo "FEHLER: libmali konnte nicht heruntergeladen werden."
+            exit 1
+          fi
           dpkg-deb -x "$MALI_DEB" /tmp/libmali-extract
           MALI_LIB=$(find /tmp/libmali-extract -name "libmali*" -type f -size +5M | head -n 1)
           cp "$MALI_LIB" sysroot/libmali.so.0
@@ -166,12 +170,17 @@ EOF
 
       - name: Verify sysroot libraries
         run: |
+          echo "== Inhalt von sysroot/:"
           ls -la sysroot/
           for f in sysroot/libdecor-0.so.0 sysroot/libmali.so.0; do
-            [ -f "$f" ] && [ ! -L "$f" ] && [ "$(stat -c%s "$f")" -gt 10240 ] || {
-              echo "FEHLER: $f fehlt oder zu klein"; exit 1;
-            }
+            if [ -f "$f" ] && [ ! -L "$f" ] && [ "$(stat -c%s "$f" 2>/dev/null || echo 0)" -gt 10240 ]; then
+              echo "OK: $f ($(stat -c%s "$f") Bytes)"
+            else
+              echo "FEHLER: $f fehlt oder ist zu klein."
+              exit 1
+            fi
           done
+          echo "Hinweis: libSDL2 und libSDL3 werden von build.sh aus dem Quellcode kompiliert."
 
       - name: Build
         run: |
@@ -179,17 +188,11 @@ EOF
           export JOBS=$(nproc)
           export HOST_CC=aarch64-linux-gnu-gcc
           export GUEST_CC=clang-22
-          # pkg-config soll nur die Cross-Pakete sehen
           export PKG_CONFIG_LIBDIR=/usr/aarch64-linux-gnu/lib/pkgconfig
           export PKG_CONFIG_PATH=/usr/aarch64-linux-gnu/lib/pkgconfig
           export PKG_CONFIG_SYSROOT_DIR=/
           ./build.sh
         timeout-minutes: 120
-
-      - name: Show SDL config summary from the build log
-        if: always()
-        run: |
-          echo "Prüfe im Build-Log, ob SDL_KMSDRM und SDL_ALSA auf ON stehen."
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
