@@ -161,42 +161,124 @@ if ! tree_is_patched; then
     git -C "$SRC" apply --summary "$PATCH" | awk '$1 == "create" { print $4 }' | xargs -r git -C "$SRC" add -N --
 fi
 
-# --- Fix: ReadFileEx/WriteFileEx signalisieren das OVERLAPPED-Event nicht.
-# Die Engine wartet nach dem asynchronen Profil-Schreiben auf das Event
-# (WaitForSingleObject ohne alertable), die APCs laufen daher nie, und nach
-# 6 s Timeout meldet die Engine "checksum failed on persistent storage".
-# SetEvent direkt vor platform_queue_apc in beiden Funktionen einfügen.
-python3 - "$SRC/port/linux/src/xbox_files.c" <<'PYEOF'
-import re
+# --- Fix 1 (entfernt): Der frühere SetEvent-Aufruf in ReadFileEx/WriteFileEx
+# war falsch. Microsoft dokumentiert, dass diese Funktionen das hEvent-Feld
+# ignorieren ("ReadFileEx 函数忽略 OVERLAPPED 结构的 hEvent 成员"). Die
+# Engine nutzt hEvent für eigene Zwecke, der Wert ist kein Host-Handle.
+# SetEvent(0xa) führte zum Absturz bei Adresse 0xa (signal 11).
+#
+# --- Fix 2: Die APCs (Completion-Routinen) wurden in WaitForSingleObjectEx
+# und SleepEx nur VOR dem Warten ausgeführt, nicht WÄHREND. Die Engine wartet
+# in WaitForSingleObjectEx auf eine abgeschlossene asynchrone Profil-I/O,
+# die APC lief nie, nach 6 Sekunden Timeout meldete die Engine "checksum
+# failed on persistent storage". Die Warteschleifen werden so erweitert,
+# dass APCs auch während des Wartens ausgeführt werden.
+python3 - "$SRC/port/linux/src/xbox_kernel.c" <<'PYEOF'
 import sys
 
 path = sys.argv[1]
 with open(path) as f:
     text = f.read()
 
-needle = re.compile(
-    r'^([ \t]+)(platform_queue_apc\(file_completion_apc, \(void \*\)completion_routine, overlapped, NULL\);)$',
-    re.MULTILINE
-)
+# --- WaitForSingleObjectEx ---
+wait_old = '''\tif (milliseconds == INFINITE)
+\t\t{
+\t\t\tpthread_cond_wait(&handle->condition, &handle->lock);
+\t\t}
+\t\telse if (pthread_cond_timedwait(&handle->condition, &handle->lock, &deadline) == ETIMEDOUT)
+\t\t{
+\t\t\tif (!handle_try_acquire(handle))
+\t\t\t\tresult = WAIT_TIMEOUT;
+\t\t\tbreak;
+\t\t}'''
 
-def repl(match):
-    indent, line = match.group(1), match.group(2)
-    return (
-        f'{indent}if (overlapped->hEvent)\n'
-        f'{indent}\tSetEvent(overlapped->hEvent);\n'
-        f'{indent}{line}'
-    )
+wait_new = '''\tif (alertable && platform_run_apcs())
+\t\t{
+\t\t\tpthread_mutex_unlock(&handle->lock);
+\t\t\treturn WAIT_IO_COMPLETION;
+\t\t}
+\t\tif (milliseconds == INFINITE)
+\t\t{
+\t\t\t/* 10 ms aufwachen, damit fertige APCs laufen können */
+\t\t\tstruct timespec short_wait;
+\t\t\tclock_gettime(CLOCK_REALTIME, &short_wait);
+\t\t\tshort_wait.tv_nsec += 10000000;
+\t\t\tif (short_wait.tv_nsec >= 1000000000L)
+\t\t\t{
+\t\t\t\tshort_wait.tv_sec++;
+\t\t\t\tshort_wait.tv_nsec -= 1000000000L;
+\t\t\t}
+\t\t\tpthread_cond_timedwait(&handle->condition, &handle->lock, &short_wait);
+\t\t}
+\t\telse if (pthread_cond_timedwait(&handle->condition, &handle->lock, &deadline) == ETIMEDOUT)
+\t\t{
+\t\t\tif (alertable && platform_run_apcs())
+\t\t\t{
+\t\t\t\tpthread_mutex_unlock(&handle->lock);
+\t\t\t\treturn WAIT_IO_COMPLETION;
+\t\t\t}
+\t\t\tif (!handle_try_acquire(handle))
+\t\t\t\tresult = WAIT_TIMEOUT;
+\t\t\tbreak;
+\t\t}'''
 
-new_text, count = needle.subn(repl, text)
-
-if count != 2:
-    print(f"FEHLER: erwartete 2 Einfügepunkte, fand {count}", file=sys.stderr)
+if wait_old not in text:
+    print("FEHLER: WaitForSingleObjectEx-Warteschleife nicht gefunden", file=sys.stderr)
     sys.exit(1)
+text = text.replace(wait_old, wait_new, 1)
+
+# --- SleepEx ---
+sleep_old = '''\tif (milliseconds == INFINITE)
+\t{
+\t\tfor (;;)
+\t\t\tpause();
+\t}
+\tduration.tv_sec = milliseconds / 1000;
+\tduration.tv_nsec = (long)(milliseconds % 1000) * 1000000L;
+\twhile (nanosleep(&duration, &duration) == -1 && errno == EINTR)
+\t\t;
+\tif (alertable && platform_run_apcs())
+\t\treturn WAIT_IO_COMPLETION;
+\treturn 0;'''
+
+sleep_new = '''\tif (milliseconds == INFINITE)
+\t{
+\t\tfor (;;)
+\t\t{
+\t\t\tif (alertable && platform_run_apcs())
+\t\t\t\treturn WAIT_IO_COMPLETION;
+\t\t\tpause();
+\t\t}
+\t}
+\tduration.tv_sec = milliseconds / 1000;
+\tduration.tv_nsec = (long)(milliseconds % 1000) * 1000000L;
+\twhile (duration.tv_sec > 0 || duration.tv_nsec > 0)
+\t{
+\t\tstruct timespec step;
+\t\tstep.tv_sec = duration.tv_sec > 0 ? 1 : 0;
+\t\tstep.tv_nsec = duration.tv_sec > 0 ? 0 : (duration.tv_nsec > 10000000L ? 10000000L : duration.tv_nsec);
+\t\tif (nanosleep(&step, NULL) == -1 && errno != EINTR)
+\t\t\tbreak;
+\t\tif (step.tv_sec == 0 && step.tv_nsec == 10000000L)
+\t\t\tduration.tv_nsec -= 10000000L;
+\t\telse if (step.tv_sec == 1)
+\t\t\tduration.tv_sec--;
+\t\telse
+\t\t\tduration.tv_nsec = 0;
+\t\tif (alertable && platform_run_apcs())
+\t\t\treturn WAIT_IO_COMPLETION;
+\t}
+\treturn 0;'''
+
+if sleep_old not in text:
+    print("FEHLER: SleepEx-Schleife nicht gefunden", file=sys.stderr)
+    sys.exit(1)
+text = text.replace(sleep_old, sleep_new, 1)
 
 with open(path, 'w') as f:
-    f.write(new_text)
+    f.write(text)
 
-print(f"xbox_files.c gepatcht: SetEvent in {count} Stellen eingefügt")
+print("xbox_kernel.c gepatcht: APCs laufen jetzt auch während WaitForSingleObjectEx/SleepEx")
 PYEOF
 
 rm -rf "$SRC/port/knulli"
