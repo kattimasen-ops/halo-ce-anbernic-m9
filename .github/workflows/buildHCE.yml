@@ -60,7 +60,6 @@ jobs:
           mkdir -p /usr/aarch64-linux-gnu/lib
           mkdir -p /usr/aarch64-linux-gnu/lib/pkgconfig
 
-          # Header
           cp -a /usr/include/libdrm /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
           cp -a /usr/include/gbm.h /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
           cp -a /usr/include/alsa /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
@@ -69,12 +68,10 @@ jobs:
           cp -a /usr/include/GLES3 /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
           cp -a /usr/include/KHR /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
 
-          # Bibliotheken
           for lib in libdrm libgbm libasound libEGL libGLESv2; do
             cp -a /usr/lib/aarch64-linux-gnu/${lib}.so* /usr/aarch64-linux-gnu/lib/ 2>/dev/null || true
           done
 
-          # pkg-config-Dateien mit Prefix auf den Cross-Pfad umgeschrieben
           for pc in libdrm gbm alsa egl glesv2; do
             src=""
             for candidate in \
@@ -210,6 +207,42 @@ jobs:
           export PKG_CONFIG_SYSROOT_DIR=/
           ./build.sh
         timeout-minutes: 120
+
+      - name: Resolve crash addresses in halo_guest.elf
+        run: |
+          if [ ! -f dist/halo_guest.elf ]; then
+            echo "dist/halo_guest.elf fehlt — der Build hat sie nicht erzeugt."
+            exit 0
+          fi
+          echo "== Datei:"
+          ls -l dist/halo_guest.elf
+
+          echo ""
+          echo "== addr2line für die Adressen aus dem letzten Geräte-Log =="
+          for ADDR in 0x8800e13c 0x881232fc 0x8811c47c 0x8811ba4c 0x8800e758 0x881a99c4; do
+            echo "--- $ADDR ---"
+            aarch64-linux-gnu-addr2line -f -C -e dist/halo_guest.elf "$ADDR" || true
+          done
+
+          echo ""
+          echo "== Nächstgelegene Symbole um 0x8800e000..0x88010000 (Absturz-PC) =="
+          aarch64-linux-gnu-nm -n dist/halo_guest.elf 2>/dev/null \
+            | awk '$1 >= "000000008800e000" && $1 <= "0000000088010000"' | head -60 || true
+
+          echo ""
+          echo "== Nächstgelegene Symbole um 0x88120000..0x88124000 (LR / Frame 0) =="
+          aarch64-linux-gnu-nm -n dist/halo_guest.elf 2>/dev/null \
+            | awk '$1 >= "0000000088120000" && $1 <= "0000000088124000"' | head -60 || true
+
+          echo ""
+          echo "== Nächstgelegene Symbole um 0x88118000..0x8811c000 (Frame 1/2) =="
+          aarch64-linux-gnu-nm -n dist/halo_guest.elf 2>/dev/null \
+            | awk '$1 >= "0000000088118000" && $1 <= "000000008811c000"' | head -60 || true
+
+          echo ""
+          echo "== Nächstgelegene Symbole um 0x881a8000..0x881ac000 (Frame 4) =="
+          aarch64-linux-gnu-nm -n dist/halo_guest.elf 2>/dev/null \
+            | awk '$1 >= "00000000881a8000" && $1 <= "00000000881ac000"' | head -60 || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
