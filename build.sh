@@ -32,7 +32,10 @@ ANDROID_NDK=$(cd "$ANDROID_NDK" && pwd)
 [ -d "$SYSROOT_LIB" ] || die "SYSROOT_LIB=$SYSROOT_LIB is not a folder"
 SYSROOT_LIB=$(cd "$SYSROOT_LIB" && pwd)
 
-for library in libSDL2-2.0.so.0 libmali.so.0 libdecor-0.so.0; do
+# libdecor und libmali müssen vor dem Build vorhanden sein.
+# libSDL2 und libSDL3 werden weiter unten aus dem Quellcode kompiliert
+# und dürfen hier NICHT verlangt werden.
+for library in libdecor-0.so.0 libmali.so.0; do
     compgen -G "$SYSROOT_LIB/$library*" > /dev/null ||
         die "no $library* in SYSROOT_LIB=$SYSROOT_LIB (must be placed there before the build)"
 done
@@ -144,6 +147,10 @@ if [ ! -f "$SYSROOT_LIB/libSDL2-2.0.so.0" ]; then
     echo "== SDL2 kompiliert: $(stat -c%s "$SYSROOT_LIB/libSDL2-2.0.so.0") Bytes"
     echo "== GLIBC-Versionen in libSDL2:"
     aarch64-linux-gnu-readelf -V "$SYSROOT_LIB/libSDL2-2.0.so.0" | grep GLIBC | sort -u || true
+    echo "== SDL_GetTicks64 vorhanden?"
+    aarch64-linux-gnu-nm -D "$SYSROOT_LIB/libSDL2-2.0.so.0" | grep -c SDL_GetTicks64 || echo "NICHT GEFUNDEN"
+    echo "== SDL_GameControllerGetType vorhanden?"
+    aarch64-linux-gnu-nm -D "$SYSROOT_LIB/libSDL2-2.0.so.0" | grep -c SDL_GameControllerGetType || echo "NICHT GEFUNDEN"
 else
     echo "== libSDL2-2.0.so.0 bereits in SYSROOT_LIB – überspringe SDL2-Kompilierung"
 fi
