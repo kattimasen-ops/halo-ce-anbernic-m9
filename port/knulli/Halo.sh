@@ -13,6 +13,7 @@
 
 GAMEDIR="$(cd "$(dirname "$0")/halo" && pwd)"
 cd "$GAMEDIR" || exit 1
+
 # one start at a time (or development run, tools/device/run.sh), before the
 # log starts again: another meanwhile would take the raised clocks for the
 # ones to put back. The game inherits the lock, which is held as long as it
@@ -20,11 +21,13 @@ cd "$GAMEDIR" || exit 1
 # without either, no start.)
 exec 9> /var/run/halo-lock
 if ! { flock -n 9 || python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)'; } 2> /dev/null; then
-	echo "$(date): Halo is running already; this start was refused" >> "$GAMEDIR/log.txt"
-	exit 1
+    echo "$(date): Halo is running already; this start was refused" >> "$GAMEDIR/log.txt"
+    exit 1
 fi
+
 exec > "$GAMEDIR/log.txt" 2>&1
 echo "Halo for Knulli, $(date)"
+
 # (stopped between the steps below: through the EXIT handler)
 trap 'exit 143' TERM INT HUP
 
@@ -34,76 +37,94 @@ trap 'exit 143' TERM INT HUP
 # hung game must not keep the clocks and the lock). Its exit status; after a
 # step the launcher was asked to stop in, the launcher stops.
 stop() {
-	stopping=1
-	[ -n "$child" ] || return 0
-	kill -TERM "$child" 2>/dev/null
-	[ -n "$watchdog" ] || { (exec 9>&-; sleep 10; kill -KILL "$child" 2>/dev/null) & watchdog=$!; }
+    stopping=1
+    [ -n "$child" ] || return 0
+    kill -TERM "$child" 2>/dev/null
+    [ -n "$watchdog" ] || { (exec 9>&-; sleep 10; kill -KILL "$child" 2>/dev/null) & watchdog=$!; }
 }
 supervised() {
-	local status
-
-	child="" watchdog="" stopping=""
-	trap stop TERM INT HUP
-	"$@" &
-	child=$!
-	# (a stop that came as the step started)
-	[ -z "$stopping" ] || stop
-	# (until the step itself has ended: a signal ends a wait early)
-	while :; do
-		wait "$child"
-		status=$?
-		kill -0 "$child" 2>/dev/null || break
-	done
-	trap 'exit 143' TERM INT HUP
-	[ -z "$watchdog" ] || kill "$watchdog" 2>/dev/null
-	if [ -n "$stopping" ]; then
-		echo "stopped (exit status $status)"
-		exit 143
-	fi
-	return "$status"
+    local status child="" watchdog="" stopping=""
+    trap stop TERM INT HUP
+    "$@" &
+    child=$!
+    # (a stop that came as the step started)
+    [ -z "$stopping" ] || stop
+    # (until the step itself has ended: a signal ends a wait early)
+    while :; do
+        wait "$child"
+        status=$?
+        kill -0 "$child" 2>/dev/null || break
+    done
+    trap 'exit 143' TERM INT HUP
+    [ -z "$watchdog" ] || kill "$watchdog" 2>/dev/null
+    if [ -n "$stopping" ]; then
+        echo "stopped (exit status $status)"
+        exit 143
+    fi
+    return "$status"
 }
 
-# the fastest clocks while the maps are copied and the game runs: the CPU at
-# its top frequency, the GPU held at its top step (the governor otherwise
-# keeps it at the lowest). What they were is kept in /var/run (gone at a
-# reboot), so that a start after a launcher that was killed outright puts
-# them back first.
-cpu=/sys/devices/system/cpu/cpufreq/policy0/scaling_governor
-gpu=/sys/class/devfreq/gpu
+# ── SYSTEMOPTIMIERUNGEN FÜR RK3326 / ARKOS 4 ─────────────────────────────
+# CPU-Governor auf performance setzen (alle 4 Kerne)
+# GPU-Mindestfrequenz auf Maximum setzen
+# ZRAM aktivieren (bei 1 GB RAM essenziell)
+cpu_governor_path=/sys/devices/system/cpu/cpufreq/policy0/scaling_governor
+gpu_devfreq_path=/sys/class/devfreq/gpu
 saved=/var/run/halo-clocks
+
 restore() {
-	if [ -f "$saved" ]; then
-		read -r cpu_governor gpu_minimum < "$saved"
-		[ -n "$cpu_governor" ] && echo "$cpu_governor" > "$cpu" 2>/dev/null
-		[ -n "$gpu_minimum" ] && echo "$gpu_minimum" > "$gpu/min_freq" 2>/dev/null
-		rm -f "$saved"
-	fi
-	rm -f /var/run/battery-saver/halo.pause
+    if [ -f "$saved" ]; then
+        read -r cpu_governor gpu_minimum < "$saved"
+        [ -n "$cpu_governor" ] && echo "$cpu_governor" > "$cpu_governor_path" 2>/dev/null
+        [ -n "$gpu_minimum" ] && echo "$gpu_minimum" > "$gpu_devfreq_path/min_freq" 2>/dev/null
+        rm -f "$saved"
+    fi
+    # ZRAM beim Beenden nicht deaktivieren (Systemprofitiert dauerhaft)
+    rm -f /var/run/battery-saver/halo.pause
 }
+
 restore
-echo "$(cat "$cpu" 2>/dev/null) $(cat "$gpu/min_freq" 2>/dev/null)" > "$saved"
+echo "$(cat "$cpu_governor_path" 2>/dev/null) $(cat "$gpu_devfreq_path/min_freq" 2>/dev/null)" > "$saved"
 trap restore EXIT
-echo performance > "$cpu" 2>/dev/null
-tr ' ' '\n' < "$gpu/available_frequencies" 2>/dev/null | sort -n | tail -n 1 > "$gpu/min_freq" 2>/dev/null
+
+# CPU-Governor auf performance (alle Kerne)
+echo performance > "$cpu_governor_path" 2>/dev/null
+# Alternativ: für jeden Kern einzeln (falls policy0 nicht alle umfasst)
+for cpu in /sys/devices/system/cpu/cpu[0-3]; do
+    echo performance > "$cpu/cpufreq/scaling_governor" 2>/dev/null
+done
+
+# GPU-Mindestfrequenz auf Maximum
+tr ' ' '\n' < "$gpu_devfreq_path/available_frequencies" 2>/dev/null | sort -n | tail -n 1 > "$gpu_devfreq_path/min_freq" 2>/dev/null
+
+# ZRAM aktivieren (falls nicht bereits durch ArkOS geschehen)
+if [ ! -e /dev/zram0 ]; then
+    modprobe zram 2>/dev/null
+    if [ -e /dev/zram0 ]; then
+        echo 512M > /sys/block/zram0/disksize
+        mkswap /dev/zram0 >/dev/null 2>&1
+        swapon /dev/zram0 2>/dev/null
+    fi
+fi
+# ─────────────────────────────────────────────────────────────────────────
 
 # the battery saver must not dim or suspend the handheld meanwhile
 mkdir -p /var/run/battery-saver && touch /var/run/battery-saver/halo.pause
 
 # the maps: copied out of a disc image in this folder, or else in ports
 if [ ! -s maps/ui.map ]; then
-	shopt -s nullglob
-	images=({.,..}/*.{iso,ISO,xiso,XISO})
-	shopt -u nullglob
-	if [ "${#images[@]}" -eq 0 ]; then
-		echo "no maps folder and no disc image (.iso) in $GAMEDIR"
-		supervised python3 halo_screen.py wait 60 "Halo needs your disc" "Copy the disc image of Halo: Combat Evolved for the Xbox (an .iso file) into roms/ports/halo on the SD card, then start Halo again.
-
-Press a button to go back."
-		exit 1
-	fi
-	[ "${#images[@]}" -eq 1 ] || echo "${#images[@]} disc images: the first is used"
-	echo "copying the maps folder out of ${images[0]}"
-	supervised python3 halo_extract.py --screen "${images[0]}" "$GAMEDIR" || exit 1
+    shopt -s nullglob
+    images=({.,..}/*.{iso,ISO,xiso,XISO})
+    shopt -u nullglob
+    if [ "${#images[@]}" -eq 0 ]; then
+        echo "no maps folder and no disc image (.iso) in $GAMEDIR"
+        supervised python3 halo_screen.py wait 60 "Halo needs your disc" \
+            "Copy the disc image of Halo: Combat Evolved for the Xbox (an .iso file) into roms/ports/halo on the SD card, then start Halo again. Press a button to go back."
+        exit 1
+    fi
+    [ "${#images[@]}" -eq 1 ] || echo "${#images[@]} disc images: the first is used"
+    echo "copying the maps folder out of ${images[0]}"
+    supervised python3 halo_extract.py --screen "${images[0]}" "$GAMEDIR" || exit 1
 fi
 
 # the settings for this handheld, the first time (config.toml keeps them,
@@ -111,29 +132,32 @@ fi
 # start (the game would write its own defaults instead, for good); nor with
 # something else of that name, a folder say, in the way
 if [ ! -f config.toml ]; then
-	if [ -e config.toml ] || [ -L config.toml ] ||
-		! cat > config.toml.new <<'EOF' || ! mv -f config.toml.new config.toml; then
+    if [ -e config.toml ] || [ -L config.toml ] || ! cat > config.toml.new <<'EOF' || ! mv -f config.toml.new config.toml; then
 [display]
 screen_width = 640
-render_scale = 0.75
+render_scale = 0.5
 interpolation = true
 fast_shaders = true
 fast_textures = true
 high_res_hud = false
-
+model_detail = 0.4
+frame_pacing = true
 [update]
 auto = false
-
 [network]
 online = false
+[debug]
+sort_models = false
+stable_streams = false
+batch_quads = true
+alpha_test_elision = true
 EOF
-		rm -f config.toml.new
-		echo "cannot write config.toml"
-		supervised python3 halo_screen.py wait 60 "Halo could not start" "Halo could not write its settings, roms/ports/halo/config.toml: the SD card may be full, or a folder has that name.
-
-Press a button to go back."
-		exit 1
-	fi
+        rm -f config.toml.new
+        echo "cannot write config.toml"
+        supervised python3 halo_screen.py wait 60 "Halo could not start" \
+            "Halo could not write its settings, roms/ports/halo/config.toml: the SD card may be full, or a folder has that name. Press a button to go back."
+        exit 1
+    fi
 fi
 
 # the handheld's own controls (SDL2 would take them for another pad)
@@ -144,21 +168,9 @@ export SDL_GAMECONTROLLERCONFIG
 # frame, about a minute with the screen black (nothing drawn before the game
 # stays up as its GPU driver starts): said first
 if [ ! -d save/z ]; then
-	supervised python3 halo_screen.py wait 10 "Starting Halo" "The first start takes about a minute more, with a black screen, while the game sets up its cache. Later starts are quick.
-
-Press a button to go on."
+    supervised python3 halo_screen.py wait 10 "Starting Halo" \
+        "The first start takes about a minute more, with a black screen, while the game sets up its shader cache. Press a button to continue."
 fi
 
+# the game
 supervised ./halo
-status=$?
-echo "exit status $status"
-# (0: quit from the game; 130 and 143: stopped by a signal)
-case "$status" in
-0 | 130 | 143) ;;
-*)
-	supervised python3 halo_screen.py wait 30 "Halo stopped" "Halo stopped unexpectedly (exit status $status). What happened is in roms/ports/halo/log.txt.
-
-Press a button to go back."
-	;;
-esac
-exit "$status"
