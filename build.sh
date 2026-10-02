@@ -85,9 +85,6 @@ if ! tree_is_patched; then
     git -C "$SRC" apply --summary "$PATCH" | awk '$1 == "create" { print $4 }' | xargs -r git -C "$SRC" add -N --
 fi
 
-# port/knulli in den Upstream-Baum kopieren: das Skript dort läuft, damit
-# sein cd in den Baum mit build.ninja landet. Damit ist es unabhängig vom
-# Ort dieses Skripts.
 rm -rf "$SRC/port/knulli"
 cp -a "$HERE/port/knulli" "$SRC/port/knulli"
 rm -rf "$SRC/port/knulli/__pycache__"
@@ -101,14 +98,54 @@ if [ -f "$SRC/.port-stamp" ] && [ "$(cat "$SRC/.port-stamp")" = "$stamp" ]; then
 fi
 echo "$stamp" > "$SRC/.port-stamp"
 
-# ---------- SDL2 headers
-if [ ! -d "$SDL2_INCLUDE/SDL2" ]; then
+# ---------- SDL2 headers ─────────────────────────────────────────────────
+# Die port/knulli-Quellen enthalten #include <SDL2/SDL.h>, der Compiler
+# sucht also mit -I$SDL2_INCLUDE nach $SDL2_INCLUDE/SDL2/SDL.h.
+# Die SDL2-Quelltarball legt die Header aber unter
+#   SDL-$SDL2_TAG/include/...
+# ab. Darum entpacken wir normal und benennen den include-Ordner in SDL2/
+# um. Das ist unabhängig davon, wie die installierte tar-Version mit
+# mehreren -C-Optionen umgeht.
+if [ ! -f "$SDL2_INCLUDE/SDL2/SDL.h" ]; then
     echo "== downloading SDL2 $SDL2_TAG headers"
+    rm -rf "$SDL2_INCLUDE"
     mkdir -p "$SDL2_INCLUDE"
     curl -L -o "$WORK/sdl2.tar.gz" "$SDL2_ARCHIVE"
-    tar -xzf "$WORK/sdl2.tar.gz" -C "$WORK" --strip-components=1 \
-        -C "$SDL2_INCLUDE" "SDL-$SDL2_TAG/include"
+    tar -xzf "$WORK/sdl2.tar.gz" -C "$SDL2_INCLUDE"
+
+    # Erwartete Struktur nach dem Entpacken:
+    #   $SDL2_INCLUDE/SDL-$SDL2_TAG/include/SDL*.h
+    if [ -d "$SDL2_INCLUDE/SDL-$SDL2_TAG/include" ]; then
+        mv "$SDL2_INCLUDE/SDL-$SDL2_TAG/include" "$SDL2_INCLUDE/SDL2"
+    fi
+    rm -rf "$SDL2_INCLUDE/SDL-$SDL2_TAG"
+
+    # Falls die Quellen schon einen SDL2/-Unterordner mitbringen, diesen
+    # nach oben ziehen.
+    if [ ! -f "$SDL2_INCLUDE/SDL2/SDL.h" ] \
+       && [ -f "$SDL2_INCLUDE/SDL2/SDL2/SDL.h" ]; then
+        mv "$SDL2_INCLUDE/SDL2" "$SDL2_INCLUDE/SDL2-tmp"
+        mv "$SDL2_INCLUDE/SDL2-tmp/SDL2" "$SDL2_INCLUDE/SDL2"
+        rmdir "$SDL2_INCLUDE/SDL2-tmp"
+    fi
+
+    # Letzte Sicherung: liegt der Header irgendwo tiefer, dorthin verlinken.
+    if [ ! -f "$SDL2_INCLUDE/SDL2/SDL.h" ]; then
+        real=$(find "$SDL2_INCLUDE" -name SDL.h -type f 2>/dev/null | head -n 1)
+        if [ -n "$real" ]; then
+            ln -sfn "$(dirname "$real")" "$SDL2_INCLUDE/SDL2"
+        fi
+    fi
+
+    if [ ! -f "$SDL2_INCLUDE/SDL2/SDL.h" ]; then
+        echo "FEHLER: SDL2/SDL.h konnte nach dem Entpacken nicht gefunden werden."
+        echo "Inhalt von $SDL2_INCLUDE (max. 3 Ebenen tief):"
+        find "$SDL2_INCLUDE" -maxdepth 3 -name "SDL*.h" 2>/dev/null | head -20
+        die "SDL2-Header-Setup fehlgeschlagen"
+    fi
+    echo "== SDL2-Header bereit: $SDL2_INCLUDE/SDL2/SDL.h"
 fi
+# ─────────────────────────────────────────────────────────────────────────
 
 # ---------- guest and host
 export ANDROID_NDK SYSROOT_LIB
@@ -121,7 +158,6 @@ ninja -j "$JOBS" build/android/halo_guest.elf
 
 # Wichtig: die KOPIE im Upstream-Baum aufrufen, nicht die Originaldatei
 # in $HERE. Nur so landet der cd des Skripts in $SRC (mit build.ninja).
-# Über sh aufrufen, damit das x-Bit nicht benötigt wird.
 sh "$SRC/port/knulli/build.sh"
 
 # ---------- dist
