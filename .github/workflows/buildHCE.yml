@@ -1,0 +1,69 @@
+name: Build Halo CE for M9 Pro (RK3326 / Cortex-A35)
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:   # Manueller Start über die GitHub-UI
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            python3 ninja-build git curl wget tar unzip \
+            gcc-aarch64-linux-gnu
+          # clang-22 für den Guest-Build (arm64_32 Target)
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 22
+
+      - name: Download Android NDK r28c
+        run: |
+          wget -q https://dl.google.com/android/repository/android-ndk-r28c-linux.zip
+          unzip -q android-ndk-r28c-linux.zip
+          echo "ANDROID_NDK=$PWD/android-ndk-r28c" >> $GITHUB_ENV
+
+      - name: Apply RK3326 (Cortex-A35) compiler optimizations
+        run: |
+          # Ersetzt die H700/Cortex-A53-Flags durch Cortex-A35 + LTO + Linker-Optimierungen
+          sed -i 's/CFLAGS="-O2 -g -mcpu=cortex-a53/CFLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35/' port/knulli/build.sh
+          sed -i 's/-fPIC -Wall/-fPIC -flto=full -fomit-frame-pointer -ffunction-sections -fdata-sections -fno-plt -fno-semantic-interposition -Wall/' port/knulli/build.sh
+          # LTO und Linker-Flags beim Linken ergänzen
+          sed -i 's/-lSDL2 -lmali -lpthread -ldl -lm/-lSDL2 -lmali -lpthread -ldl -lm -flto -Wl,-O1 -Wl,--as-needed -Wl,--gc-sections/' port/knulli/build.sh
+          echo "== Angepasste CFLAGS:"
+          grep '^CFLAGS=' port/knulli/build.sh
+
+      - name: Prepare device libraries (SYSROOT_LIB)
+        run: |
+          # Diese Bibliotheken MÜSSEN vom M9 Pro kopiert werden.
+          # Lege sie im Repository unter sysroot/ ab, bevor du den Workflow startest.
+          # Beispiel:
+          #   scp root@<M9-PRO-IP>:/usr/lib/libSDL2-2.0.so.0* sysroot/
+          #   scp root@<M9-PRO-IP>:/usr/lib/libmali.so.0* sysroot/
+          mkdir -p sysroot
+          if [ -z "$(ls -A sysroot 2>/dev/null)" ]; then
+            echo "FEHLER: sysroot/ ist leer. Kopiere libSDL2-2.0.so.0* und libmali.so.0* vom M9 Pro."
+            exit 1
+          fi
+          ls -l sysroot/
+
+      - name: Build
+        run: |
+          export SYSROOT_LIB=$PWD/sysroot
+          export JOBS=$(nproc)
+          ./build.sh
+        timeout-minutes: 60
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: halo-m9-pro-rk3326
+          path: dist/
+          retention-days: 30
