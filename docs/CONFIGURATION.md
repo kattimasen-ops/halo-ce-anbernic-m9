@@ -30,7 +30,7 @@ values for the handheld if the file is missing:
 
 ```toml
 [display]
-screen_width = 640
+screen_width = 0
 render_scale = 0.75
 interpolation = true
 fast_shaders = true
@@ -91,14 +91,19 @@ launcher writes another value, the table says so.
 | Setting | Type | Default | Launcher | Variable (style) |
 | --- | --- | --- | --- | --- |
 | [`display.render_scale`](#displayrender_scale) | real | `1.0` | `0.75` | `HALO_RENDER_SCALE` (value) |
+| [`display.dynamic_resolution`](#displaydynamic_resolution-and-displaydynamic_resolution_min) | boolean | `true` | | `HALO_DYNAMIC_RESOLUTION` (value) |
+| [`display.dynamic_resolution_min`](#displaydynamic_resolution-and-displaydynamic_resolution_min) | real | `0.5` | | `HALO_DYNAMIC_RESOLUTION_MIN` (value) |
 | [`display.model_detail`](#displaymodel_detail) | real | `0.5` | | `HALO_MODEL_DETAIL` (value) |
 | [`display.fast_shaders`](#displayfast_shaders) | boolean | `true` | `true` | `HALO_FAST_SHADERS` (value) |
 | [`display.fast_textures`](#displayfast_textures) | boolean | `true` | `true` | `HALO_FAST_TEXTURES` (value) |
-| [`display.screen_width`](#displayscreen_width) | integer | `0` | `640` | `HALO_SCREEN_WIDTH` (value) |
+| [`display.screen_width`](#displayscreen_width) | integer | `0` | `0` | `HALO_SCREEN_WIDTH` (value) |
 | [`display.vsync`](#displayvsync) | boolean | `true` | | `HALO_NO_VSYNC` (set is false) |
 | [`display.interpolation`](#displayinterpolation) | boolean | `true` | `true` | `HALO_INTERPOLATION` (value) |
 | [`display.frame_pacing`](#displayframe_pacing) | boolean | `true` | | `HALO_FRAME_PACING` (value) |
 | [`display.high_res_hud`](#displayhigh_res_hud) | boolean | `true` | `false` | `HALO_HIGH_RES_HUD` (value) |
+| [`display.high_res_text`](#displayhigh_res_text) | boolean | `true` | `false` | `HALO_HIGH_RES_TEXT` (value) |
+| [`display.player_names`](#displayplayer_names-and-displayplayer_name_scale) | string | `"all"` | | `HALO_PLAYER_NAMES` (value) |
+| [`display.player_name_scale`](#displayplayer_names-and-displayplayer_name_scale) | real | `1.0` | | `HALO_PLAYER_NAME_SCALE` (value) |
 | [`debug.sort_models`](#debugsort_models) | boolean | `true` | | `HALO_SORT_MODELS` (value) |
 | [`debug.instance_models`](#debuginstance_models) | boolean | `true` | | `HALO_INSTANCE_MODELS` (value) |
 | [`debug.alpha_test_elision`](#debugalpha_test_elision) | boolean | `true` | | `HALO_ALPHA_TEST_ELISION` (value) |
@@ -142,6 +147,39 @@ At 1.0 the GPU's pixel and vertex work limits the frame rate (about 24 to
 40 fps in the campaign); at 0.75 the limits are the CPU-side
 threads; see the [README's performance table](../README.md#performance).
 Lower it for more headroom in heavy scenes or when the handheld is hot.
+`display.dynamic_resolution` lowers it on its own where the GPU is the
+limit.
+
+### `display.dynamic_resolution` and `display.dynamic_resolution_min`
+
+| Setting | Type | Default | Variable |
+| --- | --- | --- | --- |
+| `display.dynamic_resolution` | boolean | `true` | `HALO_DYNAMIC_RESOLUTION` |
+| `display.dynamic_resolution_min` | real | `0.5` | `HALO_DYNAMIC_RESOLUTION_MIN` |
+
+While the GPU falls behind, the picture is drawn below
+`display.render_scale`, a step of 1/16 at a time, down to
+`dynamic_resolution_min`; once the GPU keeps up again, the steps come back
+one at a time ([Architecture](ARCHITECTURE.md#render-targets-and-the-render-scale)).
+Each change shows in the log as a `screen: ... drawn at` line. It needs
+the Knulli host's GL thread, and it never raises the picture above
+`render_scale`.
+
+The GPU limits only some scenes. In the c10 opening at render scale 0.75 it
+did, at 30 to 42 fps; at 0.625 the same scene ran at about 56 fps, and at
+0.5 at a steady 60. In the a30 opening the GPU falls behind in the first
+seconds, and the scale is back at `render_scale` about 20 seconds in. In
+the b30 battle the CPU-side threads are the limit, and the scale steps down
+only briefly. At `render_scale = 1.0` it holds the b30 battle at 480x360 to
+520x390 for much of the fight, but it does not help the a30 opening after
+its intro: the GPU limits it there, but the GL thread waits for it where
+dynamic resolution does not see it
+([Roadmap](ROADMAP.md#3-the-gpu-and-the-picture)).
+
+**When to change it.** Raise `dynamic_resolution_min` (up to
+`render_scale`) for a sharper picture in heavy scenes at a lower frame rate,
+or turn it off to keep the picture at `render_scale` at all times. Values
+below 0.5 become 0.5.
 
 ### `display.model_detail`
 
@@ -201,7 +239,7 @@ texture memory on a 1 GB device. Keep it on.
 
 | Type | Default | Launcher | Variable |
 | --- | --- | --- | --- |
-| integer | `0` | `640` | `HALO_SCREEN_WIDTH` |
+| integer | `0` | `0` | `HALO_SCREEN_WIDTH` |
 
 The number of columns of the 480-line picture: 640 for the Xbox's 4:3, or
 0 for the display's shape. For 0, the host computes the width from the
@@ -211,9 +249,11 @@ a 640x480 screen that is 640. With a wider picture the 3D view widens (the
 camera keeps its vertical field of view), and the menus stay 640 columns
 wide in the centre. The picture is centred on the screen.
 
-**When to change it.** Leave it at 640 on the 4:3 handhelds. On a screen of
-another shape (the RG34XX's 720x480, for example; untested), 0 fills the
-screen instead.
+**When to change it.** The launcher writes 0, which fills any screen: 640
+columns on the 4:3 handhelds, 720 on the RG34XX models' 720x480 (reported
+on the RG34XX SP, [issue #1](https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/issues/1)). Set 640 for the
+Xbox's 4:3 picture on a wider screen. Installs from before 2026-10-02 have
+640 written; change it to 0 on a 3:2 handheld.
 
 ### `display.vsync`
 
@@ -281,6 +321,39 @@ of the maps' bitmaps (`hud_hires.c`). At the handheld's 640x480 it looks the
 same, and in a30 it took 77 MB more memory and about 1 fps, so the launcher
 writes it off in a new `config.toml`. A `config.toml` from an earlier
 version gets it from the game, on: set it to `false` there by hand.
+
+### `display.high_res_text`
+
+| Type | Default | Launcher | Variable |
+| --- | --- | --- | --- |
+| boolean | `true` | `false` | `HALO_HIGH_RES_TEXT` |
+
+Upstream's high-resolution text: the menus' and the HUD's text drawn with
+TrueType fonts (Overpass, `port/assets/fonts`) rather than with the maps'
+bitmap fonts, and the menus' titles from redrawn pictures
+(`port/assets/titles`; `text_hires.c`, `hud_hires.c`). The glyphs are drawn
+at the render targets' scale, which on the desktop is the display's and on
+the handheld `display.render_scale`'s: at 0.75 the text is a different font,
+not a sharper one. In a30 on the RG35XX
+H it made no difference to the frame rate once the level ran, but the
+level's first five seconds ran at 20 to 25 fps (against 60) while its
+glyphs were drawn, and the game held about 100 MB more memory (435 to 452 MB
+resident against 341), so the launcher writes it off in a new
+`config.toml`. A `config.toml` from an earlier version gets it from the
+game, on: set it to `false` there by hand, or keep it for its fonts
+and titles.
+
+### `display.player_names` and `display.player_name_scale`
+
+| Setting | Type | Default | Variable |
+| --- | --- | --- | --- |
+| `display.player_names` | string | `"all"` | `HALO_PLAYER_NAMES` |
+| `display.player_name_scale` | real | `1.0` | `HALO_PLAYER_NAME_SCALE` |
+
+Upstream's names above the players' heads in multiplayer: `"all"`,
+`"allies"`, `"enemies"` or `"none"` (an enemy's shows only while in sight
+and not camouflaged), drawn at `display.player_name_scale` times the size
+of the HUD's text (0.25 to 4). The campaign does not show them.
 
 ## Renderer switches
 
@@ -454,10 +527,14 @@ examples.
 Decodes textures and uploads them on a thread of their own, with a GL
 context of its own, rather than on the game's thread with the uploads
 queued to the GL thread. What a texture is drawn on appears once the
-texture is in, a frame or a few after it is first needed; a texture the game
-rewrites keeps its old contents until the new ones are in. It needs the
-Knulli host's GL thread (with `HALO_GL_THREAD=0` textures are uploaded as
-before).
+texture is in, a frame or a few after it is first needed. A texture the game
+writes after it was uploaded, such as the glyph cache its text is drawn
+from, is uploaded again on the game's thread, ahead of the draws that use
+it. Uploaded again by the worker, the text drawn meanwhile used the glyphs
+the texture held before, and came out garbled
+([issue #1](https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/issues/1)).
+It needs the Knulli host's GL thread (with `HALO_GL_THREAD=0` textures are
+uploaded as before).
 
 ### `debug.async_shaders`
 
@@ -545,8 +622,10 @@ These are read directly by the host (`port/knulli/host/`,
 | `HALO_PROFILE_FILE=<path>` | `host_profile.c` | `profile.txt` in the data folder | Where the profile goes. Each of the game thread's frames is marked among the samples (`profile.py --frames-over`). |
 | `HALO_GL_THREAD=0` | `host_glthread.c` | on | Makes the GL calls on the game's thread, without the GL thread. |
 | `HALO_GL_THREAD_FRAMES=<n>` | `host_glthread.c` | `1` | How many frames the game may be ahead of the GL thread. |
+| `HALO_DIRECT_WRITES=0` | `host_glthread.c` | on | Queues the renderer's buffer writes for the GL thread to copy, instead of the game's thread copying them into the buffers itself ([Architecture](ARCHITECTURE.md#vertex-data-the-mirror-and-the-stream-ring)). |
 | `HALO_ASYNC_PROGRAMS=0` | `host_glthread.c` | on | Builds shader programs on the GL thread instead of the program builders' threads: a new program stalls the frame (about 2 ms from the cache, 220 to 250 ms compiled) instead of appearing late. |
 | `HALO_HITCH_LOG=<ms>` | `host_glthread.c`, `d3d8_gl.c` | off | The hitch log ([`debug.hitch_log`](#debughitch_log)). |
+| `HALO_GL_FRAME_LOG=1` | `host_glthread.c` | off | Logs every 300 frames where the GL thread's frames went: waiting for the game's thread, running, waiting for a core, asleep in the driver, the frame pacing's hold and the swap ([Profiling](PROFILING.md#halo_gl_frame_log)). |
 | `HALO_PACING_LOG=1` | `host_glthread.c` | off | Logs every 300 frames how evenly the frames reached the display, from the pans themselves; `2` also each late frame ([Profiling](PROFILING.md#halo_pacing_log)). |
 | `HALO_DEBUG_SKIP_GL=glA,glB` | `host_glthread.c` | none | The GL thread does not make these calls. Needs the GL thread. |
 | `HALO_SWAP_INTERVAL=<n>` | `host_sdl2.c` | the game's `display.vsync` | Overrides the swap interval; `0` turns vsync off. |

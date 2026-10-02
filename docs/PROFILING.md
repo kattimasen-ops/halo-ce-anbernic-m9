@@ -25,6 +25,7 @@ current performance.
 - [HALO_FPS_LOG](#halo_fps_log)
 - [debug.gpu_stats](#debuggpu_stats)
 - [HALO_GL_TIMING](#halo_gl_timing)
+- [HALO_GL_FRAME_LOG](#halo_gl_frame_log)
 - [HALO_GPU_PASS_TIMING](#halo_gpu_pass_timing)
 - [The hitch log](#the-hitch-log)
 - [HALO_PROFILE_HZ and profile.py](#halo_profile_hz-and-profilepy)
@@ -90,6 +91,7 @@ before `./halo`) and read `halo/log.txt` after the run.
 | Frame rate, histogram, temperature, clocks | `HALO_FPS_LOG=<seconds>` | `fps` and `frame times` lines | None measurable |
 | Renderer statistics | `HALO_GPU_STATS=1` (`debug.gpu_stats`) | `frame N:`, `high constants`, `buffer writes`, `quad batches` lines | Small |
 | GL call timer, waits, host operations | `HALO_GL_TIMING=1` with `HALO_FPS_LOG` | `gl:` lines | A timer stub around every GL call |
+| The GL thread's frame, split | `HALO_GL_FRAME_LOG=1` | `gl frame:` lines | Small: a few clock reads a frame and around each wait for commands |
 | GPU time per pass | `HALO_GPU_PASS_TIMING=1` | `gpu:` lines | Large: the GPU is finished at every change of target |
 | One frame's passes, draws | `HALO_GPU_PASS_TIMING=2`, `3` | `trace:`, `draw:` lines | Large, for one frame |
 | Slow calls | `HALO_GPU_PASS_TIMING=4` | `call:` lines | Small, for three frames |
@@ -243,6 +245,56 @@ The timer's own clock reads cost the GL thread time, and they show in the
 frame rate when the GL thread is the limit: in the a30 opening the current
 build runs at 51.5 to 52 fps with `HALO_GL_TIMING` and 52 to 54 fps without
 it. Take frame rates from runs without the timer.
+
+## HALO_GL_FRAME_LOG
+
+`HALO_GL_FRAME_LOG=1` (`port/knulli/host/host_glthread.c`) logs every 300
+frames where the GL thread's frames went, on average. From the a30 opening
+at render scale 1.0 (2026-10-02, about 40 fps, the GPU the limit):
+
+```
+I halo: gl frame: 24.86 ms = waiting for the game 0.01 + running 14.43 + waiting for a core 0.10 + waiting for the GPU 0.00 + asleep in the driver 8.05 + hold 2.12 + swap 0.15
+```
+
+- **Waiting for the game**: waiting for the game's thread to queue
+  commands (`wait_for_work`), including a wait for a core once they came.
+- **Running**: the GL thread's CPU time (`CLOCK_THREAD_CPUTIME_ID`) from
+  one swap to the next one's start, less that of its waits for commands:
+  the driver's work, the replay and the host operations.
+- **Waiting for a core**: runnable while another thread had the core,
+  outside those waits (the scheduler's run delay, the second field of
+  `/proc/thread-self/schedstat`).
+- **Waiting for the GPU**: waiting for the GPU to be done with the stream
+  ring's slot the next frame writes (`run_wait_frame`), less any wait for a
+  core during it.
+- **Asleep in the driver**: the rest of the time until the swap. This is
+  where the driver waits: for the GPU (7 to 8 ms a frame in a30 at 640x480,
+  where the ring and the swap wait for nothing), or for a framebuffer the
+  display still shows (with two framebuffers, a frame's final blit waits
+  for the frame before to be shown).
+- **Hold**: the frame pacing holding a frame that is ready early
+  ([Architecture](ARCHITECTURE.md#frame-pacing)).
+- **Swap**: `eglSwapBuffers`, which waits when the GPU is behind.
+
+It tells the GL thread's limits apart without the pass timer's
+serialisation. A GL thread that runs all its frame is limited by the
+driver's CPU time, and a lower render scale does not help it. One that
+spends its frame in the swap is waiting for the GPU.
+
+Examples:
+- In the b30 battle the GL thread ran 17 to 19 ms of a 22 to 26 ms frame,
+  and render scales of 0.75, 0.625 and 0.5 gave the same frame rate.
+- In the c10 opening its swaps took 9 to 20 ms a frame: the GPU.
+
+With dynamic resolution on, a second line gives the steps below the render
+scale the frames were drawn at, and of the 300 frames how many were later
+than a refresh, how many of those the controller judged late for the GPU,
+and how many it could not judge (the run delay unreadable)
+([Architecture](ARCHITECTURE.md#render-targets-and-the-render-scale)):
+
+```
+I halo: gl frame: drawn 0 steps down; of 300 frames 265 slow, 0 of them late for the GPU, 0 not judged (run delay unreadable)
+```
 
 ## HALO_GPU_PASS_TIMING
 
@@ -590,7 +642,10 @@ the others wait. This is how the project found which one, scene by scene.
    multiples of 16.7 ms, vsync sets the pace. If they spread in between,
    and turning vsync off (`HALO_SWAP_INTERVAL=0`) changes nothing, it does
    not.
-3. **Compare the threads with the frame.** With `HALO_GL_TIMING=1`, add the
+3. **Compare the threads with the frame.** `HALO_GL_FRAME_LOG=1` shows the
+   GL thread running, asleep in the driver, holding or swapping, and how long
+   it waits for the game's thread; a change of render scale that leaves the
+   frame rate where it was rules the pixels out. With `HALO_GL_TIMING=1`, add the
    driver's time and the host operations: that is the GL thread's work. If
    it is close to the frame time and the game's thread waits for the frame
    before, the GL thread (or a GPU stall inside it) is the limit. If the

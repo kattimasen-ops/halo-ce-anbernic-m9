@@ -67,22 +67,28 @@ limits: the typical value and the range of `HALO_FPS_LOG`'s 5-second
 averages over the first minute of each level after it has loaded, with the
 level already in the game's cache (the first time a level is entered, its
 loading screen decompresses it there: [Install](docs/INSTALL.md#playing)).
-c10's opening dips to about 31 for a stretch, then holds 44; the b30 battle
-varies from run to run by 2 or 3 fps.
+Dynamic resolution is on, as it is by default. c10's opening holds 60 after
+its first 45 seconds. The b30 battle varies from run to run by 2 or 3 fps.
 
 <!-- performance table: update the numbers and the date here as optimisations land -->
-Last updated: 2026-10-01 (release v2026.10.01).
+Last updated: 2026-10-02 (release v2026.10.02).
 
 | Scene | `render_scale = 0.75` (480x360, default) | `render_scale = 1.0` (640x480) |
 | --- | --- | --- |
 | Main menu | 60 | 60 |
-| c10, 343 Guilty Spark (swamp) | about 40 (31–44) | about 24 (19–28) |
-| b30, The Silent Cartographer (beach battle) | about 40 (35–44) | about 30 (28–34) |
-| a30, Halo (level opening) | about 55 (39–60) | about 40 (26–47) |
+| c10, 343 Guilty Spark (swamp) | about 57 (46–60) | about 56 (23–60) |
+| b30, The Silent Cartographer (beach battle) | about 41 (35–46) | about 38 (28–47) |
+| a30, Halo (level opening) | about 59 (39–60) | about 40 (26–60) |
 <!-- end of performance table -->
 
-At 640x480 the GPU's pixel and vertex work is the limit. At 0.75 the limit is
-the Mali driver's CPU time for each draw call on the GL thread. The kernel's
+At 0.75 the limits are the game's own thread and the Mali driver's CPU time
+for each draw call on the GL thread. Where the GPU is the limit, as in c10,
+dynamic resolution lowers the render scale, down to 0.5, until it keeps up.
+At 640x480 the GPU is the limit in the a30 opening and the b30 battle too.
+The b30 battle steps down to 480x360 to 520x390 for much of the fight. In
+a30 the driver waits for the GPU where dynamic resolution does not yet see,
+so after its intro a30 stays at 640x480
+([Roadmap](docs/ROADMAP.md#3-the-gpu-and-the-picture)). The kernel's
 thermal governor lowers the clocks at 70 °C. The history of the
 optimisations and the measurements behind them are in
 [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
@@ -101,7 +107,8 @@ The port needs an Allwinner H700 (4x Cortex-A53 at 1.5 GHz, Mali-G31 MP2,
 | Anbernic RG40XX H | 640x480 | Untested, expected to work |
 | Anbernic RG40XX V | 640x480 | Untested, expected to work |
 | Anbernic RG CubeXX | 720x720 | Untested |
-| Anbernic RG34XX | 720x480 | Untested |
+| Anbernic RG34XX SP | 720x480 | Works, reported by a user ([#1](https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/issues/1)) |
+| Anbernic RG34XX | 720x480 | Untested, expected to work |
 
 TrimUI handhelds and devices with other SoCs are not supported: they have
 different GPUs and drivers. Other firmware on the H700 (muOS, ROCKNIX) is
@@ -272,7 +279,7 @@ launcher's defaults for the handheld:
 | `display.model_detail` | `0.5` | How early objects switch to their simpler models (1.0 is the game's own switch point), multiplied by the render scale. |
 | `display.fast_shaders` | `true` | Colours and combiner arithmetic in half precision (fp16). |
 | `display.fast_textures` | `true` | DXT1 and 16-bit Xbox textures sent to the GPU as 16-bit texels. |
-| `display.screen_width` | `640` | The columns of the 480-line picture (640 for the Xbox's 4:3). |
+| `display.screen_width` | `0` | The columns of the 480-line picture: 0 for the screen's shape (640 on 4:3 screens, 720 on 3:2), 640 for the Xbox's 4:3. |
 | `display.interpolation` | `true` | Draws a frame for every display refresh, blending between the game's 30 ticks a second; `false` keeps 30 fps. |
 | `display.frame_pacing` | `true` | Shows each frame at the display refresh it was drawn for, so that most frames show the world as it is when they are seen. |
 | `display.vsync` | `true` | Waits for the display between frames. |
@@ -377,7 +384,9 @@ native port of the decompiled code avoids the emulation entirely.
 
 It should work on the other Allwinner H700 handhelds that run Knulli: the
 Anbernic RG35XX Plus, SP and 2024, RG40XX H and V, RG CubeXX and RG34XX.
-Only the RG35XX H has been tested. TrimUI handhelds and other SoCs are not
+The RG35XX H is the one it is developed on, and a user reported the RG34XX
+SP working, its 3:2 screen filled with `screen_width = 0`
+([#1](https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/issues/1)). TrimUI handhelds and other SoCs are not
 supported.
 
 ## Legal notice

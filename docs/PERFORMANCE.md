@@ -434,7 +434,10 @@ Since then the game's thread has become cheaper (see the last notes in the
 history above), and a30 runs at 53 to 57 fps, limited by the GPU. In the
 b30 battle the game's thread is the limit: of its time, about 48% is
 drawing (the game's renderer and the Direct3D translation), 23% the game's
-tick (objects, AI, collision) and 14% waiting for the GL thread.
+tick (objects, AI, collision) and 14% waiting for the GL thread. On
+2026-10-02 the GL thread turned out to be limited by the driver's CPU time,
+not the GPU, and a30 reached about 58 fps
+([Where the threads' frames go](#where-the-threads-frames-go-2026-10-02)).
 [Roadmap](ROADMAP.md) keeps the current list of limits and planned work.
 
 ## Upstream at c55e4e2b (2026-10-01)
@@ -453,6 +456,131 @@ still evaluated): a30 is back at 53.4 fps, b30's walk at 48.8, and the game
 image is 400 KB smaller. Upstream's high-res HUD (`display.high_res_hud`)
 took 77 MB more memory and about 1 fps in a30; the launcher writes it off
 in a new `config.toml`.
+
+## Upstream at 9f3e8c92 (2026-10-02)
+
+Three commits on from c55e4e2b: upstream's high-resolution text and the
+menus' redrawn titles (`display.high_res_text`), and players' names above
+their heads in multiplayer. Rebased, a30 and the b30 battle run as before
+(a30 about 53 fps over its first minute, the battle 36 to 43). The
+high-resolution text cost no frame rate once a level ran, but the level's
+first five seconds ran at 20 to 25 fps while its glyphs were drawn, and the
+game held about 100 MB more memory; the launcher writes it off
+([Configuration](CONFIGURATION.md#displayhigh_res_text)). The game image is
+2.3 MB larger with the fonts and titles embedded.
+
+## Where the threads' frames go (2026-10-02)
+
+**Not the GPU, in a30 and the b30 battle.** The plan was dynamic resolution:
+a render scale that drops while the GPU falls behind. Measured first, the
+b30 battle ran the same at render scales 0.75, 0.625 and 0.5, at 40 to 46
+fps each, so its pixels were not what limited it. A new log of the GL
+thread's frame (`HALO_GL_FRAME_LOG`,
+[Profiling](PROFILING.md#halo_gl_frame_log)) showed what did. In a30 the GL
+thread was running for about 15 ms of its 17.5 ms frames. In the battle it
+ran 17 to 19 ms of 22 to 26 ms, and waited another 2 to 6 ms for the game's
+thread. In neither was it asleep in the driver for more than a millisecond
+or two. Its time is the driver's CPU time, which the render scale does not
+change.
+
+c10 is the exception. There the GL thread's swaps take 9 to 20 ms a frame,
+waiting for the GPU, and the frames alternate between one and two
+refreshes:
+
+| c10 opening | Frame rate |
+| --- | --- |
+| Render scale 0.75 | 30 to 42 fps |
+| Render scale 0.625 | about 56 fps |
+| Render scale 0.5 | a steady 60 fps |
+
+So the render scale now follows the GPU (`display.dynamic_resolution`,
+[Configuration](CONFIGURATION.md#displaydynamic_resolution-and-displaydynamic_resolution_min)).
+In c10 it went from 0.75 to 0.5 in the first four seconds. The level ran at
+51 to 58 fps until about 45 seconds in, then held 60: 99% of the frames in
+the run's last 50 seconds were on time.
+
+a30 showed what the controller must not do. The GPU does fall behind in
+the first seconds of its intro, and the scale stepped down there. But at
+render scales 0.6875 and 0.625, one stretch of the level then locked into
+frames of one refresh and two, about 50 fps, where 0.75 held 60.
+
+The cause is the frame pacing. At a fixed 0.625, a30 ran at about 51 fps.
+The GL thread's frame was 13.2 ms running, about 3.5 ms asleep in the
+driver (none without the shadows), and a 2.4 ms hold. With the pacing off
+(`display.frame_pacing = false`), the same run held 60 fps with no hold.
+
+So a window of 30 frames at a lowered scale that has 3 or more late frames,
+none of which waited for the GPU, now steps straight back up. Like any step
+up, it is tried again after a longer wait each time the GPU's lateness takes
+it back.
+
+a30 now steps down in its first seconds and is back at 0.75 about 20
+seconds in. The pacing at lower scales is next on the
+[Roadmap](ROADMAP.md#3-the-gpu-and-the-picture).
+
+At render scale 1.0 the controller holds the b30 battle at 480x360 to
+520x390 for much of the fight (37 to 41 fps over the last 50 s of two runs,
+about as at 0.75), but does not help a30 after its intro. a30 is limited by the GPU
+there too, but the GL thread waits for it inside the driver's other calls
+(asleep 7 to 8 ms a frame, the swap 0.16 ms), where the controller does not
+look. The driver has no timer queries to measure the GPU instead.
+
+**Buffer writes on the game's thread.** Of the GL thread's 15 ms in a30,
+about 1.8 ms were copies. The renderer streams about 460 writes and 900 KB
+a frame into buffers mapped for good, and each write was copied twice:
+into the queue on the game's thread, then out of it into the buffer on the
+GL thread. Now the game's thread copies into the buffer itself and queues
+only the flush, once the GPU has passed the fence of the frame that last
+used the ring slot ([Architecture](ARCHITECTURE.md#vertex-data-the-mirror-and-the-stream-ring)).
+
+The same build, with and without it (`HALO_DIRECT_WRITES=0`), in a30:
+
+| | Without | With |
+| --- | --- | --- |
+| Frame rate | 56.3 fps | 58.4 fps |
+| The GL thread's CPU time | 15.1 ms a frame | 13.8 ms a frame |
+| Frames over 22 ms in 50 s | 306 | 114 |
+
+The b30 battle did not change (about 41 fps): the game's thread limits it.
+
+**The game's thread.** With the GL thread now holding its frames for 2 to 3
+ms in a30 for the frame pacing, the game's thread was the limit there too.
+It averaged about 16.4 ms of work a frame. Frames that run a game tick took
+about 19 ms (5.6 ms of tick and 13.3 of drawing), against a budget of 16.7.
+Sampled at 1000 a second:
+
+- In a30, 74% of the thread was the rendering: models 36%, the HUD 5.5%,
+  shadows 5.3%. Sounds took 5.3%, most of it collision rays for their
+  obstruction, and the tick 5%.
+- In the b30 battle, 61% was the rendering and 26% the tick (objects 15%,
+  AI 8%).
+- No single function took more than 6.3%. The largest were `datum_get`, the
+  engine's array accessor, and `prepare_draw`, the Direct3D translation's
+  per-draw work.
+
+Two things were plain waste:
+
+- **The HUD's tag search.** For every bitmap it drew, every frame, the HUD
+  checked the bitmap's tag reference by searching every tag by name
+  (`verify_tag_reference`, `tag_loaded`, `_stricmp`). That was about 3% of
+  the game's thread in a30. The reference's own index now answers when the
+  tag there has its group and name.
+- **The sound obstruction cache.** Upstream caches each sound's
+  obstruction for a tick, but in 128 slots chosen by the low bits of
+  products of the position's coordinates. Those bits come from the floats'
+  low mantissa bits, which positions placed by hand often have all zero.
+  10% of the queries in a30 (14% in the battle) found another sound in their
+  slot and cast their ray again. The cache now has 1024 slots, and the hash
+  mixes the high bits in.
+
+**Where a30 stands.** About 58 fps over the minute after the first 30 s,
+with 88 to 96% of frames shown on time (15 to 18 ms) from run to run. The
+GL thread now waits 2 to 4 ms a frame for the display (the pacing's hold,
+or the final blit waiting for the framebuffer still shown). The late frames
+are the game thread's frames with a tick. Without the object shadows
+(`render_shadows false`) a30 runs at 59.5 fps with 99% of frames on time;
+without the water, 59.7 fps and 99%. The b30 battle runs at about 41 fps,
+limited by the game's thread.
 
 ## Entering a level (2026-10-01)
 
@@ -480,9 +608,27 @@ Flushing the cache file at the end of the copy (`fdatasync` through the
 FUSE exFAT driver), so that the loading screen would wait for the card,
 was tried and is not in the port: with it, on a card in good shape, the
 level started at 1 to 9 fps for 5 to 20 s (three levels, against none
-without), with the disk idle and the kernel reclaiming memory. A plain
-`sync()` (the card's dirty pages, without the driver's flush) is still to
-be tried, with a card made busy on purpose.
+without), with the disk idle and the kernel reclaiming memory.
+
+A plain `sync()` at the end of the copy (the kernel's dirty pages written
+out, without the driver's flush) is in the port (2026-10-02). It was
+measured with three levels the cache did not hold (a30, b30, c10), each
+entered with and without it: on a card made busy before each level (1 GB
+written and deleted with `dd`), and on the same card after five idle
+minutes. The 5 s samples of the first 50 s after each level loaded:
+
+| Card | Level | Without `sync()` | With it |
+| --- | --- | --- | --- |
+| Busy | a30 | 16, then 2 to 3 to the end | 20 and 10, then 39 to 56 |
+| Busy | b30 | 32, then 3 to 8 for 35 s, then 26 and 60 | 39 and 48, then 38 to 60 (as usual) |
+| Busy | c10 | 33, then 3 to 11 to the end | 30 to 47 (as usual) |
+| In good shape | a30 | 37 to 60 | 35 to 59 |
+| In good shape | b30 | 39 to 60 | 38 to 60 |
+| In good shape | c10 | 20, then 31 to 43 | 30 to 44 |
+
+The loading screen took 18 to 24 s without and 22 to 29 s with, 3 s longer
+on average over the six pairs: the copy's last writes are made behind it
+instead of during the level.
 
 The rebase onto c55e4e2b had also turned off the checkpoint kept in memory
 ([Architecture](ARCHITECTURE.md#system-calls-files-and-time)): it was under `HALO_LINUX`,
@@ -504,3 +650,66 @@ after each level loaded, the level in the cache; the README's table):
 The 640x480 column's previous measurement, on 2026-09-30's first builds,
 gave 20 to 26 fps; a30 at 1.0 has since doubled, with the GPU work the
 history above took out.
+
+The release of 2026-10-02, with dynamic resolution on (the default), after
+the frame pacing's fix ([below](#frame-pacing-after-a-long-frame-2026-10-02)),
+and with the level in the cache:
+
+| Scene | 0.75 | 1.0 |
+| --- | --- | --- |
+| c10, opening | 46–60 (60 after the first 45 s) | 23–60 (60 after the first 45 s) |
+| b30, beach battle | 35–46 | 28–47 |
+| a30, opening | 39–60 | 26–60 (40 once past the intro) |
+
+Over the last 50 s of two-minute runs: a30 57.7 fps at 0.75 and 39 to 40
+at 1.0, c10 60.0 at both, and the b30 battle 41.0 to 41.7 at 0.75 and 36.5
+to 41.3 at 1.0.
+
+## Shaders on a fresh install (2026-10-02)
+
+The port keeps the driver's compiled programs in `save/shaders`
+([Architecture](ARCHITECTURE.md#the-program-binary-cache)). Each program is
+compiled once, the first time the game draws with it, on threads beside the
+GL thread. Meanwhile the GL thread skips the draws that need it rather than
+wait ([Architecture](ARCHITECTURE.md#programs-built-beside-the-gl-thread)).
+
+With that cache emptied, a30's first 10 seconds compiled 91 programs and
+skipped 23,207 draws over 602 frames:
+
+| | First 5 s | Next 5 s |
+| --- | --- | --- |
+| Cache empty (fresh install) | 35 fps | 47 fps |
+| Cache in place | 51 fps | 60 fps |
+
+After the first seconds, frames took up to 100 ms. The cost comes the first
+time each scene is drawn after an install, and is gone the next time.
+
+The port does not compile every program behind the first start's notice.
+That would need the list of programs before the game draws. A pixel
+program's key is the game's own combiner state, worked out from the map's
+shaders as they are drawn. A list made by playing every level would be
+derived from the game's data, and this project ships none of it.
+
+## Frame pacing after a long frame (2026-10-02)
+
+At render scale 1.0, the a30 opening ran its first 10 seconds at 8 to 19
+fps. The hitch log showed what happened after the level's first frames (325
+and 367 ms):
+- The game's thread made frames of whole refreshes: 266 ms, then a refresh
+  less every four frames, down to 100 ms.
+- Each time, it was waiting for the frame before.
+
+The pacing gives each frame a due refresh from the time frames lately took
+from their start to their swap
+([Architecture](ARCHITECTURE.md#frame-pacing)). That time also counted the
+wait of a frame's commands while the GL thread held the frame before to
+its own due refresh. So one long frame made the frames after it due as far
+out and held as long, and their own times stayed as long. Leaving that wait
+out:
+
+| a30 at 1.0, 5 s samples | First | Second | Third | Fourth |
+| --- | --- | --- | --- | --- |
+| Before | 30.1 | 12.4 | 48.2 | 56.6 |
+| After | 45.4 | 59.7 | 57.1 | 58.2 |
+
+The same loop could follow any long frame, not only a level's first.

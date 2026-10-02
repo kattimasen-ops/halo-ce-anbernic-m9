@@ -253,12 +253,13 @@ launcher writes these values the first time:
 
 ```toml
 [display]
-screen_width = 640
+screen_width = 0
 render_scale = 0.75
 interpolation = true
 fast_shaders = true
 fast_textures = true
 high_res_hud = false
+high_res_text = false
 
 [update]
 auto = false
@@ -286,7 +287,7 @@ added to it at their defaults at the first start, and the log says so
 launcher's own values are written only when the file is missing, so a
 change to them in a new version reaches you only if you delete the file.
 So a `config.toml` from before this version gets `display.high_res_hud`
-from the game, on: set it to `false` by hand
+and `display.high_res_text` from the game, on: set them to `false` by hand
 ([Configuration](CONFIGURATION.md#displayhigh_res_hud)).
 
 Compiled shader programs are stored under a hash of their source and of the

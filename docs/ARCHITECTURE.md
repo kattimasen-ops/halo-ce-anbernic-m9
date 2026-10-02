@@ -218,8 +218,12 @@ game decompresses it into one of its cache files in `z:\`
 menu and three multiplayer maps), behind the loading screen
 (`cache_files_decompress_windows.c`), as the Xbox did to its hard disk; a
 level already there loads without it. On the handheld that is about 150 MB
-read and up to 280 MB written, 20 to 25 s; the kernel writes the last 50 to
-70 MB out in the first seconds of the level ([Performance](PERFORMANCE.md#entering-a-level-2026-10-01)).
+read and up to 280 MB written, 20 to 25 s. The kernel keeps the last 50 to
+70 MB of those writes in memory; the copy ends with a `sync()`, so that
+they reach the card behind the loading screen rather than during the
+level, where a card still busy with earlier writes (just after the
+install) slowed the level's first minute to a crawl
+([Performance](PERFORMANCE.md#entering-a-level-2026-10-01)).
 
 ### Watching guest memory
 
@@ -458,12 +462,13 @@ replaces them as well:
 
 | Import | On the GL thread |
 | --- | --- |
-| `host_gl_buffer_write`, `host_gl_buffer_write_to` | Queued with a copy of the data; the GL thread copies it into the mapped buffer. |
+| `host_gl_buffer_write_to` | Into a stream ring buffer mapped for good, once the GPU has passed the fence of the frame that last used the slot: copied into the mapping on the calling thread, and only the flush is queued ([The stream ring](#vertex-data-the-mirror-and-the-stream-ring)). Otherwise queued with a copy of the data, which the GL thread copies into the mapped buffer. |
+| `host_gl_buffer_write` | Queued with a copy of the data; the GL thread copies it into the bound buffer. |
 | `host_gl_buffer_persistent` | Queued: gives a stream buffer its storage and maps it for good. |
 | `host_gl_program_build` | Queued with the cache file's path and both shaders' sources: hands the program to the program builders (below). |
 | `host_gl_texture_thread` | Made on the calling thread, not queued: gives the guest's texture worker a context of its own (below), on which its GL calls are then made directly. |
 | `host_gl_frame_due` | Answered on the calling thread, not queued: how long until the refresh the frame the game begins is due at ([Frame pacing](#frame-pacing)), or 0. |
-| `host_gl_fence_frame`, `host_gl_wait_frame` | Queued: fence the frame's GPU work; wait for the GPU to finish the frame that last used a ring slot. |
+| `host_gl_fence_frame`, `host_gl_wait_frame` | Queued: fence the frame's GPU work; wait for the GPU to finish the frame that last used a ring slot. The GL thread also asks after each swap, without waiting, which fences the GPU has passed, for the buffer writes above. |
 | `host_gl_visibility_frame` | Queued with the frame's test list: copies the visibility counters for reading later. |
 | `host_sdl_gl_swap_window` | Queued; then the game's thread waits for frame pacing (below). |
 | `host_gl_get_string`, `host_gl_has_extension`, `host_gl_read_buffer_word` | Synchronous. |
@@ -527,7 +532,10 @@ begins, the game asks `host_gl_frame_due` how long it is until the refresh
 the frame is due at: the first it can be ready for, by the time the game's
 and the GL thread took to a frame's swap lately (the second longest of the
 last eight, and 1.5 ms for the swap), after the refresh of the frame before
-it. The game's clock for the frame is its performance counter plus that
+it. That time leaves out any wait of the frame's commands while the GL
+thread held the frames before it. Counted, one long frame (a level's first,
+about 300 ms) made the frames after it due as far out, held as long, and so
+as late again, for about ten seconds. The game's clock for the frame is its performance counter plus that
 time, the moment the frame will be on screen (`halo_frame_due`,
 `main_update_time_unthrottled`), and the GL thread holds the frame's swap
 until the refresh before it has begun, so that a frame ready early is not
@@ -567,7 +575,9 @@ thread was preempted across a wrap. `HALO_PACING_LOG=1` reports it
 
 `HALO_GL_THREAD=0` makes every call on the game's thread, as the Android
 host does, and programs are then built there too. `HALO_ASYNC_PROGRAMS=0`
-keeps the GL thread but builds programs on it. `HALO_GL_THREAD_FRAMES` (1 by
+keeps the GL thread but builds programs on it. `HALO_DIRECT_WRITES=0` has
+the GL thread make every buffer write again
+([The stream ring](#vertex-data-the-mirror-and-the-stream-ring)). `HALO_GL_THREAD_FRAMES` (1 by
 default, 7 at most: the frame pacing keeps the eight frames before those in
 flight) is how many frames the game may be ahead of the GL thread. A
 recorded `glFlush` is told to the GL thread at once. The threads that make
@@ -634,6 +644,41 @@ mip level and the depth texture. The level is new in this port: a target can
 be one level of a mipmapped texture (see
 [the water's bump map](#render-targets-sampled-with-their-mip-chain)).
 
+**Dynamic resolution.** With `display.dynamic_resolution`, the render scale
+follows the GPU. Once a frame, after `Present`, `halo_screen_commit` asks
+the host how many steps of 1/16 below `display.render_scale` to draw
+(`host_gl_scale_step`). It passes the most steps that
+`display.dynamic_resolution_min` allows. A scale it has not drawn at before
+gets render targets of its own, kept for when it comes back.
+
+The Knulli host's GL thread decides, from how long it waits for the GPU:
+- A frame later than a refresh, during which the thread waited more than 2
+  ms for the GPU, counts as the GPU falling behind. The waits are the swap
+  and the wait for the GPU to be done with a stream ring's slot, less any
+  time the thread waited for a core meanwhile. A frame where that time
+  cannot be read (the kernel's `/proc/thread-self/schedstat`) is not judged.
+- Every 30 frames, the scale steps down if 3 or more of them were such
+  frames.
+- It steps back up after 600 frames in a row without one (about 10
+  seconds).
+- At a lowered scale, a window of 30 frames with 3 or more late frames,
+  none of them waiting for the GPU, steps back up at once: the lower scale
+  is not what those frames need. In the a30 opening, scales 0.625 and
+  0.6875 had locked one stretch of the level into frames of one refresh and
+  two (about 50 fps), where 0.75 held 60
+  ([Roadmap](ROADMAP.md#3-the-gpu-and-the-picture)).
+- A step up that has to be taken back within 120 frames doubles both waits,
+  up to 3600 frames; a step up that holds for 3600 frames resets them.
+- The frames the game had begun before a change, still at the scale
+  before, are not judged.
+
+Frames the CPU-side threads make late have short waits for the GPU, so they
+do not lower the scale. At render scale 1.0 the a30 opening is limited by
+the GPU after its intro too, but the GL thread waits for it inside the
+driver's other calls, not in these two, so the scale stays at 1.0 there. The model detail and the high-resolution text keep using
+the scale as set: their switch points and glyphs do not move with the
+steps.
+
 ### Presenting a frame
 
 `D3DDevice_Present`:
@@ -693,6 +738,27 @@ next such wait. (A draw would have to stream most of a buffer by itself to
 meet its own data again; the game's draws stream well under a megabyte each.) Each new frame and each such switch begins a new
 `stream_generation`, which tells the constant blocks (below) that what they
 wrote before is gone.
+
+With the GL thread, the game's thread writes the ring's buffers itself
+(`queued_gl_buffer_write_to` in `host_glthread.c`). Queued, each write was
+copied twice: into the queue on the game's thread, then out of it into the
+buffer on the GL thread. That was about 460 writes and 900 KB a frame in
+a30, 1.8 ms of the GL thread's frame. Now the game's thread copies into the
+mapping and queues only the flush, but only into a slot the GPU is known to
+be done with:
+
+- The GL thread notes which frame each slot's fence marks.
+- After each swap, it asks the driver without waiting which fences the GPU
+  has passed (`host_gl_frame_fence_passed`), and publishes them.
+- When the renderer moves on to a slot (`host_gl_wait_frame`), the game's
+  thread compares the frame whose fence the slot carries with the latest the
+  GPU has passed. It compares again at each write until the GPU has.
+- Until then, its writes are queued as before, behind the GL thread's wait
+  for the fence.
+
+Both threads number the frames by their swaps. The spare buffer is written
+only after a `glFinish`, as before. `HALO_DIRECT_WRITES=0` queues every
+write.
 
 ### Indexed draws
 
@@ -1174,7 +1240,7 @@ between ticks, so the frame rate can exceed the tick rate.
 | `port/knulli/host/host_main.c` | Entry point, paths, guest environment, logging | new |
 | `port/knulli/host/host_sdl2.c` | SDL3 calls answered by SDL2; exit combination; frame statistics (`HALO_FPS_LOG`) | new |
 | `port/knulli/host/host_sdl3_events.c`, `host_knulli.h` | SDL3 event layout and numbering | new |
-| `port/knulli/host/host_glthread.c`, `host_glthread.h` | The GL thread, host operations, frame pacing, GPU pass timer | new |
+| `port/knulli/host/host_glthread.c`, `host_glthread.h` | The GL thread, host operations, frame pacing, buffer writes made by the game's thread, GPU pass timer, the GL thread's frame split | new |
 | `port/knulli/glthread_gen.py` | Generates the recording and replay functions | new |
 | `port/knulli/host/host_gl_timing.c`, `.S` | The GL call timer (`HALO_GL_TIMING`) | new |
 | `port/knulli/host/host_profile.c`, `profile.py` | The sampling profiler and its report | new |
@@ -1183,7 +1249,7 @@ between ticks, so the frame rate can exceed the tick rate.
 | `port/knulli/build.sh` | Builds the host and copies the guest image | new |
 | `port/android/host/host_loader.c` | Image loading; `host_import_wrap` hook | patched |
 | `port/android/host/host_gl.c` | Asynchronous visibility read-back; buffers mapped for good | patched |
-| `port/android/host/host_syscall.c` | Clock reads through the vDSO | patched |
+| `port/android/host/host_syscall.c` | Clock reads through the vDSO; `sync` | patched |
 | `port/android/host/host_thread.c`, `host.h` | Thread stack bounds for the profiler | patched |
 | `port/android/host_imports.list`, `guest_host.h`, `halo_android_abi.h` | The new host functions and limits | patched |
 | `port/android/guest/runtime/guest_string.c` | `memcmp` and `memcpy` eight bytes at a time for the guest | new, in the upstream tree |
@@ -1199,3 +1265,6 @@ between ticks, so the frame rate can exceed the tick rate.
 | `source/rasterizer/xbox/rasterizer_xbox_water.c` | Water bump map at the frame's start | patched |
 | `source/rasterizer/xbox/rasterizer_xbox_decals.c` | Decals grouped by bitmap | patched |
 | `source/models/models.c` | Model detail scale | patched |
+| `source/cache/cache_files_decompress_windows.c` | The level's cache file written out before the level starts | patched |
+| `source/cache/cache_files.c`, `source/tag_files/tag_groups.c` | Tag references checked where they say their tag is (`tag_loaded_at`) | patched |
+| `source/sound/game_sound.c` | The sound obstruction cache: more slots, a better hash | patched |

@@ -1,7 +1,7 @@
 # Knulli (Allwinner H700 handhelds)
 
 `port/knulli` runs the Android port's guest image (the game as ILP32 AArch64
-code, [port/android/README.md](https://github.com/cybersecurity/halo-ce-universal/blob/c55e4e2b9d90550b0e761eb78dfe9d7c74880cb9/port/android/README.md)) as an ordinary aarch64
+code, [port/android/README.md](https://github.com/cybersecurity/halo-ce-universal/blob/9f3e8c92de7569a577c3044d05288dbd6590c5bf/port/android/README.md)) as an ordinary aarch64
 Linux program on handhelds with the Allwinner H700 under Knulli: the Anbernic
 RG35XX H, Plus, SP, 2024, RG40XX H/V, RG CubeXX and others. Their GPU, a
 Mali-G31, has only Arm's OpenGL ES driver for the framebuffer (no X11,

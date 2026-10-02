@@ -11,36 +11,32 @@ history as they land.
 
 ## Where it stands
 
-On the RG35XX H at render scale 0.75, the menus run at 60 fps. In the
-release of 2026-10-01 (the first minute after each level loads), the a30
-opening (Halo) runs at about 55 fps (39 to 60), most frames at 16.7 ms, the
-b30 beach battle (The Silent Cartographer) at 35 to 44 fps (about 40), and
-the c10 opening (343 Guilty Spark) at 31 to 44 fps. With
-the repeated model draws instanced, a30 is limited by the GPU, and the
-environment shadows are its largest cost: without them a30 holds 57.5 to
-59.9 fps. The next steps are to draw the shadows' textures without
-splitting the primary target's pass (a first attempt made every other frame
-slow), and to cut the GPU's work in b30 and c10. The [README's performance table](../README.md#performance)
-has the published figures.
+On the RG35XX H at render scale 0.75, the menus run at 60 fps. On
+2026-10-02, over the minute after each level's first 30 seconds:
 
-In the a30 opening, a frame is made by three workers that overlap: the
-game's thread, the GL thread that runs the Mali driver, and the GPU. For
-60 fps each must take less than 16.7 ms a frame.
+- The a30 opening (Halo) runs at about 58 fps, with about 90% of frames
+  shown on time.
+- The b30 beach battle (The Silent Cartographer) runs at about 41 fps.
+- The c10 opening (343 Guilty Spark), with dynamic resolution, runs at 51
+  to 58 fps for its first 45 seconds and then holds 60. It ran at 30 to 42
+  fps at a fixed 0.75.
 
-| Worker | Measured | Limit? |
-| --- | --- | --- |
-| GL thread | 15.2 ms a frame in the driver's functions, plus 1.9 to 2.4 ms of buffer writes and the waits at changes of render target | The limit: the game's thread waits 1.5 to 1.9 ms a frame for it. |
-| Game's thread | About 20 ms a frame before its latest improvements (a faster `memcmp` and `memcpy`, the GL queue published in 4 KB steps); the renderer's per-draw work (`prepare_draw`) was about a quarter of it | Close behind: it barely waits. |
-| GPU | About 13.5 ms of vertex and tiler work and about 16 ms of pixel work a frame, measured on an earlier build | Close: with the alpha test elision turned off, a30 becomes GPU-bound. |
+The [README's performance table](../README.md#performance) has the
+published figures.
 
-The GL thread's frame, in the driver's functions:
+A frame is made by three workers that overlap: the game's thread, the GL
+thread that runs the Mali driver, and the GPU. For 60 fps each must take
+less than 16.7 ms a frame. What limits each scene
+([Performance](PERFORMANCE.md#where-the-threads-frames-go-2026-10-02)):
 
-| Function | Calls a frame | Time a frame |
-| --- | --- | --- |
-| `glDrawRangeElementsBaseVertex` | 456 | 7.8 ms (17.2 µs each) |
-| `glBindFramebuffer` | 25 | 2.6 ms |
-| `glUniform4fv` | about 560 | 1.3 ms |
-| Everything else | | about 3.5 ms |
+| Scene | The limit |
+| --- | --- |
+| a30 opening | The game's thread. It does about 16.4 ms of work a frame, and about 19 ms in the frames that run a game tick (5.6 ms of tick, 13.3 of drawing). The GL thread runs about 13 ms a frame and holds or waits for the display for the rest. |
+| b30 battle | The game's thread, at about 23 ms a frame: 61% the rendering, 26% the tick. The GL thread runs 17 to 19 ms and waits 2 to 6 ms for it. |
+| c10 opening | The GPU: at 0.75 the swaps wait 9 to 20 ms. Dynamic resolution lowers the scale until it keeps up. |
+
+The GL thread's time is the driver's CPU time per call. No lower render
+scale changes it; the render scale only helps where the GPU is the limit.
 
 ## Planned work
 
@@ -63,9 +59,14 @@ The driver's per-draw cost is the largest single item. The ways to cut it:
 - **Merge the environment's lightmap and diffuse passes.** The level
   geometry is drawn in more than one pass; combining these two would cut
   its draws. This is a large change to the game's rasterizer.
-- **Write less into the stream buffers.** The 1.9 to 2.4 ms of buffer
-  writes a frame is the copying itself (deferring the flushes changed
-  nothing), so only writing fewer bytes helps.
+- **The stream buffers' copies (done, 2026-10-02).** The game's thread now
+  copies into the buffers mapped for good itself, and the GL thread only
+  flushes. The GL thread's frame in a30 went from 15.1 to 13.8 ms
+  ([Architecture](ARCHITECTURE.md#vertex-data-the-mirror-and-the-stream-ring)).
+- **The sun glow's passes.** When the sun is in view, a few single-draw
+  passes alternate between a small target and the back buffer, each a
+  change of target and about 1.7 ms of the GPU's time at render scale
+  0.625. Drawing them without the switches would cut both.
 
 ### 2. The game's thread
 
@@ -73,18 +74,55 @@ The driver's per-draw cost is the largest single item. The ways to cut it:
   compares the pixel shader key (252 bytes), the per-draw uniform inputs
   (308 bytes) and the uniform shadows on every draw. Tracking what changed
   (dirty flags set by the state functions) would avoid most of it.
-- **Sound obstruction.** The profiler showed the sound manager's
-  obstruction tests (collision rays from the camera) among the game's
-  thread's costs. Upstream already caches each sound's result for the
-  frames of one game tick (`compute_sound_obstruction` in
-  `source/sound/game_sound.c`); how much they still cost at the current
-  frame rate needs measuring before anything is changed.
+- **Sound obstruction (measured, 2026-10-02).** The obstruction rays are
+  5% of the game's thread in a30, about 40 sounds a tick. Upstream's
+  per-tick cache had lost 10 to 14% of its queries to sounds evicting each
+  other from 128 slots. With 1024 slots and a better hash, what is left is
+  one ray per sound per tick. Fewer rays would mean changing how often the
+  game checks.
+- **The HUD's tag search (done, 2026-10-02).** The HUD checked every
+  bitmap's tag by searching all tags by name, every frame: 3% of the game's
+  thread in a30.
+- **The game tick.** In the battle the tick is a quarter of the game's
+  thread (objects 15%, AI 8%), and no single function stands out. The
+  frames with a tick are the late ones in a30.
 - **Profile-guided optimisation for the device.** The guest is optimised
   with upstream's profile, recorded by the x86 Linux build. A profile
   recorded on the handheld would match its code paths.
 
 ### 3. The GPU and the picture
 
+- **Dynamic resolution (done, 2026-10-02).** The render scale drops a step
+  of 1/16 at a time while the GPU falls behind
+  ([Configuration](CONFIGURATION.md#displaydynamic_resolution-and-displaydynamic_resolution_min)).
+  c10's opening went from 30 to 42 fps to a steady 60 after its first 45
+  seconds.
+
+- **The frame pacing below render scale 0.75.** In the a30 opening at a
+  fixed 0.625 about 51 fps; with `display.frame_pacing = false` the same run
+  holds 60.
+  - The pacing log shows nearly every frame shown a refresh after its due
+    refresh, and every sixth on screen for two refreshes.
+  - At the lower scales the GL thread sleeps about 3 ms a frame in the
+    driver (none without the shadows), so its frames reach their swap late
+    in the refresh before their due one. Mali's last pass of a frame then
+    misses its refresh, and the frames after it follow until one is due two
+    refreshes on.
+  - Dynamic resolution steps back up out of it.
+
+  Next: what the shadows' changes of target wait for, and due times that
+  follow the refresh frames are really shown at.
+- **Dynamic resolution at render scale 1.0.** At 1.0 the a30 opening is
+  limited by the GPU after its intro, but the GL thread waits for it inside
+  the driver's other calls (asleep 7 to 8 ms a frame), not in its swap or at
+  the stream ring, so the scale stays at 1.0 there (about 40 fps). The b30
+  battle's waits do show, and it steps down. The driver has no timer
+  queries.
+
+  Next: judge from the GL thread's whole frame, its time asleep in the
+  driver as the frame split works it out, rather than from two of its
+  waits. The shadows' sleep at the lower scales (above) would then have to
+  be told apart from the GPU's, by whether a step down cuts the sleep.
 - **The HUD at full resolution.** At a render scale below 1, the HUD and
   text are drawn at the lower resolution too. Drawing them at the screen's
   resolution would keep them sharp, and would let the 3D picture go to a
@@ -95,10 +133,12 @@ The driver's per-draw cost is the largest single item. The ways to cut it:
 
 ### 4. Devices and firmware
 
-- Only the RG35XX H has been tested. The other 640x480 H700 handhelds
-  (RG35XX Plus, SP, 2024, RG40XX H and V) are expected to work; the
-  RG CubeXX (720x720) and RG34XX (720x480) have other screen shapes
-  (`display.screen_width`).
+- The RG35XX H is the one the port is developed on. A user reported the
+  RG34XX SP (720x480) working
+  ([#1](https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/issues/1)).
+  The other 640x480 H700 handhelds (RG35XX Plus, SP and 2024, RG40XX H and
+  V) are expected to work. The RG CubeXX (720x720) and the RG34XX have other
+  screen shapes, which `display.screen_width = 0` (the launcher's) fits.
 - Other firmware for the H700 (muOS, ROCKNIX) is untested. The host is
   built against Knulli's SDL2 (2.30.12), whose video driver drives the Mali
   framebuffer, and Arm's driver; firmware with another graphics stack would
@@ -115,7 +155,10 @@ Reports from other devices and firmware are welcome
   1512 to 1416 MHz and the GPU from 648 to 600 MHz, and the frame rate
   drops by a few frames a second.
 - **Render scale.** The whole picture, the HUD included, is drawn at the
-  render scale (0.75 by default) and scaled up.
+  render scale (0.75 by default) and scaled up. In the a30 opening a lower
+  render scale is not faster (about 51 fps at 0.625, the frame pacing), and
+  at 1.0 dynamic resolution does not lower the scale in the a30 opening
+  after its intro ([above](#3-the-gpu-and-the-picture)).
 - **Movies.** Bink video is not available in the upstream port, so the game
   skips its movies.
 - **Network play.** The launcher turns internet play off
@@ -131,9 +174,8 @@ Reports from other devices and firmware are welcome
   translated on the game's thread.
 - **Checkpoints.** A checkpoint copies the 16 MB game state in about 14 ms
   of the game's thread.
-- **Late frames.** Where the GPU is the limit (the b30 battle, big
-  translucent effects) a frame it finishes after about 1.5 ms before its
-  refresh is shown a refresh late, and the frames after it follow it until
-  one is due two refreshes after the one before: the motion steps on about
-  one frame in six. Next: a render scale that drops while the GPU is behind
-  (dynamic resolution), and cheaper large translucent effects.
+- **Late frames.** A frame not ready about 1.5 ms before its refresh is
+  shown a refresh late. Where the GPU is the limit, dynamic resolution now
+  lowers the scale instead. The late frames left come from the game's
+  thread: in a30 the frames that run a game tick, and in the b30 battle
+  most frames.

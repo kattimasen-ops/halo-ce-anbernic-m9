@@ -114,12 +114,13 @@ if [ ! -f config.toml ]; then
 	if [ -e config.toml ] || [ -L config.toml ] ||
 		! cat > config.toml.new <<'EOF' || ! mv -f config.toml.new config.toml; then
 [display]
-screen_width = 640
+screen_width = 0
 render_scale = 0.75
 interpolation = true
 fast_shaders = true
 fast_textures = true
 high_res_hud = false
+high_res_text = false
 
 [update]
 auto = false
