@@ -5,8 +5,9 @@
 #
 # Needs: python configure.py run with --android-ndk (the guest build), the
 # aarch64-linux-gnu cross compiler, SDL2 headers (SDL2_INCLUDE) and the
-# device's libraries to link against (SYSROOT_LIB: libSDL2-2.0.so.0 and
-# libmali.so.0, which has OpenGL ES and EGL, from /usr/lib of the device).
+# device's libraries to link against (SYSROOT_LIB: libSDL2-2.0.so.0,
+# libSDL3.so.0 and libmali.so.0, which has OpenGL ES and EGL, from
+# /usr/lib of the device).
 set -eu
 
 # the folders given, as absolute paths (they are used from other folders),
@@ -38,16 +39,23 @@ for name in EGL GLES2 GLES3 KHR; do
     ln -sfn "$KHRONOS/$name" "$OUT/gl_include/$name"
 done
 
-# link names for the device's libraries
-for name in libSDL2-2.0.so.0:libSDL2.so libmali.so.0:libmali.so; do
-    library=$(ls "$SYSROOT_LIB/${name%%:*}"* | head -n 1)
+# link names for the device's libraries: SDL2, SDL3 and libmali (OpenGL ES
+# and EGL). The first file that matches each name is used, so
+# libSDL2-2.0.so.0* picks the .so.0 file that was placed in sysroot.
+for name in libSDL2-2.0.so.0:libSDL2.so libSDL3.so.0:libSDL3.so libmali.so.0:libmali.so; do
+    library=$(ls "$SYSROOT_LIB/${name%%:*}"* 2>/dev/null | head -n 1)
+    if [ -z "$library" ]; then
+        echo "build.sh: no ${name%%:*}* in SYSROOT_LIB=$SYSROOT_LIB" >&2
+        exit 1
+    fi
     ln -sf "$library" "$OUT/lib/${name##*:}"
 done
 
 # ── OPTIMIERTE FLAGS FÜR RK3326 (CORTEX-A35) ─────────────────────────────
 # Ursprünglich: -O2 -g -mcpu=cortex-a53 (für Allwinner H700)
 # Ziel: RK3326 mit 4× Cortex-A35, Mali-G31 MP2, 1 GB RAM
-# Hinweis: -flto (ohne =full, da GCC 11 die Syntax -flto=full nicht kennt)
+# Hinweis: -flto (ohne =full, da GCC 9 in Ubuntu 20.04 die Syntax
+#          -flto=full nicht kennt)
 CFLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -fPIC -Wall -Wno-unused-function \
         -D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS \
         -flto -fomit-frame-pointer -ffunction-sections -fdata-sections \
@@ -118,6 +126,8 @@ rm -f "$OUT/host_glthread_gen.c.new"
 
 compile port/knulli/host/host_glthread.c
 compile "$OUT/host_glthread_gen.c"
+# host_sdl3_events.c uses the SDL3 headers from the guest tree (build/android/
+# third_party/SDL3/include); the SDL3 library is linked below.
 compile port/knulli/host/host_sdl3_events.c -Ibuild/android/third_party/SDL3/include
 compile port/linux/src/posix_files.c
 compile port/linux/src/posix_net.c
@@ -136,6 +146,10 @@ echo "LINK $OUT/halo"
 # -Wl,-O1: Optimiert die Symboltabelle
 # -Wl,--as-needed: Linkt nur tatsächlich benötigte Bibliotheken
 # -Wl,--gc-sections: Entfernt ungenutzte Code-/Datensegmente
+#
+# Die Reihenfolge der Bibliotheken ist wichtig: -lSDL3 vor -lSDL2, weil
+# host_sdl3_events.c die SDL3-Symbole direkt nutzt und der Linker sie
+# zuerst auflösen muss. libmali enthält die OpenGL-ES- und EGL-Symbole.
 # ─────────────────────────────────────────────────────────────────────────
 # shellcheck disable=SC2086
 $CC -o "$OUT/halo" $objects \
@@ -144,7 +158,7 @@ $CC -o "$OUT/halo" $objects \
     -Wl,--allow-shlib-undefined \
     -Wl,-O1 -Wl,--as-needed -Wl,--gc-sections \
     -flto \
-    -lSDL2 -lmali -lpthread -ldl -lm
+    -lSDL3 -lSDL2 -lmali -lpthread -ldl -lm
 
 cp build/android/halo_guest.elf "$OUT/halo_guest.elf"
 ls -l "$OUT/halo" "$OUT/halo_guest.elf"
