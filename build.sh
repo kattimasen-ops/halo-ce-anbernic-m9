@@ -1,20 +1,4 @@
 #!/usr/bin/env bash
-# Builds Halo: Combat Evolved for the port.
-# Refer to README.md, "Build from source".
-#
-# ANDROID_NDK=/path/to/android-ndk-r28c SYSROOT_LIB=/path/to/sysroot ./build.sh
-#
-# Environment:
-#   ANDROID_NDK   the Android NDK r28c (the guest build, the GLES and EGL headers)
-#   SYSROOT_LIB   a folder with libSDL2-2.0.so.0*, libSDL3.so.0* and
-#                 libmali.so.0* (the runtime libraries; they are also
-#                 shipped in the artifact under libs.aarch64/)
-#   GUEST_CC      a clang with the arm64_32 target (default: clang-22)
-#   HOST_CC       the aarch64 glibc cross compiler (default: aarch64-linux-gnu-gcc)
-#   WORK          the working folder (default: work/ next to this script)
-#   DIST          the output folder (default: dist/ next to this script)
-#   JOBS          parallel jobs (default: the number of processors)
-
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -23,6 +7,7 @@ UPSTREAM_COMMIT=$(tr -d '[:space:]' < "$HERE/UPSTREAM_COMMIT")
 PATCH=$HERE/patches/halo-ce-universal-knulli.patch
 SDL2_TAG=release-2.30.12
 SDL2_ARCHIVE=https://github.com/libsdl-org/SDL/archive/refs/tags/$SDL2_TAG.tar.gz
+SDL3_TAG=release-3.2.10
 GUEST_CC=${GUEST_CC:-clang-22}
 HOST_CC=${HOST_CC:-aarch64-linux-gnu-gcc}
 JOBS=${JOBS:-$(nproc)}
@@ -46,7 +31,7 @@ ANDROID_NDK=$(cd "$ANDROID_NDK" && pwd)
 [ -n "${SYSROOT_LIB:-}" ] || die "set SYSROOT_LIB to the folder with the runtime libraries"
 [ -d "$SYSROOT_LIB" ] || die "SYSROOT_LIB=$SYSROOT_LIB is not a folder"
 SYSROOT_LIB=$(cd "$SYSROOT_LIB" && pwd)
-for library in libSDL2-2.0.so.0 libSDL3.so.0 libmali.so.0; do
+for library in libSDL2-2.0.so.0 libSDL3.so.0 libmali.so.0 libdecor-0.so.0; do
     compgen -G "$SYSROOT_LIB/$library*" > /dev/null || die "no $library* in SYSROOT_LIB=$SYSROOT_LIB"
 done
 
@@ -98,14 +83,7 @@ if [ -f "$SRC/.port-stamp" ] && [ "$(cat "$SRC/.port-stamp")" = "$stamp" ]; then
 fi
 echo "$stamp" > "$SRC/.port-stamp"
 
-# ---------- SDL2 headers ─────────────────────────────────────────────────
-# Die port/knulli-Quellen enthalten #include <SDL2/SDL.h>, der Compiler
-# sucht also mit -I$SDL2_INCLUDE nach $SDL2_INCLUDE/SDL2/SDL.h.
-# Die SDL2-Quelltarball legt die Header aber unter
-#   SDL-$SDL2_TAG/include/...
-# ab. Darum entpacken wir normal und benennen den include-Ordner in SDL2/
-# um. Das ist unabhängig davon, wie die installierte tar-Version mit
-# mehreren -C-Optionen umgeht.
+# ---------- SDL2 headers
 if [ ! -f "$SDL2_INCLUDE/SDL2/SDL.h" ]; then
     echo "== downloading SDL2 $SDL2_TAG headers"
     rm -rf "$SDL2_INCLUDE"
@@ -113,23 +91,11 @@ if [ ! -f "$SDL2_INCLUDE/SDL2/SDL.h" ]; then
     curl -L -o "$WORK/sdl2.tar.gz" "$SDL2_ARCHIVE"
     tar -xzf "$WORK/sdl2.tar.gz" -C "$SDL2_INCLUDE"
 
-    # Erwartete Struktur nach dem Entpacken:
-    #   $SDL2_INCLUDE/SDL-$SDL2_TAG/include/SDL*.h
     if [ -d "$SDL2_INCLUDE/SDL-$SDL2_TAG/include" ]; then
         mv "$SDL2_INCLUDE/SDL-$SDL2_TAG/include" "$SDL2_INCLUDE/SDL2"
     fi
     rm -rf "$SDL2_INCLUDE/SDL-$SDL2_TAG"
 
-    # Falls die Quellen schon einen SDL2/-Unterordner mitbringen, diesen
-    # nach oben ziehen.
-    if [ ! -f "$SDL2_INCLUDE/SDL2/SDL.h" ] \
-       && [ -f "$SDL2_INCLUDE/SDL2/SDL2/SDL.h" ]; then
-        mv "$SDL2_INCLUDE/SDL2" "$SDL2_INCLUDE/SDL2-tmp"
-        mv "$SDL2_INCLUDE/SDL2-tmp/SDL2" "$SDL2_INCLUDE/SDL2"
-        rmdir "$SDL2_INCLUDE/SDL2-tmp"
-    fi
-
-    # Letzte Sicherung: liegt der Header irgendwo tiefer, dorthin verlinken.
     if [ ! -f "$SDL2_INCLUDE/SDL2/SDL.h" ]; then
         real=$(find "$SDL2_INCLUDE" -name SDL.h -type f 2>/dev/null | head -n 1)
         if [ -n "$real" ]; then
@@ -139,13 +105,42 @@ if [ ! -f "$SDL2_INCLUDE/SDL2/SDL.h" ]; then
 
     if [ ! -f "$SDL2_INCLUDE/SDL2/SDL.h" ]; then
         echo "FEHLER: SDL2/SDL.h konnte nach dem Entpacken nicht gefunden werden."
-        echo "Inhalt von $SDL2_INCLUDE (max. 3 Ebenen tief):"
-        find "$SDL2_INCLUDE" -maxdepth 3 -name "SDL*.h" 2>/dev/null | head -20
         die "SDL2-Header-Setup fehlgeschlagen"
     fi
     echo "== SDL2-Header bereit: $SDL2_INCLUDE/SDL2/SDL.h"
 fi
-# ─────────────────────────────────────────────────────────────────────────
+
+# ---------- SDL3 aus dem Quellcode kompilieren (GLIBC 2.31 kompatibel) ────
+# Es gibt kein fertiges SDL3-Paket für Ubuntu 20.04 (Focal). Wir
+# kompilieren daher SDL3 aus dem Quellcode gegen die GLIBC 2.31 des
+# Containers, damit die Bibliothek auf dem M9 Pro (GLIBC 2.31) läuft.
+SDL3_SRC=$WORK/SDL3-${SDL3_TAG#release-}
+SDL3_BUILD=$WORK/sdl3-build
+SDL3_INSTALL=$WORK/sdl3-install
+if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
+    echo "== Kompiliere SDL3 $SDL3_TAG für aarch64 (GLIBC 2.31)..."
+    if [ ! -d "$SDL3_SRC" ]; then
+        curl -L -o "$WORK/sdl3.tar.gz" \
+            "https://github.com/libsdl-org/SDL/releases/download/$SDL3_TAG/SDL3-${SDL3_TAG#release-}.tar.gz"
+        tar -xzf "$WORK/sdl3.tar.gz" -C "$WORK"
+    fi
+    rm -rf "$SDL3_BUILD" "$SDL3_INSTALL"
+    mkdir -p "$SDL3_BUILD" "$SDL3_INSTALL"
+    cmake -S "$SDL3_SRC" -B "$SDL3_BUILD" \
+        -DCMAKE_SYSTEM_NAME=Linux \
+        -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+        -DCMAKE_C_COMPILER="$HOST_CC" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DSDL_SHARED=ON \
+        -DSDL_STATIC=OFF \
+        -DSDL_TESTS=OFF \
+        -DSDL_EXAMPLES=OFF \
+        -DCMAKE_INSTALL_PREFIX="$SDL3_INSTALL"
+    cmake --build "$SDL3_BUILD" -j "$JOBS"
+    cmake --install "$SDL3_BUILD"
+    cp -L "$SDL3_INSTALL/lib/libSDL3.so.0"* "$SYSROOT_LIB/libSDL3.so.0"
+    echo "== SDL3 kompiliert: $(stat -c%s "$SYSROOT_LIB/libSDL3.so.0") Bytes"
+fi
 
 # ---------- guest and host
 export ANDROID_NDK SYSROOT_LIB
@@ -156,8 +151,6 @@ cd "$SRC"
 python3 configure.py --release --android-ndk "$ANDROID_NDK" --android-guest-cc "$GUEST_CC"
 ninja -j "$JOBS" build/android/halo_guest.elf
 
-# Wichtig: die KOPIE im Upstream-Baum aufrufen, nicht die Originaldatei
-# in $HERE. Nur so landet der cd des Skripts in $SRC (mit build.ninja).
 sh "$SRC/port/knulli/build.sh"
 
 # ---------- dist
@@ -172,7 +165,6 @@ cp "$SRC/port/knulli/halo_extract.py" "$DIST/halo_extract.py"
 cp "$SRC/port/knulli/halo_screen.py" "$DIST/halo_screen.py"
 cp "$SRC/port/knulli/sdl_mapping.py" "$DIST/sdl_mapping.py"
 
-# ── Laufzeitbibliotheken mit in das Artifact kopieren ───────────────────
 if [ -d "$SRC/build/knulli/libs.aarch64" ]; then
     mkdir -p "$DIST/libs.aarch64"
     cp -a "$SRC/build/knulli/libs.aarch64/." "$DIST/libs.aarch64/"
