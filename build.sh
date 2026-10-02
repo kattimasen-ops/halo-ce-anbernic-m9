@@ -15,11 +15,10 @@ JOBS=${JOBS:-$(nproc)}
 die() { echo "build.sh: $*" >&2; exit 1; }
 need() { command -v "$1" > /dev/null 2>&1 || die "$1 not found: $2"; }
 
-# ---------- tools and inputs
 need git "install git"
 need python3 "install python3"
 need ninja "install ninja-build"
-need curl "install curl (the build downloads musl and the SDL2 headers)"
+need curl "install curl"
 need tar "install tar"
 need cmake "install cmake"
 need "$HOST_CC" "install gcc-aarch64-linux-gnu, or set HOST_CC"
@@ -34,8 +33,7 @@ ANDROID_NDK=$(cd "$ANDROID_NDK" && pwd)
 SYSROOT_LIB=$(cd "$SYSROOT_LIB" && pwd)
 
 # libSDL2, libmali und libdecor müssen vorhanden sein. libSDL3 wird
-# weiter unten aus dem Quellcode kompiliert; es muss zu diesem
-# Zeitpunkt noch nicht existieren.
+# weiter unten aus dem Quellcode kompiliert.
 for library in libSDL2-2.0.so.0 libmali.so.0 libdecor-0.so.0; do
     compgen -G "$SYSROOT_LIB/$library*" > /dev/null ||
         die "no $library* in SYSROOT_LIB=$SYSROOT_LIB (must be placed there before the build)"
@@ -50,12 +48,8 @@ SRC=$WORK/halo-ce-universal
 SDL2_INCLUDE=$WORK/sdl2-include
 
 # ---------- SDL3 aus dem Quellcode kompilieren (GLIBC 2.31 kompatibel) ──
-# Es gibt kein fertiges SDL3-Paket für Ubuntu 20.04 (Focal). Wir bauen
-# SDL3 daher mit dem aarch64-Cross-Compiler gegen die GLIBC 2.31 des
-# Containers, damit die resultierende libSDL3.so.0 auf dem M9 Pro läuft.
-# Das passiert VOR dem Input-Check von port/knulli/build.sh.
 if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
-    echo "== SDL3 $SDL3_TAG: kein fertiges Paket für Focal, kompiliere aus dem Quellcode"
+    echo "== SDL3 $SDL3_TAG: kompiliere aus dem Quellcode"
     SDL3_SRC=$WORK/SDL3-${SDL3_TAG#release-}
     SDL3_BUILD=$WORK/sdl3-build
     SDL3_INSTALL=$WORK/sdl3-install
@@ -68,9 +62,6 @@ if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
     rm -rf "$SDL3_BUILD" "$SDL3_INSTALL"
     mkdir -p "$SDL3_BUILD" "$SDL3_INSTALL"
 
-    # Cross-Compile-Setup: sämtliche Suchen (Programme ausgenommen) laufen
-    # ausschließlich im aarch64-Sysroot, damit keine Host-Bibliotheken
-    # (mit host-glibc) versehentlich eingebunden werden.
     cmake -S "$SDL3_SRC" -B "$SDL3_BUILD" \
         -DCMAKE_SYSTEM_NAME=Linux \
         -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
