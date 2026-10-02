@@ -54,37 +54,8 @@ jobs:
           mkdir -p sysroot
           rm -f sysroot/libSDL2* sysroot/libSDL3* sysroot/libdecor* sysroot/libmali*
 
-      # ── libSDL2: Focal 2.0.10+dfsg1-3 aus dem UNIVERSE-Zweig ─────────
-      - name: Download and extract libSDL2 (Focal, universe branch)
-        run: |
-          URLS=(
-            "https://mirror.eu.ossplanet.net/ubuntu-ports/ubuntu-ports/pool/universe/libs/libsdl2/libsdl2-2.0-0_2.0.10+dfsg1-3_arm64.deb"
-            "https://mirror.nikhef.nl/mirror/ubuntu-ports/pool/universe/libs/libsdl2/libsdl2-2.0-0_2.0.10+dfsg1-3_arm64.deb"
-            "http://ftp.ubuntu-tw.org/ubuntu-ports/ubuntu-ports/ubuntu-ports/pool/universe/libs/libsdl2/libsdl2-2.0-0_2.0.10+dfsg1-3_arm64.deb"
-          )
-          SDL_DEB=""
-          for url in "${URLS[@]}"; do
-            echo "== Versuche: $url"
-            if curl -fsSL --retry 2 --connect-timeout 30 -o /tmp/libsdl2.deb "$url"; then
-              if dpkg-deb --info /tmp/libsdl2.deb > /dev/null 2>&1; then
-                SDL_DEB=/tmp/libsdl2.deb
-                break
-              fi
-            fi
-          done
-          if [ -z "$SDL_DEB" ]; then
-            echo "FEHLER: libSDL2 konnte von keiner Quelle geladen werden."
-            exit 1
-          fi
-          dpkg-deb -x "$SDL_DEB" /tmp/libsdl2-extract
-          SDL_LIB=$(find /tmp/libsdl2-extract -name "libSDL2-2.0.so.0*" -type f | head -n 1)
-          cp "$SDL_LIB" sysroot/libSDL2-2.0.so.0
-          echo "libSDL2-2.0.so.0: $(stat -c%s sysroot/libSDL2-2.0.so.0) Bytes"
-          echo "== GLIBC-Versionen in libSDL2:"
-          aarch64-linux-gnu-readelf -V sysroot/libSDL2-2.0.so.0 | grep GLIBC | sort -u || true
-
-      # ── libdecor: Focal 0.1.0-3build1 aus dem MAIN-Zweig ─────────────
-      - name: Download and extract libdecor (Focal, main branch)
+      # ── libdecor: Focal 0.1.0-3build1 (GLIBC 2.31 kompatibel) ─────────
+      - name: Download and extract libdecor (Focal, GLIBC 2.31 compatible)
         run: |
           URLS=(
             "https://mirror.eu.ossplanet.net/ubuntu-ports/pool/main/libd/libdecor-0/libdecor-0-0_0.1.0-3build1_arm64.deb"
@@ -109,6 +80,8 @@ jobs:
           DECOR_LIB=$(find /tmp/libdecor-extract -name "libdecor-0.so.0*" -type f | head -n 1)
           cp "$DECOR_LIB" sysroot/libdecor-0.so.0
           echo "libdecor-0.so.0: $(stat -c%s sysroot/libdecor-0.so.0) Bytes"
+          echo "== GLIBC-Versionen in libdecor:"
+          aarch64-linux-gnu-readelf -V sysroot/libdecor-0.so.0 | grep GLIBC | sort -u || true
 
       # ── libmali: vom ODROID-Paket oder bereits im Repo ──────────────
       - name: Download and extract libmali
@@ -149,11 +122,11 @@ jobs:
           echo "== GLIBC-Versionen in libmali:"
           aarch64-linux-gnu-readelf -V sysroot/libmali.so.0 | grep GLIBC | sort -u || true
 
-      - name: Verify sysroot libraries
+      - name: Verify sysroot libraries (libdecor and libmali)
         run: |
           echo "== Inhalt von sysroot/:"
           ls -la sysroot/
-          for f in sysroot/libSDL2-2.0.so.0 sysroot/libdecor-0.so.0 sysroot/libmali.so.0; do
+          for f in sysroot/libdecor-0.so.0 sysroot/libmali.so.0; do
             if [ -f "$f" ] && [ ! -L "$f" ] && [ "$(stat -c%s "$f" 2>/dev/null || echo 0)" -gt 10240 ]; then
               echo "OK: $f ($(stat -c%s "$f") Bytes)"
             else
@@ -161,6 +134,7 @@ jobs:
               exit 1
             fi
           done
+          echo "Hinweis: libSDL2 und libSDL3 werden von build.sh aus dem Quellcode kompiliert."
 
       - name: Build
         run: |
