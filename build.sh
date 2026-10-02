@@ -5,9 +5,9 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 UPSTREAM_URL=${UPSTREAM_URL:-https://github.com/cybersecurity/halo-ce-universal.git}
 UPSTREAM_COMMIT=$(tr -d '[:space:]' < "$HERE/UPSTREAM_COMMIT")
 PATCH=$HERE/patches/halo-ce-universal-knulli.patch
+SDL3_TAG=release-3.2.10
 SDL2_TAG=release-2.0.20
 SDL2_ARCHIVE=https://github.com/libsdl-org/SDL/archive/refs/tags/$SDL2_TAG.tar.gz
-SDL3_TAG=release-3.2.10
 GUEST_CC=${GUEST_CC:-clang-22}
 HOST_CC=${HOST_CC:-aarch64-linux-gnu-gcc}
 JOBS=${JOBS:-$(nproc)}
@@ -33,11 +33,10 @@ ANDROID_NDK=$(cd "$ANDROID_NDK" && pwd)
 SYSROOT_LIB=$(cd "$SYSROOT_LIB" && pwd)
 
 # libdecor und libmali müssen vor dem Build vorhanden sein.
-# libSDL2 und libSDL3 werden weiter unten aus dem Quellcode kompiliert
-# und dürfen hier NICHT verlangt werden.
+# libSDL2 und libSDL3 werden weiter unten aus dem Quellcode kompiliert.
 for library in libdecor-0.so.0 libmali.so.0; do
     compgen -G "$SYSROOT_LIB/$library*" > /dev/null ||
-        die "no $library* in SYSROOT_LIB=$SYSROOT_LIB (must be placed there before the build)"
+        die "no $library* in SYSROOT_LIB=$SYSROOT_LIB"
 done
 
 WORK=${WORK:-$HERE/work}
@@ -46,7 +45,6 @@ mkdir -p "$WORK" "$DIST"
 WORK=$(cd "$WORK" && pwd)
 DIST=$(cd "$DIST" && pwd)
 SRC=$WORK/halo-ce-universal
-SDL2_INCLUDE=$WORK/sdl2-include
 
 # ---------- SDL3 aus dem Quellcode kompilieren (GLIBC 2.31 kompatibel) ──
 if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
@@ -89,24 +87,14 @@ if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
     cmake --install "$SDL3_BUILD"
 
     SDL3_LIB=$(find "$SDL3_INSTALL" -name "libSDL3.so.0*" -type f | head -n 1)
-    if [ -z "$SDL3_LIB" ]; then
-        echo "FEHLER: libSDL3.so.0 wurde nach dem Build nicht gefunden."
-        find "$SDL3_INSTALL" -name "*SDL3*" || true
-        exit 1
-    fi
+    [ -n "$SDL3_LIB" ] || die "libSDL3.so.0 wurde nicht gefunden"
     cp -L "$SDL3_LIB" "$SYSROOT_LIB/libSDL3.so.0"
     echo "== SDL3 kompiliert: $(stat -c%s "$SYSROOT_LIB/libSDL3.so.0") Bytes"
-    echo "== GLIBC-Versionen in libSDL3:"
-    aarch64-linux-gnu-readelf -V "$SYSROOT_LIB/libSDL3.so.0" | grep GLIBC | sort -u || true
 else
-    echo "== libSDL3.so.0 bereits in SYSROOT_LIB – überspringe SDL3-Kompilierung"
+    echo "== libSDL3.so.0 bereits vorhanden – überspringe SDL3"
 fi
 
 # ---------- SDL2 aus dem Quellcode kompilieren (GLIBC 2.31 kompatibel) ──
-# Der GitHub-Archive-Tarball von SDL2 entpackt sich in ein Verzeichnis mit
-# einem versionsabhängigen Namen (z. B. "SDL-release-2.0.20"). Statt diesen
-# Namen zu erraten, entpacken wir mit --strip-components=1 in ein festes
-# Zielverzeichnis. Damit ist der Build unabhängig vom Tarball-Layout.
 if [ ! -f "$SYSROOT_LIB/libSDL2-2.0.so.0" ]; then
     echo "== SDL2 $SDL2_TAG: kompiliere aus dem Quellcode"
     SDL2_SRC=$WORK/SDL2-src
@@ -141,22 +129,18 @@ if [ ! -f "$SYSROOT_LIB/libSDL2-2.0.so.0" ]; then
     cmake --install "$SDL2_BUILD"
 
     SDL2_LIB=$(find "$SDL2_INSTALL" -name "libSDL2-2.0.so.0*" -type f | head -n 1)
-    if [ -z "$SDL2_LIB" ]; then
-        echo "FEHLER: libSDL2-2.0.so.0 wurde nach dem Build nicht gefunden."
-        find "$SDL2_INSTALL" -name "*SDL2*" || true
-        exit 1
-    fi
+    [ -n "$SDL2_LIB" ] || die "libSDL2-2.0.so.0 wurde nicht gefunden"
     cp -L "$SDL2_LIB" "$SYSROOT_LIB/libSDL2-2.0.so.0"
     echo "== SDL2 kompiliert: $(stat -c%s "$SYSROOT_LIB/libSDL2-2.0.so.0") Bytes"
-    echo "== GLIBC-Versionen in libSDL2:"
-    aarch64-linux-gnu-readelf -V "$SYSROOT_LIB/libSDL2-2.0.so.0" | grep GLIBC | sort -u || true
-    echo "== SDL_GetTicks64 vorhanden?"
-    aarch64-linux-gnu-nm -D "$SYSROOT_LIB/libSDL2-2.0.so.0" | grep -c SDL_GetTicks64 || echo "NICHT GEFUNDEN"
-    echo "== SDL_GameControllerGetType vorhanden?"
-    aarch64-linux-gnu-nm -D "$SYSROOT_LIB/libSDL2-2.0.so.0" | grep -c SDL_GameControllerGetType || echo "NICHT GEFUNDEN"
 else
-    echo "== libSDL2-2.0.so.0 bereits in SYSROOT_LIB – überspringe SDL2-Kompilierung"
+    echo "== libSDL2-2.0.so.0 bereits vorhanden – überspringe SDL2"
 fi
+
+# WICHTIG: Die SDL2-Header liegen jetzt im Installations-Ordner des
+# selbst kompilierten SDL2 ($SDL2_INSTALL/include/SDL2/SDL.h). Die alten
+# Header aus dem GitHub-Tarball werden nicht mehr benötigt.
+export SDL2_INCLUDE="$SDL2_INSTALL/include"
+echo "== SDL2_INCLUDE=$SDL2_INCLUDE"
 
 # ---------- upstream at the pinned commit
 if [ ! -d "$SRC/.git" ]; then
@@ -227,7 +211,7 @@ if [ -d "$SRC/build/knulli/libs.aarch64" ]; then
     echo "== Laufzeitbibliotheken in dist/libs.aarch64/:"
     ls -la "$DIST/libs.aarch64/"
 else
-    echo "WARNUNG: $SRC/build/knulli/libs.aarch64 fehlt – Artifact enthält keine Bibliotheken." >&2
+    echo "WARNUNG: $SRC/build/knulli/libs.aarch64 fehlt" >&2
 fi
 
 chmod +x "$DIST/Halo.sh" 2>/dev/null || true
