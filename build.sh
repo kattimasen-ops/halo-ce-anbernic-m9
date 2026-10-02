@@ -21,6 +21,7 @@ need python3 "install python3"
 need ninja "install ninja-build"
 need curl "install curl (the build downloads musl and the SDL2 headers)"
 need tar "install tar"
+need cmake "install cmake"
 need "$HOST_CC" "install gcc-aarch64-linux-gnu, or set HOST_CC"
 need "$GUEST_CC" "install clang-22 from apt.llvm.org, or set GUEST_CC"
 "$GUEST_CC" -print-targets 2> /dev/null | grep -q aarch64_32 ||
@@ -31,8 +32,13 @@ ANDROID_NDK=$(cd "$ANDROID_NDK" && pwd)
 [ -n "${SYSROOT_LIB:-}" ] || die "set SYSROOT_LIB to the folder with the runtime libraries"
 [ -d "$SYSROOT_LIB" ] || die "SYSROOT_LIB=$SYSROOT_LIB is not a folder"
 SYSROOT_LIB=$(cd "$SYSROOT_LIB" && pwd)
-for library in libSDL2-2.0.so.0 libSDL3.so.0 libmali.so.0 libdecor-0.so.0; do
-    compgen -G "$SYSROOT_LIB/$library*" > /dev/null || die "no $library* in SYSROOT_LIB=$SYSROOT_LIB"
+
+# libSDL2, libmali und libdecor müssen vorhanden sein.
+# libSDL3 wird weiter unten aus dem Quellcode kompiliert; es muss zu
+# diesem Zeitpunkt noch nicht existieren.
+for library in libSDL2-2.0.so.0 libmali.so.0 libdecor-0.so.0; do
+    compgen -G "$SYSROOT_LIB/$library*" > /dev/null ||
+        die "no $library* in SYSROOT_LIB=$SYSROOT_LIB (must be placed there before the build)"
 done
 
 WORK=${WORK:-$HERE/work}
@@ -42,6 +48,63 @@ WORK=$(cd "$WORK" && pwd)
 DIST=$(cd "$DIST" && pwd)
 SRC=$WORK/halo-ce-universal
 SDL2_INCLUDE=$WORK/sdl2-include
+
+# ---------- SDL3 aus dem Quellcode kompilieren (GLIBC 2.31 kompatibel) ──
+# Es gibt kein fertiges SDL3-Paket für Ubuntu 20.04 (Focal). Wir bauen
+# SDL3 daher mit dem aarch64-Cross-Compiler gegen die GLIBC 2.31 des
+# Containers, damit die resultierende libSDL3.so.0 auf dem M9 Pro läuft.
+# Das passiert VOR dem Input-Check von port/knulli/build.sh.
+if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
+    echo "== SDL3 $SDL3_TAG: kein fertiges Paket für Focal, kompiliere aus dem Quellcode"
+    SDL3_SRC=$WORK/SDL3-${SDL3_TAG#release-}
+    SDL3_BUILD=$WORK/sdl3-build
+    SDL3_INSTALL=$WORK/sdl3-install
+
+    if [ ! -d "$SDL3_SRC" ]; then
+        curl -L -o "$WORK/sdl3.tar.gz" \
+            "https://github.com/libsdl-org/SDL/releases/download/$SDL3_TAG/SDL3-${SDL3_TAG#release-}.tar.gz"
+        tar -xzf "$WORK/sdl3.tar.gz" -C "$WORK"
+    fi
+    rm -rf "$SDL3_BUILD" "$SDL3_INSTALL"
+    mkdir -p "$SDL3_BUILD" "$SDL3_INSTALL"
+
+    # Cross-Compile-Setup: sämtliche Suchen (Programme ausgenommen) laufen
+    # ausschließlich im aarch64-Sysroot, damit keine Host-Bibliotheken
+    # (mit host-glibc) versehentlich eingebunden werden.
+    cmake -S "$SDL3_SRC" -B "$SDL3_BUILD" \
+        -DCMAKE_SYSTEM_NAME=Linux \
+        -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+        -DCMAKE_C_COMPILER="$HOST_CC" \
+        -DCMAKE_SYSROOT=/usr/aarch64-linux-gnu \
+        -DCMAKE_FIND_ROOT_PATH=/usr/aarch64-linux-gnu \
+        -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
+        -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+        -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DSDL_SHARED=ON \
+        -DSDL_STATIC=OFF \
+        -DSDL_TESTS=OFF \
+        -DSDL_EXAMPLES=OFF \
+        -DSDL_INSTALL_TESTS=OFF \
+        -DSDL_WERROR=OFF \
+        -DCMAKE_INSTALL_PREFIX="$SDL3_INSTALL"
+    cmake --build "$SDL3_BUILD" -j "$JOBS"
+    cmake --install "$SDL3_BUILD"
+
+    # Die installierte .so suchen und als libSDL3.so.0 nach sysroot legen.
+    SDL3_LIB=$(find "$SDL3_INSTALL" -name "libSDL3.so.0*" -type f | head -n 1)
+    if [ -z "$SDL3_LIB" ]; then
+        echo "FEHLER: libSDL3.so.0 wurde nach dem Build nicht gefunden."
+        find "$SDL3_INSTALL" -name "*SDL3*" || true
+        exit 1
+    fi
+    cp -L "$SDL3_LIB" "$SYSROOT_LIB/libSDL3.so.0"
+    echo "== SDL3 kompiliert: $(stat -c%s "$SYSROOT_LIB/libSDL3.so.0") Bytes"
+    echo "== GLIBC-Versionen in libSDL3:"
+    aarch64-linux-gnu-readelf -V "$SYSROOT_LIB/libSDL3.so.0" | grep GLIBC | sort -u || true
+else
+    echo "== libSDL3.so.0 bereits in SYSROOT_LIB – überspringe SDL3-Kompilierung"
+fi
 
 # ---------- upstream at the pinned commit
 if [ ! -d "$SRC/.git" ]; then
@@ -108,38 +171,6 @@ if [ ! -f "$SDL2_INCLUDE/SDL2/SDL.h" ]; then
         die "SDL2-Header-Setup fehlgeschlagen"
     fi
     echo "== SDL2-Header bereit: $SDL2_INCLUDE/SDL2/SDL.h"
-fi
-
-# ---------- SDL3 aus dem Quellcode kompilieren (GLIBC 2.31 kompatibel) ────
-# Es gibt kein fertiges SDL3-Paket für Ubuntu 20.04 (Focal). Wir
-# kompilieren daher SDL3 aus dem Quellcode gegen die GLIBC 2.31 des
-# Containers, damit die Bibliothek auf dem M9 Pro (GLIBC 2.31) läuft.
-SDL3_SRC=$WORK/SDL3-${SDL3_TAG#release-}
-SDL3_BUILD=$WORK/sdl3-build
-SDL3_INSTALL=$WORK/sdl3-install
-if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
-    echo "== Kompiliere SDL3 $SDL3_TAG für aarch64 (GLIBC 2.31)..."
-    if [ ! -d "$SDL3_SRC" ]; then
-        curl -L -o "$WORK/sdl3.tar.gz" \
-            "https://github.com/libsdl-org/SDL/releases/download/$SDL3_TAG/SDL3-${SDL3_TAG#release-}.tar.gz"
-        tar -xzf "$WORK/sdl3.tar.gz" -C "$WORK"
-    fi
-    rm -rf "$SDL3_BUILD" "$SDL3_INSTALL"
-    mkdir -p "$SDL3_BUILD" "$SDL3_INSTALL"
-    cmake -S "$SDL3_SRC" -B "$SDL3_BUILD" \
-        -DCMAKE_SYSTEM_NAME=Linux \
-        -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
-        -DCMAKE_C_COMPILER="$HOST_CC" \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DSDL_SHARED=ON \
-        -DSDL_STATIC=OFF \
-        -DSDL_TESTS=OFF \
-        -DSDL_EXAMPLES=OFF \
-        -DCMAKE_INSTALL_PREFIX="$SDL3_INSTALL"
-    cmake --build "$SDL3_BUILD" -j "$JOBS"
-    cmake --install "$SDL3_BUILD"
-    cp -L "$SDL3_INSTALL/lib/libSDL3.so.0"* "$SYSROOT_LIB/libSDL3.so.0"
-    echo "== SDL3 kompiliert: $(stat -c%s "$SYSROOT_LIB/libSDL3.so.0") Bytes"
 fi
 
 # ---------- guest and host
