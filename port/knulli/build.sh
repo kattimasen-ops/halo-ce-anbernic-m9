@@ -47,9 +47,10 @@ done
 # ── OPTIMIERTE FLAGS FÜR RK3326 (CORTEX-A35) ─────────────────────────────
 # Ursprünglich: -O2 -g -mcpu=cortex-a53 (für Allwinner H700)
 # Ziel: RK3326 mit 4× Cortex-A35, Mali-G31 MP2, 1 GB RAM
+# Hinweis: -flto (ohne =full, da GCC 11 die Syntax -flto=full nicht kennt)
 CFLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -fPIC -Wall -Wno-unused-function \
         -D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS \
-        -flto=full -fomit-frame-pointer -ffunction-sections -fdata-sections \
+        -flto -fomit-frame-pointer -ffunction-sections -fdata-sections \
         -fno-plt -fno-semantic-interposition"
 # ─────────────────────────────────────────────────────────────────────────
 
