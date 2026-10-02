@@ -13,6 +13,10 @@ jobs:
       image: ubuntu:20.04
       options: --user root
 
+    defaults:
+      run:
+        shell: bash
+
     env:
       DEBIAN_FRONTEND: noninteractive
 
@@ -50,12 +54,8 @@ jobs:
       - name: Download and extract libmali (Mali-G31 Bifrost for RK3326)
         run: |
           mkdir -p sysroot
-          rm -f sysroot/libmali*   # alte/kaputte Dateien entfernen
+          rm -f sysroot/libmali*
 
-          # Liste der Download-Quellen (in Reihenfolge der Priorität)
-          # Quelle 1: ODROID (Original für RK3326, GBM-Variante)
-          # Quelle 2: openSUSE (aktuellere Version, GBM-Variante)
-          # Quelle 3: openSUSE (Wayland+GBM-Variante, falls GBM allein nicht reicht)
           URLS=(
             "https://oph.mdrjr.net/meveric/pool/go2/libm/libmali-rk/libmali-rk-bifrost-g31-rxp0-gbm_1.7-2+deb10_arm64.deb"
             "https://cdn.opensuse.org/repositories/home:/amazingfate:/libmali-rockchip/Debian_Testing/arm64/libmali-bifrost-g31-g2p0-gbm_1.9-1+debian1_arm64.deb"
@@ -68,9 +68,7 @@ jobs:
             if curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 30 -o /tmp/libmali.deb "$url"; then
               SIZE=$(stat -c%s /tmp/libmali.deb 2>/dev/null || echo 0)
               echo "   Heruntergeladen: $SIZE Bytes"
-              # Validierung: Datei muss > 5 MB sein (HTML-Fehlerseiten sind winzig)
               if [ "$SIZE" -gt 5000000 ]; then
-                # Prüfen, ob es ein gültiges Debian-Paket ist
                 if dpkg-deb --info /tmp/libmali.deb > /dev/null 2>&1; then
                   echo "   OK: Gültiges Debian-Paket."
                   MALI_DEB="/tmp/libmali.deb"
@@ -89,7 +87,6 @@ jobs:
 
           if [ -z "$MALI_DEB" ]; then
             echo "FEHLER: Alle Download-Quellen fehlgeschlagen."
-            echo "Bitte prüfe die URLs manuell oder lade die libmali.so.0 manuell hoch."
             exit 1
           fi
 
@@ -119,7 +116,6 @@ jobs:
           fi
           echo "OK: libmali.so.0 ist ein gültiges ELF-Binary."
 
-          # SONAME prüfen und ggf. auf libmali.so.0 patchen
           SONAME=$(aarch64-linux-gnu-readelf -d sysroot/libmali.so.0 2>/dev/null | grep SONAME | sed 's/.*\[\(.*\)\].*/\1/' || echo "")
           echo "Gefundene SONAME: $SONAME"
           if [ -n "$SONAME" ] && [ "$SONAME" != "libmali.so.0" ]; then
@@ -128,27 +124,64 @@ jobs:
             echo "Neue SONAME: $(aarch64-linux-gnu-readelf -d sysroot/libmali.so.0 | grep SONAME)"
           fi
 
-      # ── libSDL2 validieren (muss manuell vom M9 Pro kommen) ───────────
-      - name: Validate libSDL2 (must be copied from M9 Pro)
+      # ── libSDL2: Multi-Source-Download mit Fallback ────────────────────
+      - name: Download and extract libSDL2 (arm64)
         run: |
-          if [ ! -f sysroot/libSDL2-2.0.so.0 ]; then
-            echo "FEHLER: sysroot/libSDL2-2.0.so.0 fehlt."
+          mkdir -p sysroot
+          rm -f sysroot/libSDL2*
+
+          URLS=(
+            "http://archive.ubuntu.com/ubuntu/pool/main/libs/libsdl2/libsdl2-2.0-0_2.30.0+dfsg-1build3_arm64.deb"
+            "http://ftp.debian.org/debian/pool/main/libs/libsdl2/libsdl2-2.0-0_2.26.5+dfsg-1_arm64.deb"
+            "http://archive.ubuntu.com/ubuntu/pool/main/libs/libsdl2/libsdl2-2.0-0_2.0.20+dfsg-2ubuntu1.22.04.1_arm64.deb"
+          )
+
+          SDL_DEB=""
+          for url in "${URLS[@]}"; do
+            echo "== Versuche Download: $url"
+            if curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 30 -o /tmp/libsdl2.deb "$url"; then
+              SIZE=$(stat -c%s /tmp/libsdl2.deb 2>/dev/null || echo 0)
+              echo "   Heruntergeladen: $SIZE Bytes"
+              if [ "$SIZE" -gt 500000 ]; then
+                if dpkg-deb --info /tmp/libsdl2.deb > /dev/null 2>&1; then
+                  echo "   OK: Gültiges Debian-Paket."
+                  SDL_DEB="/tmp/libsdl2.deb"
+                  break
+                else
+                  echo "   FEHLER: Kein gültiges .deb-Paket (vermutlich HTML)."
+                fi
+              else
+                echo "   FEHLER: Datei zu klein ($SIZE Bytes)."
+                head -c 200 /tmp/libsdl2.deb; echo
+              fi
+            else
+              echo "   Download fehlgeschlagen (curl exit $?)."
+            fi
+          done
+
+          if [ -z "$SDL_DEB" ]; then
+            echo "FEHLER: Alle Download-Quellen fehlgeschlagen."
             exit 1
           fi
-          if [ -L sysroot/libSDL2-2.0.so.0 ]; then
-            echo "FEHLER: sysroot/libSDL2-2.0.so.0 ist ein symbolischer Link."
+
+          echo "== Entpacke das Debian-Paket..."
+          rm -rf /tmp/libsdl2-extract
+          dpkg-deb -x "$SDL_DEB" /tmp/libsdl2-extract
+
+          SDL_LIB=$(find /tmp/libsdl2-extract -name "libSDL2-2.0.so.0*" -type f | head -n 1)
+          if [ -z "$SDL_LIB" ]; then
+            echo "FEHLER: libSDL2-2.0.so.0 nicht gefunden."
+            find /tmp/libsdl2-extract -name "*SDL2*"
             exit 1
           fi
-          SIZE=$(stat -c%s sysroot/libSDL2-2.0.so.0)
-          if [ "$SIZE" -lt 10240 ]; then
-            echo "FEHLER: sysroot/libSDL2-2.0.so.0 ist nur $SIZE Bytes groß."
-            exit 1
-          fi
+          cp "$SDL_LIB" sysroot/libSDL2-2.0.so.0
+          ls -la sysroot/libSDL2-2.0.so.0
+
           if ! file sysroot/libSDL2-2.0.so.0 | grep -q "ELF"; then
             echo "FEHLER: sysroot/libSDL2-2.0.so.0 ist kein ELF-Binary."
             exit 1
           fi
-          echo "OK: sysroot/libSDL2-2.0.so.0 ($SIZE Bytes, ELF)."
+          echo "OK: libSDL2-2.0.so.0 ist ein gültiges ELF-Binary."
 
       - name: Build
         run: |
