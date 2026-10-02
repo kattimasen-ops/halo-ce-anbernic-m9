@@ -32,8 +32,6 @@ ANDROID_NDK=$(cd "$ANDROID_NDK" && pwd)
 [ -d "$SYSROOT_LIB" ] || die "SYSROOT_LIB=$SYSROOT_LIB is not a folder"
 SYSROOT_LIB=$(cd "$SYSROOT_LIB" && pwd)
 
-# libSDL2, libmali und libdecor müssen vorhanden sein. libSDL3 wird
-# weiter unten aus dem Quellcode kompiliert.
 for library in libSDL2-2.0.so.0 libmali.so.0 libdecor-0.so.0; do
     compgen -G "$SYSROOT_LIB/$library*" > /dev/null ||
         die "no $library* in SYSROOT_LIB=$SYSROOT_LIB (must be placed there before the build)"
@@ -62,11 +60,15 @@ if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
     rm -rf "$SDL3_BUILD" "$SDL3_INSTALL"
     mkdir -p "$SDL3_BUILD" "$SDL3_INSTALL"
 
+    # Cross-Compile-Setup OHNE CMAKE_SYSROOT. Der Cross-Compiler
+    # aarch64-linux-gnu-gcc kennt seine eigenen Standard-Suchpfade
+    # (/usr/aarch64-linux-gnu/include und /usr/aarch64-linux-gnu/lib).
+    # CMAKE_SYSROOT würde ihn zwingen, nach /usr/aarch64-linux-gnu/lib/libc.so.6
+    # zu suchen, wo die Bibliothek nicht liegt.
     cmake -S "$SDL3_SRC" -B "$SDL3_BUILD" \
         -DCMAKE_SYSTEM_NAME=Linux \
         -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
         -DCMAKE_C_COMPILER="$HOST_CC" \
-        -DCMAKE_SYSROOT=/usr/aarch64-linux-gnu \
         -DCMAKE_FIND_ROOT_PATH=/usr/aarch64-linux-gnu \
         -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
         -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
