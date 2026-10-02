@@ -3,40 +3,65 @@
 # handhelds with the Allwinner H700 (Anbernic RG35XX H and its family).
 # Refer to port/knulli/README.md.
 #
-# This script goes in /userdata/roms/ports, the game in the halo folder
-# beside it. Put an Xbox disc image of the game (.iso) in that folder, or in
-# ports itself: the first start copies its maps folder out (a few minutes,
-# with its progress on the screen), then the image can be deleted. The log
-# of each start is halo/log.txt; the settings are halo/config.toml.
+# This script goes in /roms/ports, the game in the halo-ce folder beside
+# it. Put an Xbox disc image of the game (.iso) in that folder, or in ports
+# itself: the first start copies its maps folder out (a few minutes, with
+# its progress on the screen), then the image can be deleted. The log of
+# each start is halo-ce/log.txt; the settings are halo-ce/config.toml.
 #
 # Hold the hotkey (MENU or SELECT) and push START to quit.
 
-GAMEDIR="$(cd "$(dirname "$0")/halo" && pwd)"
-cd "$GAMEDIR" || exit 1
+# ── FRÜHESTE FEHLERERKENNUNG ────────────────────────────────────────────
+echo "Halo.sh gestartet: $(date), USER=$(id -un), PID=$$" > /tmp/halo-start.log 2>&1 || true
 
-# one start at a time (or development run, tools/device/run.sh), before the
-# log starts again: another meanwhile would take the raised clocks for the
-# ones to put back. The game inherits the lock, which is held as long as it
-# runs, even past this script. (flock, or Python's where it is missing:
-# without either, no start.)
-exec 9> /var/run/halo-lock
-if ! { flock -n 9 || python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)'; } 2> /dev/null; then
-    echo "$(date): Halo is running already; this start was refused" >> "$GAMEDIR/log.txt"
+SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
+if [ -z "$SCRIPT_DIR" ]; then
+    echo "FEHLER: Skript-Verzeichnis konnte nicht ermittelt werden." >> /tmp/halo-start.log
+    exit 1
+fi
+GAMEDIR="$SCRIPT_DIR/halo-ce"
+echo "SCRIPT_DIR=$SCRIPT_DIR" >> /tmp/halo-start.log
+echo "GAMEDIR=$GAMEDIR" >> /tmp/halo-start.log
+
+if [ ! -d "$GAMEDIR" ]; then
+    echo "FEHLER: $GAMEDIR existiert nicht." >> /tmp/halo-start.log
     exit 1
 fi
 
-exec > "$GAMEDIR/log.txt" 2>&1
-echo "Halo for Knulli, $(date)"
+LOG="$GAMEDIR/log.txt"
+if ! touch "$LOG" 2>/dev/null; then
+    LOG="/tmp/halo-log.txt"
+    touch "$LOG" 2>/dev/null || LOG="/dev/null"
+fi
 
-# (stopped between the steps below: through the EXIT handler)
-trap 'exit 143' TERM INT HUP
+exec >> "$LOG" 2>&1
 
-# a step run with the signals the launcher gets passed on to it, to its end:
-# a helper must not go on alone (holding the lock) when the launcher is
-# stopped, and one asked to stop that has not ten seconds later is killed (a
-# hung game must not keep the clocks and the lock). Its exit status; after a
-# step the launcher was asked to stop in, the launcher stops.
+echo ""
+echo "=================================================================="
+echo "Halo for R36S, $(date)"
+echo "SCRIPT_DIR=$SCRIPT_DIR"
+echo "GAMEDIR=$GAMEDIR"
+echo "LOG=$LOG"
+echo "USER=$(id -un), UID=$(id -u)"
+echo "Kernel: $(uname -r)"
+echo "Arch: $(uname -m)"
+echo "Shell: $BASH_VERSION"
+echo "=================================================================="
+
+cd "$GAMEDIR" || { echo "FEHLER: cd $GAMEDIR fehlgeschlagen"; exit 1; }
+
+exec 9> /tmp/halo-lock 2>/dev/null || echo "WARNUNG: /tmp/halo-lock nicht beschreibbar."
+if [ -e /proc/self/fd/9 ]; then
+    if ! { flock -n 9 || python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)' 2>/dev/null; } 2>/dev/null; then
+        echo "$(date): Halo läuft bereits; Start abgelehnt"
+        exit 1
+    fi
+fi
+
+trap 'echo "Signal empfangen: exit 143"; exit 143' TERM INT HUP
+
 stop() {
+    echo "stop() aufgerufen"
     stopping=1
     [ -n "$child" ] || return 0
     kill -TERM "$child" 2>/dev/null
@@ -45,11 +70,10 @@ stop() {
 supervised() {
     local status child="" watchdog="" stopping=""
     trap stop TERM INT HUP
+    echo "supervised: starte $*"
     "$@" &
     child=$!
-    # (a stop that came as the step started)
     [ -z "$stopping" ] || stop
-    # (until the step itself has ended: a signal ends a wait early)
     while :; do
         wait "$child"
         status=$?
@@ -58,80 +82,132 @@ supervised() {
     trap 'exit 143' TERM INT HUP
     [ -z "$watchdog" ] || kill "$watchdog" 2>/dev/null
     if [ -n "$stopping" ]; then
-        echo "stopped (exit status $status)"
+        echo "gestoppt (exit status $status)"
         exit 143
     fi
+    echo "supervised: $* beendet mit status $status"
     return "$status"
 }
 
-# ── SYSTEMOPTIMIERUNGEN FÜR RK3326 / ARKOS 4 ─────────────────────────────
-# CPU-Governor auf performance setzen (alle 4 Kerne)
-# GPU-Mindestfrequenz auf Maximum setzen
-# ZRAM aktivieren (bei 1 GB RAM essenziell)
-cpu_governor_path=/sys/devices/system/cpu/cpufreq/policy0/scaling_governor
-gpu_devfreq_path=/sys/class/devfreq/gpu
-saved=/var/run/halo-clocks
+echo ""
+echo "── SYSTEMOPTIMIERUNGEN ──────────────────────────────────────────"
 
-restore() {
-    if [ -f "$saved" ]; then
-        read -r cpu_governor gpu_minimum < "$saved"
-        [ -n "$cpu_governor" ] && echo "$cpu_governor" > "$cpu_governor_path" 2>/dev/null
-        [ -n "$gpu_minimum" ] && echo "$gpu_minimum" > "$gpu_devfreq_path/min_freq" 2>/dev/null
-        rm -f "$saved"
+cpu_governor_path=""
+for candidate in \
+    /sys/devices/system/cpu/cpufreq/policy0/scaling_governor \
+    /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor; do
+    if [ -w "$candidate" ]; then
+        cpu_governor_path="$candidate"
+        break
     fi
-    # ZRAM beim Beenden nicht deaktivieren (Systemprofitiert dauerhaft)
-    rm -f /var/run/battery-saver/halo.pause
-}
-
-restore
-echo "$(cat "$cpu_governor_path" 2>/dev/null) $(cat "$gpu_devfreq_path/min_freq" 2>/dev/null)" > "$saved"
-trap restore EXIT
-
-# CPU-Governor auf performance (alle Kerne)
-echo performance > "$cpu_governor_path" 2>/dev/null
-# Alternativ: für jeden Kern einzeln (falls policy0 nicht alle umfasst)
-for cpu in /sys/devices/system/cpu/cpu[0-3]; do
-    echo performance > "$cpu/cpufreq/scaling_governor" 2>/dev/null
 done
 
-# GPU-Mindestfrequenz auf Maximum
-tr ' ' '\n' < "$gpu_devfreq_path/available_frequencies" 2>/dev/null | sort -n | tail -n 1 > "$gpu_devfreq_path/min_freq" 2>/dev/null
+cpu_saved=""
+if [ -n "$cpu_governor_path" ]; then
+    cpu_saved=$(cat "$cpu_governor_path" 2>/dev/null)
+    echo "CPU-Governor: $cpu_governor_path  $cpu_saved -> performance"
+    echo performance > "$cpu_governor_path" 2>/dev/null
+fi
 
-# ZRAM aktivieren (falls nicht bereits durch ArkOS geschehen)
-if [ ! -e /dev/zram0 ]; then
-    modprobe zram 2>/dev/null
-    if [ -e /dev/zram0 ]; then
-        echo 512M > /sys/block/zram0/disksize
-        mkswap /dev/zram0 >/dev/null 2>&1
-        swapon /dev/zram0 2>/dev/null
+for cpu in /sys/devices/system/cpu/cpu[0-9]*; do
+    [ -w "$cpu/cpufreq/scaling_governor" ] && echo performance > "$cpu/cpufreq/scaling_governor" 2>/dev/null
+done
+
+gpu_devfreq_path=""
+for candidate in /sys/class/devfreq/ff400000.gpu /sys/class/devfreq/gpu; do
+    if [ -d "$candidate" ]; then
+        gpu_devfreq_path="$candidate"
+        break
+    fi
+done
+
+gpu_governor_saved=""
+gpu_min_saved=""
+if [ -n "$gpu_devfreq_path" ]; then
+    [ -r "$gpu_devfreq_path/governor" ] && gpu_governor_saved=$(cat "$gpu_devfreq_path/governor" 2>/dev/null)
+    echo "GPU-Governor: $gpu_devfreq_path  $gpu_governor_saved -> performance"
+    [ -w "$gpu_devfreq_path/governor" ] && echo performance > "$gpu_devfreq_path/governor" 2>/dev/null
+    if [ -r "$gpu_devfreq_path/available_frequencies" ] && [ -w "$gpu_devfreq_path/min_freq" ]; then
+        gpu_min_saved=$(cat "$gpu_devfreq_path/min_freq" 2>/dev/null)
+        max_freq=$(tr ' ' '\n' < "$gpu_devfreq_path/available_frequencies" | sort -n | tail -n 1)
+        [ -n "$max_freq" ] && echo "$max_freq" > "$gpu_devfreq_path/min_freq" 2>/dev/null
     fi
 fi
-# ─────────────────────────────────────────────────────────────────────────
 
-# the battery saver must not dim or suspend the handheld meanwhile
-mkdir -p /var/run/battery-saver && touch /var/run/battery-saver/halo.pause
+if swapon --show 2>/dev/null | grep -q zram; then
+    echo "ZRAM bereits aktiv."
+else
+    modprobe zram 2>/dev/null
+    if [ -e /dev/zram0 ]; then
+        echo 512M > /sys/block/zram0/disksize 2>/dev/null
+        mkswap /dev/zram0 >/dev/null 2>&1
+        swapon /dev/zram0 2>/dev/null
+        echo "ZRAM aktiviert."
+    fi
+fi
 
-# the maps: copied out of a disc image in this folder, or else in ports
+saved=/tmp/halo-clocks
+printf '%s|%s|%s\n' "$cpu_saved" "$gpu_governor_saved" "$gpu_min_saved" > "$saved" 2>/dev/null || true
+
+restore() {
+    echo ""
+    echo "── RESTORE ─────────────────────────────────────────────────────"
+    if [ -f "$saved" ]; then
+        IFS='|' read -r cpu_gov gpu_gov gpu_min < "$saved"
+        [ -n "$cpu_gov" ] && [ -n "$cpu_governor_path" ] && [ -w "$cpu_governor_path" ] && echo "$cpu_gov" > "$cpu_governor_path" 2>/dev/null
+        if [ -n "$gpu_devfreq_path" ]; then
+            [ -n "$gpu_gov" ] && [ -w "$gpu_devfreq_path/governor" ] && echo "$gpu_gov" > "$gpu_devfreq_path/governor" 2>/dev/null
+            [ -n "$gpu_min" ] && [ -w "$gpu_devfreq_path/min_freq" ] && echo "$gpu_min" > "$gpu_devfreq_path/min_freq" 2>/dev/null
+        fi
+        rm -f "$saved"
+    fi
+    rm -f /var/run/battery-saver/halo.pause 2>/dev/null
+    echo "Restore abgeschlossen."
+}
+trap restore EXIT
+
+mkdir -p /var/run/battery-saver 2>/dev/null && touch /var/run/battery-saver/halo.pause 2>/dev/null
+echo "Battery-Saver-Pause gesetzt (falls möglich)."
+
+# ── LAUFZEIT-BIBLIOTHEKEN DES PORTS ──────────────────────────────────────
+LIBS_DIR="$GAMEDIR/libs.aarch64"
+if [ -d "$LIBS_DIR" ]; then
+    export LD_LIBRARY_PATH="$LIBS_DIR:$GAMEDIR:$LD_LIBRARY_PATH"
+    echo "LIBS_DIR=$LIBS_DIR"
+else
+    echo "WARNUNG: $LIBS_DIR existiert nicht."
+    export LD_LIBRARY_PATH="$GAMEDIR:$LD_LIBRARY_PATH"
+fi
+echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+
+if command -v ldd >/dev/null 2>&1; then
+    echo "== ldd-Prüfung (nur 'not found'-Zeilen):"
+    ldd ./halo 2>/dev/null | grep 'not found' || echo "   (alle Bibliotheken gefunden)"
+fi
+
+echo ""
+echo "── MAPS ────────────────────────────────────────────────────────"
 if [ ! -s maps/ui.map ]; then
     shopt -s nullglob
     images=({.,..}/*.{iso,ISO,xiso,XISO})
     shopt -u nullglob
     if [ "${#images[@]}" -eq 0 ]; then
-        echo "no maps folder and no disc image (.iso) in $GAMEDIR"
+        echo "FEHLER: Keine maps/ und kein Disc-Image in $GAMEDIR."
         supervised python3 halo_screen.py wait 60 "Halo needs your disc" \
-            "Copy the disc image of Halo: Combat Evolved for the Xbox (an .iso file) into roms/ports/halo on the SD card, then start Halo again. Press a button to go back."
+            "Copy the disc image of Halo: Combat Evolved for the Xbox (an .iso file) into roms/ports/halo-ce on the SD card, then start Halo again. Press a button to go back."
         exit 1
     fi
-    [ "${#images[@]}" -eq 1 ] || echo "${#images[@]} disc images: the first is used"
-    echo "copying the maps folder out of ${images[0]}"
+    [ "${#images[@]}" -eq 1 ] || echo "${#images[@]} Disc-Images: das erste wird verwendet."
+    echo "Kopiere maps/ aus ${images[0]}..."
     supervised python3 halo_extract.py --screen "${images[0]}" "$GAMEDIR" || exit 1
+else
+    echo "maps/ ist vorhanden."
 fi
 
-# the settings for this handheld, the first time (config.toml keeps them,
-# with the others' defaults, which the game writes): written whole, or no
-# start (the game would write its own defaults instead, for good); nor with
-# something else of that name, a folder say, in the way
+echo ""
+echo "── CONFIG ──────────────────────────────────────────────────────"
 if [ ! -f config.toml ]; then
+    echo "Erstelle config.toml mit RK3326-Defaults..."
     if [ -e config.toml ] || [ -L config.toml ] || ! cat > config.toml.new <<'EOF' || ! mv -f config.toml.new config.toml; then
 [display]
 screen_width = 640
@@ -153,24 +229,43 @@ batch_quads = true
 alpha_test_elision = true
 EOF
         rm -f config.toml.new
-        echo "cannot write config.toml"
+        echo "FEHLER: config.toml konnte nicht geschrieben werden."
         supervised python3 halo_screen.py wait 60 "Halo could not start" \
-            "Halo could not write its settings, roms/ports/halo/config.toml: the SD card may be full, or a folder has that name. Press a button to go back."
+            "Halo could not write its settings. Press a button to go back."
         exit 1
+    fi
+    echo "config.toml erstellt."
+else
+    echo "config.toml existiert bereits."
+fi
+
+echo ""
+echo "── CONTROLLER ──────────────────────────────────────────────────"
+if [ -f sdl_mapping.py ]; then
+    SDL_GAMECONTROLLERCONFIG="$(python3 sdl_mapping.py 2>/dev/null)"
+    export SDL_GAMECONTROLLERCONFIG
+    echo "SDL_GAMECONTROLLERCONFIG: ${#SDL_GAMECONTROLLERCONFIG} Zeichen"
+    [ -z "$SDL_GAMECONTROLLERCONFIG" ] && echo "   (leer – SDL3 nutzt seine eigene Gamepad-DB)"
+fi
+
+echo ""
+echo "── SPIELSTART ──────────────────────────────────────────────────"
+if [ ! -d save/z ]; then
+    echo "Erster Start: Shader-Cache wird erstellt..."
+    if [ -f halo_screen.py ]; then
+        supervised python3 halo_screen.py wait 10 "Starting Halo" \
+            "The first start takes about a minute more, with a black screen, while the game sets up its shader cache. Press a button to continue."
     fi
 fi
 
-# the handheld's own controls (SDL2 would take them for another pad)
-SDL_GAMECONTROLLERCONFIG="$(python3 sdl_mapping.py)"
-export SDL_GAMECONTROLLERCONFIG
-
-# the first start: the game sets up its cache (save/z) before its first
-# frame, about a minute with the screen black (nothing drawn before the game
-# stays up as its GPU driver starts): said first
-if [ ! -d save/z ]; then
-    supervised python3 halo_screen.py wait 10 "Starting Halo" \
-        "The first start takes about a minute more, with a black screen, while the game sets up its shader cache. Press a button to continue."
+echo "Starte ./halo ..."
+if [ ! -x ./halo ]; then
+    echo "FEHLER: ./halo fehlt oder ist nicht ausführbar."
+    ls -la ./halo 2>/dev/null
+    exit 1
 fi
 
-# the game
 supervised ./halo
+status=$?
+echo "halo beendet mit status $status"
+exit $status
