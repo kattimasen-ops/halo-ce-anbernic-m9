@@ -46,37 +46,64 @@ jobs:
           unzip -q android-ndk-r28c-linux.zip
           echo "ANDROID_NDK=$PWD/android-ndk-r28c" >> $GITHUB_ENV
 
-      # ── libmali: alten Müll löschen und echt runterladen ──────────────
+      # ── libmali: Multi-Source-Download mit Validierung ────────────────
       - name: Download and extract libmali (Mali-G31 Bifrost for RK3326)
         run: |
           mkdir -p sysroot
+          rm -f sysroot/libmali*   # alte/kaputte Dateien entfernen
 
-          # ALLE alten libmali-Dateien radikal entfernen (verhindert
-          # dass eine kaputte Datei aus dem Repo die Prüfung übersteht)
-          rm -f sysroot/libmali*
+          # Liste der Download-Quellen (in Reihenfolge der Priorität)
+          # Quelle 1: ODROID (Original für RK3326, GBM-Variante)
+          # Quelle 2: openSUSE (aktuellere Version, GBM-Variante)
+          # Quelle 3: openSUSE (Wayland+GBM-Variante, falls GBM allein nicht reicht)
+          URLS=(
+            "https://oph.mdrjr.net/meveric/pool/go2/libm/libmali-rk/libmali-rk-bifrost-g31-rxp0-gbm_1.7-2+deb10_arm64.deb"
+            "https://cdn.opensuse.org/repositories/home:/amazingfate:/libmali-rockchip/Debian_Testing/arm64/libmali-bifrost-g31-g2p0-gbm_1.9-1+debian1_arm64.deb"
+            "https://cdn.opensuse.org/repositories/home:/amazingfate:/libmali-rockchip/Debian_Testing/arm64/libmali-bifrost-g31-g2p0-wayland-gbm_1.9-1+debian1_arm64.deb"
+          )
 
-          echo "== Lade libmali-rk-bifrost-g31-rxp0-gbm von ODROID herunter..."
-          MALI_URL="https://oph.mdrjr.net/meveric/pool/go2/libm/libmali-rk/libmali-rk-bifrost-g31-rxp0-gbm_1.7-2+deb10_arm64.deb"
-          wget -q -O /tmp/libmali.deb "$MALI_URL"
+          MALI_DEB=""
+          for url in "${URLS[@]}"; do
+            echo "== Versuche Download: $url"
+            if curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 30 -o /tmp/libmali.deb "$url"; then
+              SIZE=$(stat -c%s /tmp/libmali.deb 2>/dev/null || echo 0)
+              echo "   Heruntergeladen: $SIZE Bytes"
+              # Validierung: Datei muss > 5 MB sein (HTML-Fehlerseiten sind winzig)
+              if [ "$SIZE" -gt 5000000 ]; then
+                # Prüfen, ob es ein gültiges Debian-Paket ist
+                if dpkg-deb --info /tmp/libmali.deb > /dev/null 2>&1; then
+                  echo "   OK: Gültiges Debian-Paket."
+                  MALI_DEB="/tmp/libmali.deb"
+                  break
+                else
+                  echo "   FEHLER: Kein gültiges .deb-Paket (vermutlich HTML)."
+                fi
+              else
+                echo "   FEHLER: Datei zu klein ($SIZE Bytes)."
+                head -c 200 /tmp/libmali.deb; echo
+              fi
+            else
+              echo "   Download fehlgeschlagen (curl exit $?)."
+            fi
+          done
 
-          SIZE=$(stat -c%s /tmp/libmali.deb)
-          echo "Heruntergeladen: $SIZE Bytes"
-          if [ "$SIZE" -lt 5000000 ]; then
-            echo "FEHLER: Datei zu klein ($SIZE Bytes) – wahrscheinlich HTML-Fehlerseite."
-            head -c 200 /tmp/libmali.deb
+          if [ -z "$MALI_DEB" ]; then
+            echo "FEHLER: Alle Download-Quellen fehlgeschlagen."
+            echo "Bitte prüfe die URLs manuell oder lade die libmali.so.0 manuell hoch."
             exit 1
           fi
 
           echo "== Entpacke das Debian-Paket..."
-          dpkg-deb -x /tmp/libmali.deb /tmp/libmali-extract
+          rm -rf /tmp/libmali-extract
+          dpkg-deb -x "$MALI_DEB" /tmp/libmali-extract
 
-          echo "== Inhalt des entpackten Pakets:"
-          find /tmp/libmali-extract -name "*mali*" -exec ls -la {} \;
+          echo "== Inhalt des entpackten Pakets (alle Mali-Dateien):"
+          find /tmp/libmali-extract -name "*mali*" -exec ls -la {} \; 2>/dev/null || true
 
           echo "== Suche das echte libmali-Binary (reguläre Datei, > 5 MB)..."
           MALI_LIB=$(find /tmp/libmali-extract -name "libmali*" -type f -size +5M | head -n 1)
           if [ -z "$MALI_LIB" ]; then
-            echo "FEHLER: Kein libmali-Binary > 5 MB gefunden."
+            echo "FEHLER: Kein libmali-Binary > 5 MB im Paket gefunden."
             exit 1
           fi
           echo "Gefunden: $MALI_LIB"
