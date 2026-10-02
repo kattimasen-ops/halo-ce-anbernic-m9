@@ -161,6 +161,20 @@ if ! tree_is_patched; then
     git -C "$SRC" apply --summary "$PATCH" | awk '$1 == "create" { print $4 }' | xargs -r git -C "$SRC" add -N --
 fi
 
+# --- PGO: Profile prüfen und ggf. trainieren ---
+PGO_PROFILE="$SRC/pgo/halo_linux.profdata"
+if [ ! -f "$PGO_PROFILE" ]; then
+    echo "== PGO-Profil fehlt. Trainiere neues Profil..."
+    echo "== Dies erfordert ein Gerät mit Display und dauert ca. 15 Minuten."
+    echo "== Auf dem M9 Pro nicht praktikabel – überspringe PGO-Training."
+    echo "== Verwende --pgo=off (ohne PGO) für diesen Build."
+    PGO_FLAG="--pgo=off"
+else
+    echo "== PGO-Profil gefunden: $PGO_PROFILE"
+    echo "== Verwende --pgo=use (Standard)"
+    PGO_FLAG="--pgo=use"
+fi
+
 # --- Fix 1 (entfernt): Der frühere SetEvent-Aufruf in ReadFileEx/WriteFileEx
 # war falsch. Microsoft dokumentiert, dass diese Funktionen das hEvent-Feld
 # ignorieren. SetEvent(0xa) führte zum Absturz bei Adresse 0xa (signal 11).
@@ -279,7 +293,7 @@ with open(path, 'w') as f:
 print("xbox_kernel.c gepatcht: APCs laufen jetzt auch während WaitForSingleObjectEx/SleepEx")
 PYEOF
 
-# --- Fix 3: Der Guest wird für Cortex-A53 gebaut, nicht für Cortex-A35.
+# --- Fix 3: Der Guest wird für Cortex-A35 gebaut, nicht für Cortex-A53.
 # Der Upstream (tools/android_build.py) setzt "-mcpu=cortex-a53" und "-O2" in
 # GUEST_ABI_FLAGS. Der Cortex-A35 ist der kleinste gemeinsame Nenner, aber
 # der A35 ist in-order und hat eine andere Pipeline als der A53. Clang kann
@@ -311,10 +325,19 @@ if count_o2 == 0:
 else:
     text = text.replace(old_o2, new_o2)
 
+# PGO-Flags für den Guest-Build
+old_pgo = '"-fno-unwind-tables",'
+new_pgo = '"-fno-unwind-tables",\n    "-fprofile-use",\n    "-fprofile-correction",'
+count_pgo = text.count(old_pgo)
+if count_pgo == 0:
+    print("WARNUNG: '-fno-unwind-tables' nicht gefunden, PGO-Flags werden nicht gesetzt", file=sys.stderr)
+else:
+    text = text.replace(old_pgo, new_pgo)
+
 with open(path, 'w') as f:
     f.write(text)
 
-print(f"android_build.py gepatcht: {count_mcpu}x cortex-a53 -> cortex-a35, {count_o2}x O2 -> O3")
+print(f"android_build.py gepatcht: {count_mcpu}x cortex-a53 -> cortex-a35, {count_o2}x O2 -> O3, {count_pgo}x PGO-Flags")
 PYEOF
 
 rm -rf "$SRC/port/knulli"
@@ -335,7 +358,7 @@ export SDL2_INCLUDE
 export GUEST_CC HOST_CC JOBS
 
 cd "$SRC"
-python3 configure.py --release --android-ndk "$ANDROID_NDK" --android-guest-cc "$GUEST_CC"
+python3 configure.py --release $PGO_FLAG --android-ndk "$ANDROID_NDK" --android-guest-cc "$GUEST_CC"
 ninja -j "$JOBS" build/android/halo_guest.elf
 
 bash "$SRC/port/knulli/build.sh"
