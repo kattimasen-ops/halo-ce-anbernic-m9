@@ -5,6 +5,7 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 UPSTREAM_URL=${UPSTREAM_URL:-https://github.com/cybersecurity/halo-ce-universal.git}
 UPSTREAM_COMMIT=$(tr -d '[:space:]' < "$HERE/UPSTREAM_COMMIT")
 PATCH=$HERE/patches/halo-ce-universal-knulli.patch
+PATCH_EX=$HERE/patches/xbox-files-ex-completion.patch
 SDL3_TAG=release-3.2.10
 SDL2_TAG=release-2.30.10
 SDL2_ARCHIVE=https://github.com/libsdl-org/SDL/archive/refs/tags/$SDL2_TAG.tar.gz
@@ -44,7 +45,6 @@ WORK=$(cd "$WORK" && pwd)
 DIST=$(cd "$DIST" && pwd)
 SRC=$WORK/halo-ce-universal
 
-# ---------- SDL3 aus dem Quellcode kompilieren (GLIBC 2.31 kompatibel) ----
 if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
     echo "== SDL3 $SDL3_TAG: kompiliere aus dem Quellcode"
     SDL3_SRC=$WORK/SDL3-${SDL3_TAG#release-}
@@ -88,16 +88,10 @@ if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
     [ -n "$SDL3_LIB" ] || die "libSDL3.so.0 wurde nicht gefunden"
     cp -L "$SDL3_LIB" "$SYSROOT_LIB/libSDL3.so.0"
     echo "== SDL3 kompiliert: $(stat -c%s "$SYSROOT_LIB/libSDL3.so.0") Bytes"
-    echo "== GLIBC-Versionen in libSDL3:"
-    aarch64-linux-gnu-readelf -V "$SYSROOT_LIB/libSDL3.so.0" | grep GLIBC | sort -u || true
 else
     echo "== libSDL3.so.0 bereits vorhanden – überspringe SDL3"
 fi
 
-# ---------- SDL2 aus dem Quellcode kompilieren (GLIBC 2.31 kompatibel) ----
-# Version 2.30.10 statt 2.0.20: behebt den R36S-Pageflip-Bug und enthält
-# die stabilere KMSDRM-Implementierung. Wird auf dem Gerät vom Host
-# (host_sdl2.c) verwendet.
 if [ ! -f "$SYSROOT_LIB/libSDL2-2.0.so.0" ]; then
     echo "== SDL2 $SDL2_TAG: kompiliere aus dem Quellcode"
     SDL2_SRC=$WORK/SDL2-src
@@ -135,18 +129,13 @@ if [ ! -f "$SYSROOT_LIB/libSDL2-2.0.so.0" ]; then
     [ -n "$SDL2_LIB" ] || die "libSDL2-2.0.so.0 wurde nicht gefunden"
     cp -L "$SDL2_LIB" "$SYSROOT_LIB/libSDL2-2.0.so.0"
     echo "== SDL2 kompiliert: $(stat -c%s "$SYSROOT_LIB/libSDL2-2.0.so.0") Bytes"
-    echo "== GLIBC-Versionen in libSDL2:"
-    aarch64-linux-gnu-readelf -V "$SYSROOT_LIB/libSDL2-2.0.so.0" | grep GLIBC | sort -u || true
 else
     echo "== libSDL2-2.0.so.0 bereits vorhanden – überspringe SDL2"
 fi
 
-# WICHTIG: Die SDL2-Header liegen im Installations-Ordner des selbst
-# kompilierten SDL2 ($SDL2_INSTALL/include/SDL2/SDL.h).
 export SDL2_INCLUDE="$SDL2_INSTALL/include"
 echo "== SDL2_INCLUDE=$SDL2_INCLUDE"
 
-# ---------- upstream at the pinned commit
 if [ ! -d "$SRC/.git" ]; then
     echo "== cloning $UPSTREAM_URL into $SRC"
     git init -q "$SRC"
@@ -165,11 +154,12 @@ tree_is_patched() {
         cmp -s <(git -C "$SRC" diff HEAD | grep -v '^index ') <(grep -v '^index ' "$PATCH")
 }
 if ! tree_is_patched; then
-    echo "== checking out $UPSTREAM_COMMIT and applying $(basename "$PATCH")"
+    echo "== checking out $UPSTREAM_COMMIT and applying patches"
     git -C "$SRC" checkout -q --force --detach "$UPSTREAM_COMMIT"
     git -C "$SRC" reset -q --hard
     git -C "$SRC" clean -q -fd
     git -C "$SRC" apply "$PATCH"
+    git -C "$SRC" apply --recount "$PATCH_EX"
     git -C "$SRC" apply --summary "$PATCH" | awk '$1 == "create" { print $4 }' | xargs -r git -C "$SRC" add -N --
 fi
 
@@ -178,7 +168,7 @@ cp -a "$HERE/port/knulli" "$SRC/port/knulli"
 rm -rf "$SRC/port/knulli/__pycache__"
 chmod +x "$SRC/port/knulli/build.sh" 2>/dev/null || true
 
-stamp=$({ cat "$PATCH"
+stamp=$({ cat "$PATCH" "$PATCH_EX"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 if [ -f "$SRC/.port-stamp" ] && [ "$(cat "$SRC/.port-stamp")" = "$stamp" ]; then
@@ -186,7 +176,6 @@ if [ -f "$SRC/.port-stamp" ] && [ "$(cat "$SRC/.port-stamp")" = "$stamp" ]; then
 fi
 echo "$stamp" > "$SRC/.port-stamp"
 
-# ---------- guest and host
 export ANDROID_NDK SYSROOT_LIB
 export SDL2_INCLUDE
 export GUEST_CC HOST_CC JOBS
@@ -195,11 +184,8 @@ cd "$SRC"
 python3 configure.py --release --android-ndk "$ANDROID_NDK" --android-guest-cc "$GUEST_CC"
 ninja -j "$JOBS" build/android/halo_guest.elf
 
-# port/knulli/build.sh verwendet `set -euo pipefail`, was `dash` nicht kennt.
-# Deshalb mit bash aufrufen, nicht mit sh.
 bash "$SRC/port/knulli/build.sh"
 
-# ---------- dist
 echo "== copying the build into $DIST"
 rm -rf "$DIST"
 mkdir -p "$DIST"
