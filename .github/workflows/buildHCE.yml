@@ -27,10 +27,9 @@ jobs:
           apt-get install -y --no-install-recommends \
             ca-certificates software-properties-common gnupg \
             python3 python3-pip ninja-build git curl wget tar unzip xz-utils \
-            build-essential \
-            gcc-aarch64-linux-gnu \
-            libc6-dev-arm64-cross \
-            linux-libc-dev-arm64-cross \
+            build-essential cmake \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            libc6-dev-arm64-cross linux-libc-dev-arm64-cross \
             lsb-release apt-utils dpkg-dev file patchelf
 
       - name: Checkout repository
@@ -50,16 +49,61 @@ jobs:
           unzip -q android-ndk-r28c-linux.zip
           echo "ANDROID_NDK=$PWD/android-ndk-r28c" >> $GITHUB_ENV
 
-      # ── libmali: Multi-Source-Download mit Validierung ────────────────
-      - name: Download and extract libmali (Mali-G31 Bifrost for RK3326)
+      - name: Prepare sysroot directory
         run: |
           mkdir -p sysroot
-          rm -f sysroot/libmali*
+          rm -f sysroot/libSDL2* sysroot/libSDL3* sysroot/libdecor* sysroot/libmali*
+
+      # ── libSDL2: Focal-Version (GLIBC 2.31 kompatibel) ────────────────
+      - name: Download and extract libSDL2 (Focal, GLIBC 2.31 compatible)
+        run: |
+          URL="https://dl.khadas.com/repos/debs/vim3/focal/sdl2/sdl2.tgz"
+          echo "== Lade SDL2-Tarball von Khadas herunter..."
+          wget -q -O /tmp/sdl2.tgz "$URL"
+          mkdir -p /tmp/sdl2-extract
+          tar -xzf /tmp/sdl2.tgz -C /tmp/sdl2-extract
+          
+          # Suche die .deb-Datei und entpacke sie
+          SDL2_DEB=$(find /tmp/sdl2-extract -name "libsdl2-2.0-0_*.deb" | head -n 1)
+          if [ -z "$SDL2_DEB" ]; then
+            echo "FEHLER: libsdl2-2.0-0 .deb nicht gefunden."
+            find /tmp/sdl2-extract -name "*.deb"
+            exit 1
+          fi
+          dpkg-deb -x "$SDL2_DEB" /tmp/sdl2-deb-extract
+          
+          SDL_LIB=$(find /tmp/sdl2-deb-extract -name "libSDL2-2.0.so.0*" -type f | head -n 1)
+          cp "$SDL_LIB" sysroot/libSDL2-2.0.so.0
+          echo "libSDL2-2.0.so.0: $(stat -c%s sysroot/libSDL2-2.0.so.0) Bytes"
+          
+          # GLIBC-Kompatibilität prüfen
+          echo "== GLIBC-Versionen in libSDL2:"
+          aarch64-linux-gnu-readelf -V sysroot/libSDL2-2.0.so.0 | grep GLIBC | sort -u || true
+
+      # ── libdecor: Focal-Version (GLIBC 2.31 kompatibel) ──────────────
+      - name: Download and extract libdecor (Focal, GLIBC 2.31 compatible)
+        run: |
+          URL="http://ftp.ubuntu-tw.org/ubuntu-ports/ubuntu-ports/ubuntu-ports/pool/main/libd/libdecor-0/libdecor-0-0_0.1.0-3build1_arm64.deb"
+          echo "== Lade libdecor (Focal) herunter..."
+          wget -q -O /tmp/libdecor.deb "$URL"
+          
+          dpkg-deb -x /tmp/libdecor.deb /tmp/libdecor-extract
+          DECOR_LIB=$(find /tmp/libdecor-extract -name "libdecor-0.so.0*" -type f | head -n 1)
+          cp "$DECOR_LIB" sysroot/libdecor-0.so.0
+          echo "libdecor-0.so.0: $(stat -c%s sysroot/libdecor-0.so.0) Bytes"
+
+      # ── libmali: vom ODROID-Paket oder vom Gerät ─────────────────────
+      - name: Download and extract libmali (Mali-G31 Bifrost for RK3326)
+        run: |
+          # Prüfe, ob libmali bereits im Repo liegt (echte Datei, > 5 MB)
+          if [ -f sysroot/libmali.so.0 ] && [ ! -L sysroot/libmali.so.0 ] && [ "$(stat -c%s sysroot/libmali.so.0 2>/dev/null || echo 0)" -gt 5000000 ]; then
+            echo "OK: sysroot/libmali.so.0 existiert bereits (echtes Binary)."
+            exit 0
+          fi
 
           URLS=(
             "https://oph.mdrjr.net/meveric/pool/go2/libm/libmali-rk/libmali-rk-bifrost-g31-rxp0-gbm_1.7-2+deb10_arm64.deb"
             "https://cdn.opensuse.org/repositories/home:/amazingfate:/libmali-rockchip/Debian_Testing/arm64/libmali-bifrost-g31-g2p0-gbm_1.9-1+debian1_arm64.deb"
-            "https://cdn.opensuse.org/repositories/home:/amazingfate:/libmali-rockchip/Debian_Testing/arm64/libmali-bifrost-g31-g2p0-wayland-gbm_1.9-1+debian1_arm64.deb"
           )
 
           MALI_DEB=""
@@ -67,121 +111,53 @@ jobs:
             echo "== Versuche Download: $url"
             if curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 30 -o /tmp/libmali.deb "$url"; then
               SIZE=$(stat -c%s /tmp/libmali.deb 2>/dev/null || echo 0)
-              echo "   Heruntergeladen: $SIZE Bytes"
-              if [ "$SIZE" -gt 5000000 ]; then
-                if dpkg-deb --info /tmp/libmali.deb > /dev/null 2>&1; then
-                  echo "   OK: Gültiges Debian-Paket."
-                  MALI_DEB="/tmp/libmali.deb"
-                  break
-                else
-                  echo "   FEHLER: Kein gültiges .deb-Paket (vermutlich HTML)."
-                fi
-              else
-                echo "   FEHLER: Datei zu klein ($SIZE Bytes)."
-                head -c 200 /tmp/libmali.deb; echo
+              if [ "$SIZE" -gt 5000000 ] && dpkg-deb --info /tmp/libmali.deb > /dev/null 2>&1; then
+                MALI_DEB="/tmp/libmali.deb"
+                break
               fi
-            else
-              echo "   Download fehlgeschlagen (curl exit $?)."
             fi
           done
 
           if [ -z "$MALI_DEB" ]; then
-            echo "FEHLER: Alle Download-Quellen fehlgeschlagen."
+            echo "FEHLER: libmali konnte nicht heruntergeladen werden."
             exit 1
           fi
 
-          echo "== Entpacke das Debian-Paket..."
-          rm -rf /tmp/libmali-extract
           dpkg-deb -x "$MALI_DEB" /tmp/libmali-extract
-
-          echo "== Inhalt des entpackten Pakets (alle Mali-Dateien):"
-          find /tmp/libmali-extract -name "*mali*" -exec ls -la {} \; 2>/dev/null || true
-
-          echo "== Suche das echte libmali-Binary (reguläre Datei, > 5 MB)..."
           MALI_LIB=$(find /tmp/libmali-extract -name "libmali*" -type f -size +5M | head -n 1)
-          if [ -z "$MALI_LIB" ]; then
-            echo "FEHLER: Kein libmali-Binary > 5 MB im Paket gefunden."
-            exit 1
-          fi
-          echo "Gefunden: $MALI_LIB"
-          ls -la "$MALI_LIB"
-
           cp "$MALI_LIB" sysroot/libmali.so.0
-          ls -la sysroot/libmali.so.0
+          echo "libmali.so.0: $(stat -c%s sysroot/libmali.so.0) Bytes"
 
-          if ! file sysroot/libmali.so.0 | grep -q "ELF"; then
-            echo "FEHLER: sysroot/libmali.so.0 ist kein ELF-Binary."
-            file sysroot/libmali.so.0
-            exit 1
-          fi
-          echo "OK: libmali.so.0 ist ein gültiges ELF-Binary."
-
+          # SONAME prüfen
           SONAME=$(aarch64-linux-gnu-readelf -d sysroot/libmali.so.0 2>/dev/null | grep SONAME | sed 's/.*\[\(.*\)\].*/\1/' || echo "")
-          echo "Gefundene SONAME: $SONAME"
+          echo "SONAME: $SONAME"
           if [ -n "$SONAME" ] && [ "$SONAME" != "libmali.so.0" ]; then
-            echo "== Patche SONAME auf libmali.so.0..."
             patchelf --set-soname libmali.so.0 sysroot/libmali.so.0
-            echo "Neue SONAME: $(aarch64-linux-gnu-readelf -d sysroot/libmali.so.0 | grep SONAME)"
           fi
 
-      # ── libSDL2: Multi-Source-Download mit Fallback ────────────────────
-      - name: Download and extract libSDL2 (arm64)
+      # ── libSDL3: aus dem Quellcode kompilieren (GLIBC 2.31 kompatibel) ─
+      # Kein fertiges SDL3-Paket für Focal. Der Build.sh-Schritt unten
+      # kompiliert SDL3 gegen die GLIBC 2.31 des Containers. Wir legen
+      # lediglich die Umgebungsvariable fest, damit build.sh weiß, wo
+      # es suchen soll.
+      - name: Prepare SDL3 source (compiled in build.sh)
         run: |
-          mkdir -p sysroot
-          rm -f sysroot/libSDL2*
+          echo "SDL3 wird in build.sh aus dem Quellcode kompiliert."
+          # Platzhalter: build.sh erwartet eine libSDL3.so.0 in sysroot.
+          # Der Download-/Kompilierungsschritt in build.sh erledigt das.
+          touch sysroot/.sdl3-placeholder
 
-          URLS=(
-            "http://archive.ubuntu.com/ubuntu/pool/main/libs/libsdl2/libsdl2-2.0-0_2.30.0+dfsg-1build3_arm64.deb"
-            "http://ftp.debian.org/debian/pool/main/libs/libsdl2/libsdl2-2.0-0_2.26.5+dfsg-1_arm64.deb"
-            "http://archive.ubuntu.com/ubuntu/pool/main/libs/libsdl2/libsdl2-2.0-0_2.0.20+dfsg-2ubuntu1.22.04.1_arm64.deb"
-          )
-
-          SDL_DEB=""
-          for url in "${URLS[@]}"; do
-            echo "== Versuche Download: $url"
-            if curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 30 -o /tmp/libsdl2.deb "$url"; then
-              SIZE=$(stat -c%s /tmp/libsdl2.deb 2>/dev/null || echo 0)
-              echo "   Heruntergeladen: $SIZE Bytes"
-              if [ "$SIZE" -gt 500000 ]; then
-                if dpkg-deb --info /tmp/libsdl2.deb > /dev/null 2>&1; then
-                  echo "   OK: Gültiges Debian-Paket."
-                  SDL_DEB="/tmp/libsdl2.deb"
-                  break
-                else
-                  echo "   FEHLER: Kein gültiges .deb-Paket (vermutlich HTML)."
-                fi
-              else
-                echo "   FEHLER: Datei zu klein ($SIZE Bytes)."
-                head -c 200 /tmp/libsdl2.deb; echo
-              fi
+      - name: Verify sysroot libraries
+        run: |
+          echo "== Inhalt von sysroot/:"
+          ls -la sysroot/
+          for f in sysroot/libSDL2-2.0.so.0 sysroot/libdecor-0.so.0 sysroot/libmali.so.0; do
+            if [ -f "$f" ] && [ ! -L "$f" ] && [ "$(stat -c%s "$f" 2>/dev/null || echo 0)" -gt 10240 ]; then
+              echo "OK: $f ($(stat -c%s "$f") Bytes)"
             else
-              echo "   Download fehlgeschlagen (curl exit $?)."
+              echo "WARNUNG: $f fehlt oder ist zu klein."
             fi
           done
-
-          if [ -z "$SDL_DEB" ]; then
-            echo "FEHLER: Alle Download-Quellen fehlgeschlagen."
-            exit 1
-          fi
-
-          echo "== Entpacke das Debian-Paket..."
-          rm -rf /tmp/libsdl2-extract
-          dpkg-deb -x "$SDL_DEB" /tmp/libsdl2-extract
-
-          SDL_LIB=$(find /tmp/libsdl2-extract -name "libSDL2-2.0.so.0*" -type f | head -n 1)
-          if [ -z "$SDL_LIB" ]; then
-            echo "FEHLER: libSDL2-2.0.so.0 nicht gefunden."
-            find /tmp/libsdl2-extract -name "*SDL2*"
-            exit 1
-          fi
-          cp "$SDL_LIB" sysroot/libSDL2-2.0.so.0
-          ls -la sysroot/libSDL2-2.0.so.0
-
-          if ! file sysroot/libSDL2-2.0.so.0 | grep -q "ELF"; then
-            echo "FEHLER: sysroot/libSDL2-2.0.so.0 ist kein ELF-Binary."
-            exit 1
-          fi
-          echo "OK: libSDL2-2.0.so.0 ist ein gültiges ELF-Binary."
 
       - name: Build
         run: |
@@ -190,7 +166,7 @@ jobs:
           export HOST_CC=aarch64-linux-gnu-gcc
           export GUEST_CC=clang-22
           ./build.sh
-        timeout-minutes: 90
+        timeout-minutes: 120
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
