@@ -46,6 +46,14 @@ SRC=$WORK/halo-ce-universal
 SDL2_INCLUDE=$WORK/sdl2-include
 
 # ---------- SDL3 aus dem Quellcode kompilieren (GLIBC 2.31 kompatibel) ──
+# Es gibt kein fertiges SDL3-Paket für Ubuntu 20.04 (Focal). Wir bauen
+# SDL3 daher mit dem aarch64-Cross-Compiler gegen die GLIBC 2.31 des
+# Containers, damit die resultierende libSDL3.so.0 auf dem M9 Pro läuft.
+#
+# WICHTIG: -DSDL_UNIX_CONSOLE_BUILD=ON überspringt den CMake-Check, der
+# X11- oder Wayland-Entwicklungsbibliotheken verlangt. Da der M9 Pro
+# weder X11 noch Wayland nutzt (sondern KMSDRM/EGL), ist diese Option
+# zwingend erforderlich.
 if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
     echo "== SDL3 $SDL3_TAG: kompiliere aus dem Quellcode"
     SDL3_SRC=$WORK/SDL3-${SDL3_TAG#release-}
@@ -63,8 +71,10 @@ if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
     # Cross-Compile-Setup OHNE CMAKE_SYSROOT. Der Cross-Compiler
     # aarch64-linux-gnu-gcc kennt seine eigenen Standard-Suchpfade
     # (/usr/aarch64-linux-gnu/include und /usr/aarch64-linux-gnu/lib).
-    # CMAKE_SYSROOT würde ihn zwingen, nach /usr/aarch64-linux-gnu/lib/libc.so.6
-    # zu suchen, wo die Bibliothek nicht liegt.
+    #
+    # -DSDL_UNIX_CONSOLE_BUILD=ON: überspringt den X11/Wayland-Check.
+    # -DSDL_X11=OFF, -DSDL_WAYLAND=OFF: deaktiviert die nicht benötigten
+    #   Video-Backends explizit.
     cmake -S "$SDL3_SRC" -B "$SDL3_BUILD" \
         -DCMAKE_SYSTEM_NAME=Linux \
         -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
@@ -80,6 +90,12 @@ if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
         -DSDL_EXAMPLES=OFF \
         -DSDL_INSTALL_TESTS=OFF \
         -DSDL_WERROR=OFF \
+        -DSDL_UNIX_CONSOLE_BUILD=ON \
+        -DSDL_X11=OFF \
+        -DSDL_WAYLAND=OFF \
+        -DSDL_KMSDRM=ON \
+        -DSDL_OPENGLES=ON \
+        -DSDL_OPENGL=OFF \
         -DCMAKE_INSTALL_PREFIX="$SDL3_INSTALL"
     cmake --build "$SDL3_BUILD" -j "$JOBS"
     cmake --install "$SDL3_BUILD"
