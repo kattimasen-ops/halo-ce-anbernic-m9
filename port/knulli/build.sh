@@ -95,9 +95,9 @@ else
 fi
 
 # ---------- SDL2 aus dem Quellcode kompilieren (GLIBC 2.31 kompatibel) ----
-# Version 2.30.10 statt 2.0.20: behebt den R36S-Pageflip-Bug
-# (DRM_CAP_ASYNC_PAGE_FLIP wird beworben, aber nicht unterstützt) und
-# enthält die stabilere KMSDRM-Implementierung.
+# Version 2.30.10 statt 2.0.20: behebt den R36S-Pageflip-Bug und enthält
+# die stabilere KMSDRM-Implementierung. Wird auf dem Gerät vom Host
+# (host_sdl2.c) verwendet.
 if [ ! -f "$SYSROOT_LIB/libSDL2-2.0.so.0" ]; then
     echo "== SDL2 $SDL2_TAG: kompiliere aus dem Quellcode"
     SDL2_SRC=$WORK/SDL2-src
@@ -195,7 +195,9 @@ cd "$SRC"
 python3 configure.py --release --android-ndk "$ANDROID_NDK" --android-guest-cc "$GUEST_CC"
 ninja -j "$JOBS" build/android/halo_guest.elf
 
-sh "$SRC/port/knulli/build.sh"
+# port/knulli/build.sh verwendet `set -euo pipefail`, was `dash` nicht kennt.
+# Deshalb mit bash aufrufen, nicht mit sh.
+bash "$SRC/port/knulli/build.sh"
 
 # ---------- dist
 echo "== copying the build into $DIST"
