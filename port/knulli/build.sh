@@ -2,6 +2,7 @@
 # Builds the Knulli port (port/knulli/README.md) into build/knulli:
 #   halo            the aarch64 glibc host (the loader, SDL2, OpenGL ES)
 #   halo_guest.elf  the game, the Android port's guest image
+#   libs.aarch64/   the runtime libraries the device may not have
 #
 # Needs: python configure.py run with --android-ndk (the guest build), the
 # aarch64-linux-gnu cross compiler, SDL2 headers (SDL2_INCLUDE) and the
@@ -32,24 +33,68 @@ OUT=build/knulli
 OBJ=$OUT/obj
 
 ninja -j "$JOBS" build/android/halo_guest.elf build/android/host/host_import_table.c
-mkdir -p "$OBJ" "$OUT/gl_include" "$OUT/lib"
+mkdir -p "$OBJ" "$OUT/gl_include" "$OUT/lib" "$OUT/libs.aarch64"
 
 KHRONOS=$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include
 for name in EGL GLES2 GLES3 KHR; do
     ln -sfn "$KHRONOS/$name" "$OUT/gl_include/$name"
 done
 
-# link names for the device's libraries: SDL2, SDL3 and libmali (OpenGL ES
-# and EGL). The first file that matches each name is used, so
-# libSDL2-2.0.so.0* picks the .so.0 file that was placed in sysroot.
-for name in libSDL2-2.0.so.0:libSDL2.so libSDL3.so.0:libSDL3.so libmali.so.0:libmali.so; do
-    library=$(ls "$SYSROOT_LIB/${name%%:*}"* 2>/dev/null | head -n 1)
-    if [ -z "$library" ]; then
-        echo "build.sh: no ${name%%:*}* in SYSROOT_LIB=$SYSROOT_LIB" >&2
-        exit 1
+# ── Diagnose: zeige, was in SYSROOT_LIB liegt ────────────────────────────
+echo "== Inhalt von SYSROOT_LIB=$SYSROOT_LIB:"
+ls -la "$SYSROOT_LIB" || true
+
+# ── Laufzeitbibliotheken in das Artifact kopieren ────────────────────────
+# Diese Bibliotheken liegen auf dem Zielgerät (ArkOS 4) möglicherweise
+# nicht oder in einer inkompatiblen Version. Sie werden daher mitgeliefert
+# und im libs.aarch64/-Unterordner abgelegt, den Halo.sh in den
+# LD_LIBRARY_PATH aufnimmt.
+echo "== Kopiere Laufzeitbibliotheken nach $OUT/libs.aarch64/"
+copy_runtime_lib() {
+    # Sucht in SYSROOT_LIB nach einer Datei, deren Name mit dem Präfix
+    # beginnt (z. B. "libSDL3"), und kopiert die erste gefundene
+    # reguläre Datei unter dem Zielnamen.
+    prefix=$1
+    target=$2
+    src=$(find "$SYSROOT_LIB" -maxdepth 1 -name "$prefix*" -type f 2>/dev/null | head -n 1)
+    if [ -z "$src" ]; then
+        # Fallback: auch Symlinks akzeptieren und auflösen
+        src=$(find "$SYSROOT_LIB" -maxdepth 1 -name "$prefix*" 2>/dev/null | head -n 1)
     fi
-    ln -sf "$library" "$OUT/lib/${name##*:}"
-done
+    if [ -z "$src" ]; then
+        echo "  WARNUNG: keine $prefix*-Datei in SYSROOT_LIB – $target wird nicht ausgeliefert"
+        return 1
+    fi
+    cp -L "$src" "$OUT/libs.aarch64/$target"
+    echo "  $target <- $(basename "$src") ($(stat -c%s "$OUT/libs.aarch64/$target") Bytes)"
+    return 0
+}
+
+copy_runtime_lib "libSDL3"   "libSDL3.so.0"
+copy_runtime_lib "libmali"   "libmali.so.0"
+copy_runtime_lib "libSDL2"   "libSDL2-2.0.so.0"
+# ─────────────────────────────────────────────────────────────────────────
+
+# ── Linker-Symlinks in $OUT/lib ─────────────────────────────────────────
+link_library() {
+    pattern=$1
+    linkname=$2
+    library=$(find "$SYSROOT_LIB" -maxdepth 1 -name "$pattern" -type f 2>/dev/null | head -n 1)
+    if [ -z "$library" ]; then
+        library=$(find "$SYSROOT_LIB" -maxdepth 1 -name "$pattern" 2>/dev/null | head -n 1)
+    fi
+    if [ -z "$library" ]; then
+        echo "build.sh: no $pattern in SYSROOT_LIB=$SYSROOT_LIB" >&2
+        return 1
+    fi
+    ln -sf "$library" "$OUT/lib/$linkname"
+    echo "  linked $linkname -> $(basename "$library")"
+    return 0
+}
+
+link_library "libSDL2*" "libSDL2.so"    || exit 1
+link_library "libSDL3*" "libSDL3.so"    || exit 1
+link_library "libmali*" "libmali.so"    || exit 1
 
 # ── OPTIMIERTE FLAGS FÜR RK3326 (CORTEX-A35) ─────────────────────────────
 # Ursprünglich: -O2 -g -mcpu=cortex-a53 (für Allwinner H700)
@@ -62,9 +107,6 @@ CFLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -fPIC -Wall -Wno-unused-function 
         -fno-plt -fno-semantic-interposition"
 # ─────────────────────────────────────────────────────────────────────────
 
-# (the debug information names the tree and the SDL2 headers by what they
-# are, not by where they are on this computer; the OpenGL ES headers are
-# found through build/knulli/gl_include, in the tree)
 CFLAGS="$CFLAGS -ffile-prefix-map=$ROOT=. -ffile-prefix-map=$SDL2_INCLUDE=sdl2"
 INCLUDES="-Iport/knulli/compat -Iport/knulli/host -Iport/android/include \
           -Iport/android/host -Iport/linux/src -Iport/third_party/tomlc17 \
@@ -73,17 +115,12 @@ MINIUPNPC="-Iport/third_party/miniupnpc/include -Iport/third_party/miniupnpc/src
            -DMINIUPNP_STATICLIB -DMINIUPNPC_SET_SOCKET_TIMEOUT -DMINIUPNPC_GET_SRC_ADDR \
            -D_BSD_SOURCE -D_DEFAULT_SOURCE -w"
 
-# the compiler and its options as the objects were made with them: when
-# they change, every object is made again
 FLAGS=$OUT/flags
 printf '%s\n' "$CC $CFLAGS $INCLUDES $MINIUPNPC" > "$FLAGS.new"
 cmp -s "$FLAGS.new" "$FLAGS" || mv "$FLAGS.new" "$FLAGS"
 rm -f "$FLAGS.new"
 
 objects=""
-# whether an object is older than this script, the compiler's options, or its
-# source or a header the compiler found it including (its .d file lists both;
-# one gone, or a .d file that cannot be read, counts as newer)
 stale() {
     object=$1
     [ ! -f "$object" ] || [ ! -f "$object.d" ] || [ "$0" -nt "$object" ] || [ "$FLAGS" -nt "$object" ] && return 0
@@ -101,7 +138,6 @@ compile() {
     object=$OBJ/$(echo "$source" | tr / _).o
     if stale "$object"; then
         echo "CC $source"
-        # shellcheck disable=SC2086
         $CC $CFLAGS $INCLUDES "$@" -MMD -MF "$object.d" -c "$source" -o "$object"
     fi
     objects="$objects $object"
@@ -116,7 +152,6 @@ compile port/knulli/host/host_profile.c
 compile port/knulli/host/host_gl_timing.c
 compile port/knulli/host/host_gl_timing.S
 
-# the GL thread's recording functions, from the functions the guest imports
 python3 port/knulli/glthread_gen.py build/android/guest/gen/gl_imports.list \
     "$KHRONOS/GLES3/gl32.h" \
     "$OUT/host_glthread_gen.c.new"
@@ -126,32 +161,17 @@ rm -f "$OUT/host_glthread_gen.c.new"
 
 compile port/knulli/host/host_glthread.c
 compile "$OUT/host_glthread_gen.c"
-# host_sdl3_events.c uses the SDL3 headers from the guest tree (build/android/
-# third_party/SDL3/include); the SDL3 library is linked below.
 compile port/knulli/host/host_sdl3_events.c -Ibuild/android/third_party/SDL3/include
 compile port/linux/src/posix_files.c
 compile port/linux/src/posix_net.c
-# shellcheck disable=SC2086
 compile port/linux/src/posix_upnp.c $MINIUPNPC
 for source in port/third_party/miniupnpc/src/*.c; do
-    # shellcheck disable=SC2086
     compile "$source" $MINIUPNPC
 done
 compile port/third_party/tomlc17/tomlc17.c -w
 compile build/android/host/host_import_table.c
 
 echo "LINK $OUT/halo"
-# ── OPTIMIERTE LINKER-FLAGS FÜR RK3326 ────────────────────────────────────
-# -flto: LTO muss beim Linken wiederholt werden
-# -Wl,-O1: Optimiert die Symboltabelle
-# -Wl,--as-needed: Linkt nur tatsächlich benötigte Bibliotheken
-# -Wl,--gc-sections: Entfernt ungenutzte Code-/Datensegmente
-#
-# Die Reihenfolge der Bibliotheken ist wichtig: -lSDL3 vor -lSDL2, weil
-# host_sdl3_events.c die SDL3-Symbole direkt nutzt und der Linker sie
-# zuerst auflösen muss. libmali enthält die OpenGL-ES- und EGL-Symbole.
-# ─────────────────────────────────────────────────────────────────────────
-# shellcheck disable=SC2086
 $CC -o "$OUT/halo" $objects \
     -L"$OUT/lib" \
     -Wl,-rpath-link,"$OUT/lib" \
@@ -161,4 +181,8 @@ $CC -o "$OUT/halo" $objects \
     -lSDL3 -lSDL2 -lmali -lpthread -ldl -lm
 
 cp build/android/halo_guest.elf "$OUT/halo_guest.elf"
+
+echo "== Inhalt von $OUT/libs.aarch64/:"
+ls -la "$OUT/libs.aarch64/"
+echo "== $OUT/halo und $OUT/halo_guest.elf:"
 ls -l "$OUT/halo" "$OUT/halo_guest.elf"
