@@ -46,25 +46,19 @@ jobs:
           unzip -q android-ndk-r28c-linux.zip
           echo "ANDROID_NDK=$PWD/android-ndk-r28c" >> $GITHUB_ENV
 
-      # ── libmali automatisch herunterladen und entpacken ───────────────
+      # ── libmali: alten Müll löschen und echt runterladen ──────────────
       - name: Download and extract libmali (Mali-G31 Bifrost for RK3326)
         run: |
           mkdir -p sysroot
 
-          # Falls bereits eine gültige libmali.so.0 im Repo liegt (> 5 MB, ELF), überspringen
-          if [ -f sysroot/libmali.so.0 ] && [ ! -L sysroot/libmali.so.0 ] && [ "$(stat -c%s sysroot/libmali.so.0 2>/dev/null || echo 0)" -gt 5000000 ]; then
-            if file sysroot/libmali.so.0 | grep -q "ELF"; then
-              echo "OK: sysroot/libmali.so.0 existiert bereits als gültiges ELF-Binary."
-              ls -la sysroot/libmali.so.0
-              exit 0
-            fi
-          fi
+          # ALLE alten libmali-Dateien radikal entfernen (verhindert
+          # dass eine kaputte Datei aus dem Repo die Prüfung übersteht)
+          rm -f sysroot/libmali*
 
           echo "== Lade libmali-rk-bifrost-g31-rxp0-gbm von ODROID herunter..."
           MALI_URL="https://oph.mdrjr.net/meveric/pool/go2/libm/libmali-rk/libmali-rk-bifrost-g31-rxp0-gbm_1.7-2+deb10_arm64.deb"
           wget -q -O /tmp/libmali.deb "$MALI_URL"
 
-          # Größe prüfen (muss > 5 MB sein, sonst HTML-Fehlerseite)
           SIZE=$(stat -c%s /tmp/libmali.deb)
           echo "Heruntergeladen: $SIZE Bytes"
           if [ "$SIZE" -lt 5000000 ]; then
@@ -76,22 +70,21 @@ jobs:
           echo "== Entpacke das Debian-Paket..."
           dpkg-deb -x /tmp/libmali.deb /tmp/libmali-extract
 
-          echo "== Suche das echte libmali-Binary (nicht den Symlink) im entpackten Paket..."
-          # Wir suchen die größte Datei, die mit libmali beginnt und ein reguläres File ist
+          echo "== Inhalt des entpackten Pakets:"
+          find /tmp/libmali-extract -name "*mali*" -exec ls -la {} \;
+
+          echo "== Suche das echte libmali-Binary (reguläre Datei, > 5 MB)..."
           MALI_LIB=$(find /tmp/libmali-extract -name "libmali*" -type f -size +5M | head -n 1)
           if [ -z "$MALI_LIB" ]; then
-            echo "FEHLER: Kein libmali-Binary > 5 MB gefunden. Inhalt:"
-            find /tmp/libmali-extract -name "*mali*" -exec ls -la {} \;
+            echo "FEHLER: Kein libmali-Binary > 5 MB gefunden."
             exit 1
           fi
           echo "Gefunden: $MALI_LIB"
           ls -la "$MALI_LIB"
 
-          # Als libmali.so.0 in sysroot kopieren
           cp "$MALI_LIB" sysroot/libmali.so.0
           ls -la sysroot/libmali.so.0
 
-          # Sicherstellen, dass es ein echtes ELF-Binary ist
           if ! file sysroot/libmali.so.0 | grep -q "ELF"; then
             echo "FEHLER: sysroot/libmali.so.0 ist kein ELF-Binary."
             file sysroot/libmali.so.0
@@ -102,20 +95,17 @@ jobs:
           # SONAME prüfen und ggf. auf libmali.so.0 patchen
           SONAME=$(aarch64-linux-gnu-readelf -d sysroot/libmali.so.0 2>/dev/null | grep SONAME | sed 's/.*\[\(.*\)\].*/\1/' || echo "")
           echo "Gefundene SONAME: $SONAME"
-          if [ "$SONAME" != "libmali.so.0" ]; then
+          if [ -n "$SONAME" ] && [ "$SONAME" != "libmali.so.0" ]; then
             echo "== Patche SONAME auf libmali.so.0..."
             patchelf --set-soname libmali.so.0 sysroot/libmali.so.0
             echo "Neue SONAME: $(aarch64-linux-gnu-readelf -d sysroot/libmali.so.0 | grep SONAME)"
           fi
 
-      # ── libSDL2 validieren (muss manuell vom M9 Pro kopiert werden) ──
+      # ── libSDL2 validieren (muss manuell vom M9 Pro kommen) ───────────
       - name: Validate libSDL2 (must be copied from M9 Pro)
         run: |
           if [ ! -f sysroot/libSDL2-2.0.so.0 ]; then
             echo "FEHLER: sysroot/libSDL2-2.0.so.0 fehlt."
-            echo "Kopiere die echte libSDL2-2.0.so.0 vom M9 Pro nach sysroot/."
-            echo "Auf dem M9 Pro: cp \$(readlink -f /usr/lib/libSDL2-2.0.so.0) /tmp/"
-            echo "Dann: scp root@<IP>:/tmp/libSDL2-2.0.so.0 sysroot/"
             exit 1
           fi
           if [ -L sysroot/libSDL2-2.0.so.0 ]; then
