@@ -7,8 +7,8 @@
 # Environment:
 #   ANDROID_NDK   the Android NDK r28c (the guest build, the GLES and EGL headers)
 #   SYSROOT_LIB   a folder with libSDL2-2.0.so.0*, libSDL3.so.0* and
-#                 libmali.so.0* (the runtime libraries; the first two are
-#                 also shipped in the artifact, libmali as well)
+#                 libmali.so.0* (the runtime libraries; they are also
+#                 shipped in the artifact under libs.aarch64/)
 #   GUEST_CC      a clang with the arm64_32 target (default: clang-22)
 #   HOST_CC       the aarch64 glibc cross compiler (default: aarch64-linux-gnu-gcc)
 #   WORK          the working folder (default: work/ next to this script)
@@ -87,6 +87,7 @@ fi
 rm -rf "$SRC/port/knulli"
 cp -a "$HERE/port/knulli" "$SRC/port/knulli"
 rm -rf "$SRC/port/knulli/__pycache__"
+chmod +x "$SRC/port/knulli/build.sh" 2>/dev/null || true
 
 stamp=$({ cat "$PATCH"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
@@ -113,7 +114,11 @@ export GUEST_CC HOST_CC JOBS
 cd "$SRC"
 python3 configure.py --release --android-ndk "$ANDROID_NDK" --android-guest-cc "$GUEST_CC"
 ninja -j "$JOBS" build/android/halo_guest.elf
-"$HERE/port/knulli/build.sh"
+
+# port/knulli/build.sh ist eine Shell-Datei, deren x-Bit je nach Checkout
+# fehlen kann. Über "sh" aufrufen, damit die Datei unabhängig von den
+# Dateirechten ausgeführt wird.
+sh "$HERE/port/knulli/build.sh"
 
 # ---------- dist
 echo "== copying the build into $DIST"
@@ -128,8 +133,11 @@ cp "$HERE/port/knulli/halo_screen.py" "$DIST/halo_screen.py"
 cp "$HERE/port/knulli/sdl_mapping.py" "$DIST/sdl_mapping.py"
 
 # ── Laufzeitbibliotheken mit in das Artifact kopieren ───────────────────
-# Sie liegen nach dem Host-Build in build/knulli/libs.aarch64/ und
-# werden unverändert nach dist/libs.aarch64/ übernommen.
+# Sie liegen nach dem Host-Build in build/knulli/libs.aarch64/ und werden
+# unverändert nach dist/libs.aarch64/ übernommen. Halo.sh nimmt diesen
+# Ordner über LD_LIBRARY_PATH auf, sodass das Gerät libSDL3 und libmali
+# findet, auch wenn sie dort nicht (in der passenden Version) installiert
+# sind.
 if [ -d "$SRC/build/knulli/libs.aarch64" ]; then
     mkdir -p "$DIST/libs.aarch64"
     cp -a "$SRC/build/knulli/libs.aarch64/." "$DIST/libs.aarch64/"
@@ -138,7 +146,10 @@ if [ -d "$SRC/build/knulli/libs.aarch64" ]; then
 else
     echo "WARNUNG: $SRC/build/knulli/libs.aarch64 fehlt – Artifact enthält keine Bibliotheken." >&2
 fi
-# ─────────────────────────────────────────────────────────────────────────
+
+# Die Skripte müssen auf dem Gerät ausführbar sein; im ZIP werden die
+# Rechte möglicherweise nicht erhalten. Ein Hinweis für den Benutzer.
+chmod +x "$DIST/Halo.sh" 2>/dev/null || true
 
 echo "== Inhalt von $DIST:"
 ls -laR "$DIST"
