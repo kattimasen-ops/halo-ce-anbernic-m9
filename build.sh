@@ -5,7 +5,7 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 UPSTREAM_URL=${UPSTREAM_URL:-https://github.com/cybersecurity/halo-ce-universal.git}
 UPSTREAM_COMMIT=$(tr -d '[:space:]' < "$HERE/UPSTREAM_COMMIT")
 PATCH=$HERE/patches/halo-ce-universal-knulli.patch
-SDL2_TAG=release-2.30.12
+SDL2_TAG=release-2.0.20
 SDL2_ARCHIVE=https://github.com/libsdl-org/SDL/archive/refs/tags/$SDL2_TAG.tar.gz
 SDL3_TAG=release-3.2.10
 GUEST_CC=${GUEST_CC:-clang-22}
@@ -46,14 +46,6 @@ SRC=$WORK/halo-ce-universal
 SDL2_INCLUDE=$WORK/sdl2-include
 
 # ---------- SDL3 aus dem Quellcode kompilieren (GLIBC 2.31 kompatibel) ──
-# Es gibt kein fertiges SDL3-Paket für Ubuntu 20.04 (Focal). Wir bauen
-# SDL3 daher mit dem aarch64-Cross-Compiler gegen die GLIBC 2.31 des
-# Containers, damit die resultierende libSDL3.so.0 auf dem M9 Pro läuft.
-#
-# WICHTIG: -DSDL_UNIX_CONSOLE_BUILD=ON überspringt den CMake-Check, der
-# X11- oder Wayland-Entwicklungsbibliotheken verlangt. Da der M9 Pro
-# weder X11 noch Wayland nutzt (sondern KMSDRM/EGL), ist diese Option
-# zwingend erforderlich.
 if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
     echo "== SDL3 $SDL3_TAG: kompiliere aus dem Quellcode"
     SDL3_SRC=$WORK/SDL3-${SDL3_TAG#release-}
@@ -68,13 +60,6 @@ if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
     rm -rf "$SDL3_BUILD" "$SDL3_INSTALL"
     mkdir -p "$SDL3_BUILD" "$SDL3_INSTALL"
 
-    # Cross-Compile-Setup OHNE CMAKE_SYSROOT. Der Cross-Compiler
-    # aarch64-linux-gnu-gcc kennt seine eigenen Standard-Suchpfade
-    # (/usr/aarch64-linux-gnu/include und /usr/aarch64-linux-gnu/lib).
-    #
-    # -DSDL_UNIX_CONSOLE_BUILD=ON: überspringt den X11/Wayland-Check.
-    # -DSDL_X11=OFF, -DSDL_WAYLAND=OFF: deaktiviert die nicht benötigten
-    #   Video-Backends explizit.
     cmake -S "$SDL3_SRC" -B "$SDL3_BUILD" \
         -DCMAKE_SYSTEM_NAME=Linux \
         -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
@@ -112,6 +97,55 @@ if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
     aarch64-linux-gnu-readelf -V "$SYSROOT_LIB/libSDL3.so.0" | grep GLIBC | sort -u || true
 else
     echo "== libSDL3.so.0 bereits in SYSROOT_LIB – überspringe SDL3-Kompilierung"
+fi
+
+# ---------- SDL2 aus dem Quellcode kompilieren (GLIBC 2.31 kompatibel) ──
+if [ ! -f "$SYSROOT_LIB/libSDL2-2.0.so.0" ]; then
+    echo "== SDL2 $SDL2_TAG: kompiliere aus dem Quellcode"
+    SDL2_SRC=$WORK/SDL2-${SDL2_TAG#release-}
+    SDL2_BUILD=$WORK/sdl2-build
+    SDL2_INSTALL=$WORK/sdl2-install
+
+    if [ ! -d "$SDL2_SRC" ]; then
+        curl -L -o "$WORK/sdl2.tar.gz" "$SDL2_ARCHIVE"
+        tar -xzf "$WORK/sdl2.tar.gz" -C "$WORK"
+    fi
+    rm -rf "$SDL2_BUILD" "$SDL2_INSTALL"
+    mkdir -p "$SDL2_BUILD" "$SDL2_INSTALL"
+
+    cmake -S "$SDL2_SRC" -B "$SDL2_BUILD" \
+        -DCMAKE_SYSTEM_NAME=Linux \
+        -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+        -DCMAKE_C_COMPILER="$HOST_CC" \
+        -DCMAKE_FIND_ROOT_PATH=/usr/aarch64-linux-gnu \
+        -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
+        -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+        -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DSDL_SHARED=ON \
+        -DSDL_STATIC=OFF \
+        -DSDL_TESTS=OFF \
+        -DSDL_X11=OFF \
+        -DSDL_WAYLAND=OFF \
+        -DSDL_KMSDRM=ON \
+        -DSDL_OPENGLES=ON \
+        -DSDL_OPENGL=OFF \
+        -DCMAKE_INSTALL_PREFIX="$SDL2_INSTALL"
+    cmake --build "$SDL2_BUILD" -j "$JOBS"
+    cmake --install "$SDL2_BUILD"
+
+    SDL2_LIB=$(find "$SDL2_INSTALL" -name "libSDL2-2.0.so.0*" -type f | head -n 1)
+    if [ -z "$SDL2_LIB" ]; then
+        echo "FEHLER: libSDL2-2.0.so.0 wurde nach dem Build nicht gefunden."
+        find "$SDL2_INSTALL" -name "*SDL2*" || true
+        exit 1
+    fi
+    cp -L "$SDL2_LIB" "$SYSROOT_LIB/libSDL2-2.0.so.0"
+    echo "== SDL2 kompiliert: $(stat -c%s "$SYSROOT_LIB/libSDL2-2.0.so.0") Bytes"
+    echo "== GLIBC-Versionen in libSDL2:"
+    aarch64-linux-gnu-readelf -V "$SYSROOT_LIB/libSDL2-2.0.so.0" | grep GLIBC | sort -u || true
+else
+    echo "== libSDL2-2.0.so.0 bereits in SYSROOT_LIB – überspringe SDL2-Kompilierung"
 fi
 
 # ---------- upstream at the pinned commit
@@ -153,33 +187,6 @@ if [ -f "$SRC/.port-stamp" ] && [ "$(cat "$SRC/.port-stamp")" = "$stamp" ]; then
     rm -rf "$SRC/build/knulli"
 fi
 echo "$stamp" > "$SRC/.port-stamp"
-
-# ---------- SDL2 headers
-if [ ! -f "$SDL2_INCLUDE/SDL2/SDL.h" ]; then
-    echo "== downloading SDL2 $SDL2_TAG headers"
-    rm -rf "$SDL2_INCLUDE"
-    mkdir -p "$SDL2_INCLUDE"
-    curl -L -o "$WORK/sdl2.tar.gz" "$SDL2_ARCHIVE"
-    tar -xzf "$WORK/sdl2.tar.gz" -C "$SDL2_INCLUDE"
-
-    if [ -d "$SDL2_INCLUDE/SDL-$SDL2_TAG/include" ]; then
-        mv "$SDL2_INCLUDE/SDL-$SDL2_TAG/include" "$SDL2_INCLUDE/SDL2"
-    fi
-    rm -rf "$SDL2_INCLUDE/SDL-$SDL2_TAG"
-
-    if [ ! -f "$SDL2_INCLUDE/SDL2/SDL.h" ]; then
-        real=$(find "$SDL2_INCLUDE" -name SDL.h -type f 2>/dev/null | head -n 1)
-        if [ -n "$real" ]; then
-            ln -sfn "$(dirname "$real")" "$SDL2_INCLUDE/SDL2"
-        fi
-    fi
-
-    if [ ! -f "$SDL2_INCLUDE/SDL2/SDL.h" ]; then
-        echo "FEHLER: SDL2/SDL.h konnte nach dem Entpacken nicht gefunden werden."
-        die "SDL2-Header-Setup fehlgeschlagen"
-    fi
-    echo "== SDL2-Header bereit: $SDL2_INCLUDE/SDL2/SDL.h"
-fi
 
 # ---------- guest and host
 export ANDROID_NDK SYSROOT_LIB
