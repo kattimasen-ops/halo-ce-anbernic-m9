@@ -1,249 +1,223 @@
-#!/bin/bash
-# Halo: Combat Evolved – angepasst für M9 Pro (RK3326, ArkOS 4)
-#
-# Liegt in /roms/ports, Spiel in halo-ce daneben.
-# Log: halo-ce/log.txt, Einstellungen: halo-ce/config.toml.
-#
-# SDL-Controller-Mapping für "GO-Super Gamepad" ist fest eingebaut
-# (aus der Input-Diagnose vom 02.10.2026).
-# Diagnose wiederholen: save/.diag-done löschen.
+#!/usr/bin/env bash
+set -euo pipefail
 
-log() {
-    if [ -n "$LOG_OPEN" ]; then
-        printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
-    else
-        printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2
-    fi
-}
-log_raw() { if [ -n "$LOG_OPEN" ]; then cat; else cat >&2; fi; }
-log_section() {
-    log ""
-    log "========================================================="
-    log "== $*"
-    log "========================================================="
-}
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+UPSTREAM_URL=${UPSTREAM_URL:-https://github.com/cybersecurity/halo-ce-universal.git}
+UPSTREAM_COMMIT=$(tr -d '[:space:]' < "$HERE/UPSTREAM_COMMIT")
+PATCH=$HERE/patches/halo-ce-universal-knulli.patch
+SDL3_TAG=release-3.2.10
+SDL2_TAG=release-2.0.20
+SDL2_ARCHIVE=https://github.com/libsdl-org/SDL/archive/refs/tags/$SDL2_TAG.tar.gz
+GUEST_CC=${GUEST_CC:-clang-22}
+HOST_CC=${HOST_CC:-aarch64-linux-gnu-gcc}
+JOBS=${JOBS:-$(nproc)}
 
-LOG_OPEN=""
-echo "Halo.sh gestartet: $(date), USER=$(id -un), PID=$$" > /tmp/halo-start.log 2>&1 || true
+die() { echo "build.sh: $*" >&2; exit 1; }
+need() { command -v "$1" > /dev/null 2>&1 || die "$1 not found: $2"; }
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
-[ -n "$SCRIPT_DIR" ] || { echo "FEHLER: Skript-Verzeichnis nicht ermittelbar" >> /tmp/halo-start.log; exit 1; }
-GAMEDIR="$SCRIPT_DIR/halo-ce"
-[ -d "$GAMEDIR" ] || { echo "FEHLER: $GAMEDIR fehlt" >> /tmp/halo-start.log; exit 1; }
+need git "install git"
+need python3 "install python3"
+need ninja "install ninja-build"
+need curl "install curl"
+need tar "install tar"
+need cmake "install cmake"
+need "$HOST_CC" "install gcc-aarch64-linux-gnu, or set HOST_CC"
+need "$GUEST_CC" "install clang-22 from apt.llvm.org, or set GUEST_CC"
+"$GUEST_CC" -print-targets 2> /dev/null | grep -q aarch64_32 ||
+    die "$GUEST_CC has no arm64_32 (aarch64_32) target; use clang 22 from apt.llvm.org"
+[ -n "${ANDROID_NDK:-}" ] || die "set ANDROID_NDK to the Android NDK r28c folder"
+[ -d "$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64" ] || die "ANDROID_NDK=$ANDROID_NDK is not an Android NDK"
+ANDROID_NDK=$(cd "$ANDROID_NDK" && pwd)
+[ -n "${SYSROOT_LIB:-}" ] || die "set SYSROOT_LIB to the folder with the runtime libraries"
+[ -d "$SYSROOT_LIB" ] || die "SYSROOT_LIB=$SYSROOT_LIB is not a folder"
+SYSROOT_LIB=$(cd "$SYSROOT_LIB" && pwd)
 
-LOG="$GAMEDIR/log.txt"
-if ! touch "$LOG" 2>/dev/null; then
-    LOG="/tmp/halo-log.txt"
-    touch "$LOG" 2>/dev/null || LOG="/dev/null"
-fi
-
-exec >> "$LOG" 2>&1
-LOG_OPEN=1
-
-log_section "START"
-log "SCRIPT_DIR=$SCRIPT_DIR"
-log "GAMEDIR=$GAMEDIR"
-log "USER=$(id -un), UID=$(id -u)"
-log "Kernel: $(uname -r), Arch: $(uname -m)"
-log "Datum: $(date)"
-
-cd "$GAMEDIR" || { log "FEHLER: cd fehlgeschlagen"; exit 1; }
-
-exec 9> /tmp/halo-lock 2>/dev/null || log "WARNUNG: /tmp/halo-lock nicht beschreibbar."
-if [ -e /proc/self/fd/9 ]; then
-    if ! { flock -n 9 || python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)' 2>/dev/null; } 2>/dev/null; then
-        log "Halo läuft bereits; Start abgelehnt"
-        exit 1
-    fi
-fi
-
-trap 'log "Signal empfangen: exit 143"; exit 143' TERM INT HUP
-
-stop() {
-    log "stop() aufgerufen"
-    stopping=1
-    [ -n "$child" ] || return 0
-    kill -TERM "$child" 2>/dev/null
-    [ -n "$watchdog" ] || { (exec 9>&-; sleep 10; kill -KILL "$child" 2>/dev/null) & watchdog=$!; }
-}
-supervised() {
-    local status child="" watchdog="" stopping=""
-    trap stop TERM INT HUP
-    log "supervised: starte $*"
-    "$@" &
-    child=$!
-    [ -z "$stopping" ] || stop
-    while :; do
-        wait "$child"
-        status=$?
-        kill -0 "$child" 2>/dev/null || break
-    done
-    trap 'exit 143' TERM INT HUP
-    [ -z "$watchdog" ] || kill "$watchdog" 2>/dev/null
-    if [ -n "$stopping" ]; then log "gestoppt (exit $status)"; exit 143; fi
-    log "supervised: $* beendet mit status $status"
-    return "$status"
-}
-
-log_section "SYSTEMOPTIMIERUNGEN"
-
-cpu_governor_path=""
-for candidate in \
-    /sys/devices/system/cpu/cpufreq/policy0/scaling_governor \
-    /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor; do
-    [ -w "$candidate" ] && { cpu_governor_path="$candidate"; break; }
-done
-cpu_saved=""
-if [ -n "$cpu_governor_path" ]; then
-    cpu_saved=$(cat "$cpu_governor_path" 2>/dev/null)
-    log "CPU-Governor: $cpu_governor_path $cpu_saved -> performance"
-    echo performance > "$cpu_governor_path" 2>/dev/null
-fi
-for cpu in /sys/devices/system/cpu/cpu[0-9]*; do
-    [ -w "$cpu/cpufreq/scaling_governor" ] && echo performance > "$cpu/cpufreq/scaling_governor" 2>/dev/null
+# libdecor und libmali müssen vor dem Build vorhanden sein.
+# libSDL2 und libSDL3 werden weiter unten aus dem Quellcode kompiliert.
+for library in libdecor-0.so.0 libmali.so.0; do
+    compgen -G "$SYSROOT_LIB/$library*" > /dev/null ||
+        die "no $library* in SYSROOT_LIB=$SYSROOT_LIB"
 done
 
-gpu_devfreq_path=""
-for candidate in /sys/class/devfreq/ff400000.gpu /sys/class/devfreq/gpu; do
-    [ -d "$candidate" ] && { gpu_devfreq_path="$candidate"; break; }
-done
-gpu_governor_saved=""
-gpu_min_saved=""
-if [ -n "$gpu_devfreq_path" ]; then
-    [ -r "$gpu_devfreq_path/governor" ] && gpu_governor_saved=$(cat "$gpu_devfreq_path/governor" 2>/dev/null)
-    log "GPU-Governor: $gpu_devfreq_path $gpu_governor_saved -> performance"
-    [ -w "$gpu_devfreq_path/governor" ] && echo performance > "$gpu_devfreq_path/governor" 2>/dev/null
-    if [ -r "$gpu_devfreq_path/available_frequencies" ] && [ -w "$gpu_devfreq_path/min_freq" ]; then
-        gpu_min_saved=$(cat "$gpu_devfreq_path/min_freq" 2>/dev/null)
-        max_freq=$(tr ' ' '\n' < "$gpu_devfreq_path/available_frequencies" | sort -n | tail -n 1)
-        [ -n "$max_freq" ] && echo "$max_freq" > "$gpu_devfreq_path/min_freq" 2>/dev/null
-    fi
-fi
+WORK=${WORK:-$HERE/work}
+DIST=${DIST:-$HERE/dist}
+mkdir -p "$WORK" "$DIST"
+WORK=$(cd "$WORK" && pwd)
+DIST=$(cd "$DIST" && pwd)
+SRC=$WORK/halo-ce-universal
 
-if swapon --show 2>/dev/null | grep -q zram; then
-    log "ZRAM bereits aktiv."
+# ---------- SDL3 aus dem Quellcode kompilieren (GLIBC 2.31 kompatibel) ──
+if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
+    echo "== SDL3 $SDL3_TAG: kompiliere aus dem Quellcode"
+    SDL3_SRC=$WORK/SDL3-${SDL3_TAG#release-}
+    SDL3_BUILD=$WORK/sdl3-build
+    SDL3_INSTALL=$WORK/sdl3-install
+
+    if [ ! -d "$SDL3_SRC" ]; then
+        curl -L -o "$WORK/sdl3.tar.gz" \
+            "https://github.com/libsdl-org/SDL/releases/download/$SDL3_TAG/SDL3-${SDL3_TAG#release-}.tar.gz"
+        tar -xzf "$WORK/sdl3.tar.gz" -C "$WORK"
+    fi
+    rm -rf "$SDL3_BUILD" "$SDL3_INSTALL"
+    mkdir -p "$SDL3_BUILD" "$SDL3_INSTALL"
+
+    cmake -S "$SDL3_SRC" -B "$SDL3_BUILD" \
+        -DCMAKE_SYSTEM_NAME=Linux \
+        -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+        -DCMAKE_C_COMPILER="$HOST_CC" \
+        -DCMAKE_FIND_ROOT_PATH=/usr/aarch64-linux-gnu \
+        -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
+        -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+        -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DSDL_SHARED=ON \
+        -DSDL_STATIC=OFF \
+        -DSDL_TESTS=OFF \
+        -DSDL_EXAMPLES=OFF \
+        -DSDL_INSTALL_TESTS=OFF \
+        -DSDL_WERROR=OFF \
+        -DSDL_UNIX_CONSOLE_BUILD=ON \
+        -DSDL_X11=OFF \
+        -DSDL_WAYLAND=OFF \
+        -DSDL_KMSDRM=ON \
+        -DSDL_OPENGLES=ON \
+        -DSDL_OPENGL=OFF \
+        -DCMAKE_INSTALL_PREFIX="$SDL3_INSTALL"
+    cmake --build "$SDL3_BUILD" -j "$JOBS"
+    cmake --install "$SDL3_BUILD"
+
+    SDL3_LIB=$(find "$SDL3_INSTALL" -name "libSDL3.so.0*" -type f | head -n 1)
+    [ -n "$SDL3_LIB" ] || die "libSDL3.so.0 wurde nicht gefunden"
+    cp -L "$SDL3_LIB" "$SYSROOT_LIB/libSDL3.so.0"
+    echo "== SDL3 kompiliert: $(stat -c%s "$SYSROOT_LIB/libSDL3.so.0") Bytes"
+    echo "== GLIBC-Versionen in libSDL3:"
+    aarch64-linux-gnu-readelf -V "$SYSROOT_LIB/libSDL3.so.0" | grep GLIBC | sort -u || true
 else
-    modprobe zram 2>/dev/null
-    if [ -e /dev/zram0 ]; then
-        echo 512M > /sys/block/zram0/disksize 2>/dev/null
-        mkswap /dev/zram0 >/dev/null 2>&1
-        swapon /dev/zram0 2>/dev/null
-        log "ZRAM aktiviert."
-    fi
+    echo "== libSDL3.so.0 bereits vorhanden – überspringe SDL3"
 fi
 
-saved=/tmp/halo-clocks
-printf '%s|%s|%s\n' "$cpu_saved" "$gpu_governor_saved" "$gpu_min_saved" > "$saved" 2>/dev/null || true
+# ---------- SDL2 aus dem Quellcode kompilieren (GLIBC 2.31 kompatibel) ──
+if [ ! -f "$SYSROOT_LIB/libSDL2-2.0.so.0" ]; then
+    echo "== SDL2 $SDL2_TAG: kompiliere aus dem Quellcode"
+    SDL2_SRC=$WORK/SDL2-src
+    SDL2_BUILD=$WORK/sdl2-build
+    SDL2_INSTALL=$WORK/sdl2-install
 
-restore() {
-    log_section "RESTORE"
-    if [ -f "$saved" ]; then
-        IFS='|' read -r cpu_gov gpu_gov gpu_min < "$saved"
-        [ -n "$cpu_gov" ] && [ -n "$cpu_governor_path" ] && [ -w "$cpu_governor_path" ] && echo "$cpu_gov" > "$cpu_governor_path" 2>/dev/null
-        if [ -n "$gpu_devfreq_path" ]; then
-            [ -n "$gpu_gov" ] && [ -w "$gpu_devfreq_path/governor" ] && echo "$gpu_gov" > "$gpu_devfreq_path/governor" 2>/dev/null
-            [ -n "$gpu_min" ] && [ -w "$gpu_devfreq_path/min_freq" ] && echo "$gpu_min" > "$gpu_devfreq_path/min_freq" 2>/dev/null
-        fi
-        rm -f "$saved"
-    fi
-    rm -f /var/run/battery-saver/halo.pause 2>/dev/null
-    log "Restore abgeschlossen."
+    rm -rf "$SDL2_SRC" "$SDL2_BUILD" "$SDL2_INSTALL"
+    mkdir -p "$SDL2_SRC" "$SDL2_BUILD" "$SDL2_INSTALL"
+
+    curl -L -o "$WORK/sdl2.tar.gz" "$SDL2_ARCHIVE"
+    tar -xzf "$WORK/sdl2.tar.gz" -C "$SDL2_SRC" --strip-components=1
+
+    cmake -S "$SDL2_SRC" -B "$SDL2_BUILD" \
+        -DCMAKE_SYSTEM_NAME=Linux \
+        -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+        -DCMAKE_C_COMPILER="$HOST_CC" \
+        -DCMAKE_FIND_ROOT_PATH=/usr/aarch64-linux-gnu \
+        -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
+        -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+        -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DSDL_SHARED=ON \
+        -DSDL_STATIC=OFF \
+        -DSDL_TESTS=OFF \
+        -DSDL_X11=OFF \
+        -DSDL_WAYLAND=OFF \
+        -DSDL_KMSDRM=ON \
+        -DSDL_OPENGLES=ON \
+        -DSDL_OPENGL=OFF \
+        -DCMAKE_INSTALL_PREFIX="$SDL2_INSTALL"
+    cmake --build "$SDL2_BUILD" -j "$JOBS"
+    cmake --install "$SDL2_BUILD"
+
+    SDL2_LIB=$(find "$SDL2_INSTALL" -name "libSDL2-2.0.so.0*" -type f | head -n 1)
+    [ -n "$SDL2_LIB" ] || die "libSDL2-2.0.so.0 wurde nicht gefunden"
+    cp -L "$SDL2_LIB" "$SYSROOT_LIB/libSDL2-2.0.so.0"
+    echo "== SDL2 kompiliert: $(stat -c%s "$SYSROOT_LIB/libSDL2-2.0.so.0") Bytes"
+    echo "== GLIBC-Versionen in libSDL2:"
+    aarch64-linux-gnu-readelf -V "$SYSROOT_LIB/libSDL2-2.0.so.0" | grep GLIBC | sort -u || true
+else
+    echo "== libSDL2-2.0.so.0 bereits vorhanden – überspringe SDL2"
+fi
+
+# WICHTIG: Die SDL2-Header liegen im Installations-Ordner des selbst
+# kompilierten SDL2 ($SDL2_INSTALL/include/SDL2/SDL.h).
+export SDL2_INCLUDE="$SDL2_INSTALL/include"
+echo "== SDL2_INCLUDE=$SDL2_INCLUDE"
+
+# ---------- upstream at the pinned commit
+if [ ! -d "$SRC/.git" ]; then
+    echo "== cloning $UPSTREAM_URL into $SRC"
+    git init -q "$SRC"
+    git -C "$SRC" remote add origin "$UPSTREAM_URL"
+fi
+if ! git -C "$SRC" cat-file -e "$UPSTREAM_COMMIT^{commit}" 2> /dev/null; then
+    echo "== fetching $UPSTREAM_COMMIT"
+    git -C "$SRC" fetch -q --depth 1 origin "$UPSTREAM_COMMIT" ||
+        git -C "$SRC" fetch -q origin
+    git -C "$SRC" cat-file -e "$UPSTREAM_COMMIT^{commit}" 2> /dev/null ||
+        die "commit $UPSTREAM_COMMIT is not in $UPSTREAM_URL"
+fi
+
+tree_is_patched() {
+    [ "$(git -C "$SRC" rev-parse HEAD 2> /dev/null || true)" = "$UPSTREAM_COMMIT" ] &&
+        cmp -s <(git -C "$SRC" diff HEAD | grep -v '^index ') <(grep -v '^index ' "$PATCH")
 }
-trap restore EXIT
+if ! tree_is_patched; then
+    echo "== checking out $UPSTREAM_COMMIT and applying $(basename "$PATCH")"
+    git -C "$SRC" checkout -q --force --detach "$UPSTREAM_COMMIT"
+    git -C "$SRC" reset -q --hard
+    git -C "$SRC" clean -q -fd
+    git -C "$SRC" apply "$PATCH"
+    git -C "$SRC" apply --summary "$PATCH" | awk '$1 == "create" { print $4 }' | xargs -r git -C "$SRC" add -N --
+fi
 
-mkdir -p /var/run/battery-saver 2>/dev/null && touch /var/run/battery-saver/halo.pause 2>/dev/null
-log "Battery-Saver-Pause gesetzt."
+rm -rf "$SRC/port/knulli"
+cp -a "$HERE/port/knulli" "$SRC/port/knulli"
+rm -rf "$SRC/port/knulli/__pycache__"
+chmod +x "$SRC/port/knulli/build.sh" 2>/dev/null || true
 
-log_section "SAVE DIRECTORIES"
-mkdir -p save save/z save/saved save/saved/player_profiles save/saved/player_profiles/default_profile \
-         save/saved/playlists save/saved/playlists/default_playlist \
-         save/saved/recordings save/saved/recordings/last_recording 2>/dev/null
-if touch save/saved/.write_test 2>/dev/null; then
-    log "save/saved/ ist beschreibbar."
-    rm -f save/saved/.write_test
+stamp=$({ cat "$PATCH"
+    (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
+} | sha256sum | cut -d' ' -f1)
+if [ -f "$SRC/.port-stamp" ] && [ "$(cat "$SRC/.port-stamp")" = "$stamp" ]; then
+    rm -rf "$SRC/build/knulli"
+fi
+echo "$stamp" > "$SRC/.port-stamp"
+
+# ---------- guest and host
+export ANDROID_NDK SYSROOT_LIB
+export SDL2_INCLUDE
+export GUEST_CC HOST_CC JOBS
+
+cd "$SRC"
+python3 configure.py --release --android-ndk "$ANDROID_NDK" --android-guest-cc "$GUEST_CC"
+ninja -j "$JOBS" build/android/halo_guest.elf
+
+sh "$SRC/port/knulli/build.sh"
+
+# ---------- dist
+echo "== copying the build into $DIST"
+rm -rf "$DIST"
+mkdir -p "$DIST"
+
+cp "$SRC/build/knulli/halo" "$DIST/halo"
+cp "$SRC/build/knulli/halo_guest.elf" "$DIST/halo_guest.elf"
+cp "$SRC/port/knulli/Halo.sh" "$DIST/Halo.sh"
+cp "$SRC/port/knulli/halo_extract.py" "$DIST/halo_extract.py"
+cp "$SRC/port/knulli/halo_screen.py" "$DIST/halo_screen.py"
+cp "$SRC/port/knulli/sdl_mapping.py" "$DIST/sdl_mapping.py"
+
+if [ -d "$SRC/build/knulli/libs.aarch64" ]; then
+    mkdir -p "$DIST/libs.aarch64"
+    cp -a "$SRC/build/knulli/libs.aarch64/." "$DIST/libs.aarch64/"
+    echo "== Laufzeitbibliotheken in dist/libs.aarch64/:"
+    ls -la "$DIST/libs.aarch64/"
 else
-    log "WARNUNG: save/saved/ ist NICHT beschreibbar!"
+    echo "WARNUNG: $SRC/build/knulli/libs.aarch64 fehlt" >&2
 fi
 
-log_section "RUNTIME-BIBLIOTHEKEN"
-LIBS_DIR="$GAMEDIR/libs.aarch64"
-if [ -d "$LIBS_DIR" ]; then
-    export LD_LIBRARY_PATH="$LIBS_DIR:$GAMEDIR:$LD_LIBRARY_PATH"
-    log "LIBS_DIR=$LIBS_DIR"
-else
-    export LD_LIBRARY_PATH="$GAMEDIR:$LD_LIBRARY_PATH"
-fi
-log "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+chmod +x "$DIST/Halo.sh" 2>/dev/null || true
 
-if command -v ldd >/dev/null 2>&1; then
-    log "ldd-Prüfung (nur 'not found'):"
-    ldd ./halo 2>/dev/null | grep 'not found' | log_raw || log "   (alle Bibliotheken gefunden)"
-fi
-
-log_section "MAPS"
-if [ ! -s maps/ui.map ]; then
-    shopt -s nullglob
-    images=({.,..}/*.{iso,ISO,xiso,XISO})
-    shopt -u nullglob
-    [ "${#images[@]}" -gt 0 ] || { log "FEHLER: Keine maps/ und kein ISO"; exit 1; }
-    log "Kopiere maps/ aus ${images[0]}..."
-    ( sleep 600; kill -KILL $$ ) &
-    supervised python3 halo_extract.py --screen "${images[0]}" "$GAMEDIR"
-    extract_status=$?
-    kill %1 2>/dev/null
-    [ "$extract_status" -eq 0 ] || { log "FEHLER: halo_extract status $extract_status"; exit 1; }
-else
-    log "maps/ ist vorhanden."
-fi
-
-log_section "CONFIG"
-if [ ! -f config.toml ]; then
-    log "Erstelle config.toml..."
-    cat > config.toml <<'EOF'
-[display]
-screen_width = 640
-render_scale = 0.75
-interpolation = true
-fast_shaders = true
-fast_textures = true
-high_res_hud = true
-model_detail = 0.7
-frame_pacing = true
-[update]
-auto = false
-[network]
-online = false
-[debug]
-sort_models = false
-stable_streams = false
-batch_quads = true
-alpha_test_elision = true
-EOF
-    log "config.toml erstellt."
-else
-    log "config.toml existiert bereits."
-fi
-
-log_section "CONTROLLER-MAPPING"
-# Fest eingebaut, basiert auf der Input-Diagnose vom 02.10.2026:
-#   A=BTN_SOUTH(304), B=BTN_EAST(305), X=BTN_NORTH(307), Y=BTN_WEST(308)
-#   L1=BTN_TL(310), R1=BTN_TR(311), L2=BTN_TL2(312), R2=BTN_TR2(313)
-#   D-Pad=BTN_DPAD_UP/DOWN/LEFT/RIGHT(544-547)
-#   Linker Stick=ABS_X(0)/ABS_Y(1), rechter Stick=ABS_RX(3)/ABS_RY(4)
-export SDL_GAMECONTROLLERCONFIG="19004b48001100010000000000000000,GO-Super Gamepad,a:b0,b:b1,x:b2,y:b3,leftshoulder:b4,rightshoulder:b5,lefttrigger:b6,righttrigger:b7,dpup:b8,dpdown:b9,dpleft:b10,dpright:b11,leftx:a0,lefty:a1,rightx:a3,righty:a4,platform:Linux,"
-log "SDL_GAMECONTROLLERCONFIG gesetzt: ${#SDL_GAMECONTROLLERCONFIG} Zeichen"
-
-log_section "SPIELSTART"
-log "Starte ./halo ..."
-if [ ! -x ./halo ]; then
-    log "FEHLER: ./halo fehlt oder nicht ausführbar."
-    ls -la ./halo 2>/dev/null | log_raw
-    exit 1
-fi
-
-supervised ./halo
-status=$?
-log "halo beendet mit status $status"
-
-log_section "ENDE"
-exit $status
+echo "== Inhalt von $DIST:"
+ls -laR "$DIST"
