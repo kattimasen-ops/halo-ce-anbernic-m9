@@ -30,12 +30,14 @@ jobs:
             build-essential cmake \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
             libc6-dev-arm64-cross linux-libc-dev-arm64-cross \
+            libasound2-dev-arm64-cross \
+            libasound2-arm64-cross \
             lsb-release apt-utils dpkg-dev file patchelf
 
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install clang-22
+      - name: Install clang-22 (for the arm64_32 guest build)
         run: |
           wget -q https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
@@ -135,6 +137,12 @@ jobs:
             fi
           done
           echo "Hinweis: libSDL2 und libSDL3 werden von build.sh aus dem Quellcode kompiliert."
+
+      - name: Verify ALSA cross-compile packages
+        run: |
+          echo "== Prüfe ALSA Cross-Pakete:"
+          ls -la /usr/aarch64-linux-gnu/lib/libasound.so* 2>/dev/null || echo "libasound nicht gefunden!"
+          ls -la /usr/aarch64-linux-gnu/include/alsa/asoundlib.h 2>/dev/null || echo "alsa/asoundlib.h nicht gefunden!"
 
       - name: Build
         run: |
