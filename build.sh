@@ -103,18 +103,21 @@ else
 fi
 
 # ---------- SDL2 aus dem Quellcode kompilieren (GLIBC 2.31 kompatibel) ──
+# Der GitHub-Archive-Tarball von SDL2 entpackt sich in ein Verzeichnis mit
+# einem versionsabhängigen Namen (z. B. "SDL-release-2.0.20"). Statt diesen
+# Namen zu erraten, entpacken wir mit --strip-components=1 in ein festes
+# Zielverzeichnis. Damit ist der Build unabhängig vom Tarball-Layout.
 if [ ! -f "$SYSROOT_LIB/libSDL2-2.0.so.0" ]; then
     echo "== SDL2 $SDL2_TAG: kompiliere aus dem Quellcode"
-    SDL2_SRC=$WORK/SDL2-${SDL2_TAG#release-}
+    SDL2_SRC=$WORK/SDL2-src
     SDL2_BUILD=$WORK/sdl2-build
     SDL2_INSTALL=$WORK/sdl2-install
 
-    if [ ! -d "$SDL2_SRC" ]; then
-        curl -L -o "$WORK/sdl2.tar.gz" "$SDL2_ARCHIVE"
-        tar -xzf "$WORK/sdl2.tar.gz" -C "$WORK"
-    fi
-    rm -rf "$SDL2_BUILD" "$SDL2_INSTALL"
-    mkdir -p "$SDL2_BUILD" "$SDL2_INSTALL"
+    rm -rf "$SDL2_SRC" "$SDL2_BUILD" "$SDL2_INSTALL"
+    mkdir -p "$SDL2_SRC" "$SDL2_BUILD" "$SDL2_INSTALL"
+
+    curl -L -o "$WORK/sdl2.tar.gz" "$SDL2_ARCHIVE"
+    tar -xzf "$WORK/sdl2.tar.gz" -C "$SDL2_SRC" --strip-components=1
 
     cmake -S "$SDL2_SRC" -B "$SDL2_BUILD" \
         -DCMAKE_SYSTEM_NAME=Linux \
