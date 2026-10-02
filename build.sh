@@ -5,7 +5,6 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 UPSTREAM_URL=${UPSTREAM_URL:-https://github.com/cybersecurity/halo-ce-universal.git}
 UPSTREAM_COMMIT=$(tr -d '[:space:]' < "$HERE/UPSTREAM_COMMIT")
 PATCH=$HERE/patches/halo-ce-universal-knulli.patch
-PATCH_EX=$HERE/patches/xbox-files-ex-completion.patch
 SDL3_TAG=release-3.2.10
 SDL2_TAG=release-2.30.10
 SDL2_ARCHIVE=https://github.com/libsdl-org/SDL/archive/refs/tags/$SDL2_TAG.tar.gz
@@ -154,21 +153,58 @@ tree_is_patched() {
         cmp -s <(git -C "$SRC" diff HEAD | grep -v '^index ') <(grep -v '^index ' "$PATCH")
 }
 if ! tree_is_patched; then
-    echo "== checking out $UPSTREAM_COMMIT and applying patches"
+    echo "== checking out $UPSTREAM_COMMIT and applying $(basename "$PATCH")"
     git -C "$SRC" checkout -q --force --detach "$UPSTREAM_COMMIT"
     git -C "$SRC" reset -q --hard
     git -C "$SRC" clean -q -fd
     git -C "$SRC" apply "$PATCH"
-    git -C "$SRC" apply --recount "$PATCH_EX"
     git -C "$SRC" apply --summary "$PATCH" | awk '$1 == "create" { print $4 }' | xargs -r git -C "$SRC" add -N --
 fi
+
+# --- Fix: ReadFileEx/WriteFileEx signalisieren das OVERLAPPED-Event nicht.
+# Die Engine wartet nach dem asynchronen Profil-Schreiben auf das Event
+# (WaitForSingleObject ohne alertable), die APCs laufen daher nie, und nach
+# 6 s Timeout meldet die Engine "checksum failed on persistent storage".
+# SetEvent direkt vor platform_queue_apc in beiden Funktionen einfügen.
+python3 - "$SRC/port/linux/src/xbox_files.c" <<'PYEOF'
+import re
+import sys
+
+path = sys.argv[1]
+with open(path) as f:
+    text = f.read()
+
+needle = re.compile(
+    r'^([ \t]+)(platform_queue_apc\(file_completion_apc, \(void \*\)completion_routine, overlapped, NULL\);)$',
+    re.MULTILINE
+)
+
+def repl(match):
+    indent, line = match.group(1), match.group(2)
+    return (
+        f'{indent}if (overlapped->hEvent)\n'
+        f'{indent}\tSetEvent(overlapped->hEvent);\n'
+        f'{indent}{line}'
+    )
+
+new_text, count = needle.subn(repl, text)
+
+if count != 2:
+    print(f"FEHLER: erwartete 2 Einfügepunkte, fand {count}", file=sys.stderr)
+    sys.exit(1)
+
+with open(path, 'w') as f:
+    f.write(new_text)
+
+print(f"xbox_files.c gepatcht: SetEvent in {count} Stellen eingefügt")
+PYEOF
 
 rm -rf "$SRC/port/knulli"
 cp -a "$HERE/port/knulli" "$SRC/port/knulli"
 rm -rf "$SRC/port/knulli/__pycache__"
 chmod +x "$SRC/port/knulli/build.sh" 2>/dev/null || true
 
-stamp=$({ cat "$PATCH" "$PATCH_EX"
+stamp=$({ cat "$PATCH"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 if [ -f "$SRC/.port-stamp" ] && [ "$(cat "$SRC/.port-stamp")" = "$stamp" ]; then
