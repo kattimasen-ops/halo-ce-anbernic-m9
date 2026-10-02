@@ -9,7 +9,6 @@ jobs:
   build:
     runs-on: ubuntu-22.04
 
-    # Ubuntu 20.04 Container liefert glibc 2.31 (identisch mit ArkOS 4)
     container:
       image: ubuntu:20.04
       options: --user root
@@ -28,7 +27,7 @@ jobs:
             gcc-aarch64-linux-gnu \
             libc6-dev-arm64-cross \
             linux-libc-dev-arm64-cross \
-            lsb-release apt-utils dpkg-dev
+            lsb-release apt-utils dpkg-dev file patchelf
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -47,37 +46,70 @@ jobs:
           unzip -q android-ndk-r28c-linux.zip
           echo "ANDROID_NDK=$PWD/android-ndk-r28c" >> $GITHUB_ENV
 
-      # ── NEU: libmali automatisch herunterladen und extrahieren ──────────
+      # ── libmali automatisch herunterladen und entpacken ───────────────
       - name: Download and extract libmali (Mali-G31 Bifrost for RK3326)
         run: |
           mkdir -p sysroot
-          # Falls libmali.so.0 bereits im Repo liegt (echte Datei), überspringen
-          if [ -f sysroot/libmali.so.0 ] && [ ! -L sysroot/libmali.so.0 ] && [ "$(stat -c%s sysroot/libmali.so.0)" -gt 10240 ]; then
-            echo "OK: sysroot/libmali.so.0 existiert bereits und ist ein echtes Binary."
-            exit 0
+
+          # Falls bereits eine gültige libmali.so.0 im Repo liegt (> 5 MB, ELF), überspringen
+          if [ -f sysroot/libmali.so.0 ] && [ ! -L sysroot/libmali.so.0 ] && [ "$(stat -c%s sysroot/libmali.so.0 2>/dev/null || echo 0)" -gt 5000000 ]; then
+            if file sysroot/libmali.so.0 | grep -q "ELF"; then
+              echo "OK: sysroot/libmali.so.0 existiert bereits als gültiges ELF-Binary."
+              ls -la sysroot/libmali.so.0
+              exit 0
+            fi
           fi
 
           echo "== Lade libmali-rk-bifrost-g31-rxp0-gbm von ODROID herunter..."
-          MALI_DEB_URL="https://oph.mdrjr.net/meveric/pool/go2/libm/libmali-rk/libmali-rk-bifrost-g31-rxp0-gbm_1.7-2+deb10_arm64.deb"
-          wget -q -O /tmp/libmali.deb "$MALI_DEB_URL"
+          MALI_URL="https://oph.mdrjr.net/meveric/pool/go2/libm/libmali-rk/libmali-rk-bifrost-g31-rxp0-gbm_1.7-2+deb10_arm64.deb"
+          wget -q -O /tmp/libmali.deb "$MALI_URL"
+
+          # Größe prüfen (muss > 5 MB sein, sonst HTML-Fehlerseite)
+          SIZE=$(stat -c%s /tmp/libmali.deb)
+          echo "Heruntergeladen: $SIZE Bytes"
+          if [ "$SIZE" -lt 5000000 ]; then
+            echo "FEHLER: Datei zu klein ($SIZE Bytes) – wahrscheinlich HTML-Fehlerseite."
+            head -c 200 /tmp/libmali.deb
+            exit 1
+          fi
 
           echo "== Entpacke das Debian-Paket..."
           dpkg-deb -x /tmp/libmali.deb /tmp/libmali-extract
 
-          echo "== Suche die libmali.so.0 im entpackten Paket..."
-          MALI_LIB=$(find /tmp/libmali-extract -name "libmali.so*" -type f | head -n 1)
+          echo "== Suche das echte libmali-Binary (nicht den Symlink) im entpackten Paket..."
+          # Wir suchen die größte Datei, die mit libmali beginnt und ein reguläres File ist
+          MALI_LIB=$(find /tmp/libmali-extract -name "libmali*" -type f -size +5M | head -n 1)
           if [ -z "$MALI_LIB" ]; then
-            echo "FEHLER: libmali.so wurde im Debian-Paket nicht gefunden."
-            find /tmp/libmali-extract -name "*mali*"
+            echo "FEHLER: Kein libmali-Binary > 5 MB gefunden. Inhalt:"
+            find /tmp/libmali-extract -name "*mali*" -exec ls -la {} \;
             exit 1
           fi
           echo "Gefunden: $MALI_LIB"
+          ls -la "$MALI_LIB"
 
+          # Als libmali.so.0 in sysroot kopieren
           cp "$MALI_LIB" sysroot/libmali.so.0
           ls -la sysroot/libmali.so.0
 
-      # ── libSDL2 bleibt manuell (muss vom M9 Pro kopiert werden) ─────────
-      - name: Verify libSDL2 (must be copied from M9 Pro)
+          # Sicherstellen, dass es ein echtes ELF-Binary ist
+          if ! file sysroot/libmali.so.0 | grep -q "ELF"; then
+            echo "FEHLER: sysroot/libmali.so.0 ist kein ELF-Binary."
+            file sysroot/libmali.so.0
+            exit 1
+          fi
+          echo "OK: libmali.so.0 ist ein gültiges ELF-Binary."
+
+          # SONAME prüfen und ggf. auf libmali.so.0 patchen
+          SONAME=$(aarch64-linux-gnu-readelf -d sysroot/libmali.so.0 2>/dev/null | grep SONAME | sed 's/.*\[\(.*\)\].*/\1/' || echo "")
+          echo "Gefundene SONAME: $SONAME"
+          if [ "$SONAME" != "libmali.so.0" ]; then
+            echo "== Patche SONAME auf libmali.so.0..."
+            patchelf --set-soname libmali.so.0 sysroot/libmali.so.0
+            echo "Neue SONAME: $(aarch64-linux-gnu-readelf -d sysroot/libmali.so.0 | grep SONAME)"
+          fi
+
+      # ── libSDL2 validieren (muss manuell vom M9 Pro kopiert werden) ──
+      - name: Validate libSDL2 (must be copied from M9 Pro)
         run: |
           if [ ! -f sysroot/libSDL2-2.0.so.0 ]; then
             echo "FEHLER: sysroot/libSDL2-2.0.so.0 fehlt."
@@ -92,10 +124,14 @@ jobs:
           fi
           SIZE=$(stat -c%s sysroot/libSDL2-2.0.so.0)
           if [ "$SIZE" -lt 10240 ]; then
-            echo "FEHLER: sysroot/libSDL2-2.0.so.0 ist nur $SIZE Bytes groß – kein echtes Binary."
+            echo "FEHLER: sysroot/libSDL2-2.0.so.0 ist nur $SIZE Bytes groß."
             exit 1
           fi
-          echo "OK: sysroot/libSDL2-2.0.so.0 ($SIZE Bytes)"
+          if ! file sysroot/libSDL2-2.0.so.0 | grep -q "ELF"; then
+            echo "FEHLER: sysroot/libSDL2-2.0.so.0 ist kein ELF-Binary."
+            exit 1
+          fi
+          echo "OK: sysroot/libSDL2-2.0.so.0 ($SIZE Bytes, ELF)."
 
       - name: Build
         run: |
