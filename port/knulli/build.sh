@@ -1,18 +1,10 @@
 #!/bin/sh
-# Builds the Knulli port (port/knulli/README.md) into build/knulli:
+# Builds the Knulli port into build/knulli:
 #   halo            the aarch64 glibc host (the loader, SDL2, OpenGL ES)
 #   halo_guest.elf  the game, the Android port's guest image
 #   libs.aarch64/   the runtime libraries the device may not have
-#
-# Needs: python configure.py run with --android-ndk (the guest build), the
-# aarch64-linux-gnu cross compiler, SDL2 headers (SDL2_INCLUDE) and the
-# device's libraries to link against (SYSROOT_LIB: libSDL2-2.0.so.0,
-# libSDL3.so.0 and libmali.so.0, which has OpenGL ES and EGL, from
-# /usr/lib of the device).
 set -eu
 
-# the folders given, as absolute paths (they are used from other folders),
-# without spaces (the compiler's options are split on them)
 folder() {
     resolved=$(cd "$1" && pwd) || { echo "build.sh: $1: no such folder" >&2; exit 1; }
     case "$resolved" in
@@ -40,25 +32,16 @@ for name in EGL GLES2 GLES3 KHR; do
     ln -sfn "$KHRONOS/$name" "$OUT/gl_include/$name"
 done
 
-# ── Diagnose: zeige, was in SYSROOT_LIB liegt ────────────────────────────
 echo "== Inhalt von SYSROOT_LIB=$SYSROOT_LIB:"
 ls -la "$SYSROOT_LIB" || true
 
-# ── Laufzeitbibliotheken in das Artifact kopieren ────────────────────────
-# Diese Bibliotheken liegen auf dem Zielgerät (ArkOS 4) möglicherweise
-# nicht oder in einer inkompatiblen Version. Sie werden daher mitgeliefert
-# und im libs.aarch64/-Unterordner abgelegt, den Halo.sh in den
-# LD_LIBRARY_PATH aufnimmt.
+# Laufzeitbibliotheken in das Artifact kopieren
 echo "== Kopiere Laufzeitbibliotheken nach $OUT/libs.aarch64/"
 copy_runtime_lib() {
-    # Sucht in SYSROOT_LIB nach einer Datei, deren Name mit dem Präfix
-    # beginnt (z. B. "libSDL3"), und kopiert die erste gefundene
-    # reguläre Datei unter dem Zielnamen.
     prefix=$1
     target=$2
     src=$(find "$SYSROOT_LIB" -maxdepth 1 -name "$prefix*" -type f 2>/dev/null | head -n 1)
     if [ -z "$src" ]; then
-        # Fallback: auch Symlinks akzeptieren und auflösen
         src=$(find "$SYSROOT_LIB" -maxdepth 1 -name "$prefix*" 2>/dev/null | head -n 1)
     fi
     if [ -z "$src" ]; then
@@ -73,9 +56,9 @@ copy_runtime_lib() {
 copy_runtime_lib "libSDL3"   "libSDL3.so.0"
 copy_runtime_lib "libmali"   "libmali.so.0"
 copy_runtime_lib "libSDL2"   "libSDL2-2.0.so.0"
-# ─────────────────────────────────────────────────────────────────────────
+copy_runtime_lib "libdecor"  "libdecor-0.so.0"
 
-# ── Linker-Symlinks in $OUT/lib ─────────────────────────────────────────
+# Linker-Symlinks in $OUT/lib
 link_library() {
     pattern=$1
     linkname=$2
@@ -95,17 +78,13 @@ link_library() {
 link_library "libSDL2*" "libSDL2.so"    || exit 1
 link_library "libSDL3*" "libSDL3.so"    || exit 1
 link_library "libmali*" "libmali.so"    || exit 1
+link_library "libdecor*" "libdecor.so"  || exit 1
 
-# ── OPTIMIERTE FLAGS FÜR RK3326 (CORTEX-A35) ─────────────────────────────
-# Ursprünglich: -O2 -g -mcpu=cortex-a53 (für Allwinner H700)
-# Ziel: RK3326 mit 4× Cortex-A35, Mali-G31 MP2, 1 GB RAM
-# Hinweis: -flto (ohne =full, da GCC 9 in Ubuntu 20.04 die Syntax
-#          -flto=full nicht kennt)
+# OPTIMIERTE FLAGS FÜR RK3326 (CORTEX-A35)
 CFLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -fPIC -Wall -Wno-unused-function \
         -D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS \
         -flto -fomit-frame-pointer -ffunction-sections -fdata-sections \
         -fno-plt -fno-semantic-interposition"
-# ─────────────────────────────────────────────────────────────────────────
 
 CFLAGS="$CFLAGS -ffile-prefix-map=$ROOT=. -ffile-prefix-map=$SDL2_INCLUDE=sdl2"
 INCLUDES="-Iport/knulli/compat -Iport/knulli/host -Iport/android/include \
