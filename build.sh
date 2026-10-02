@@ -33,9 +33,9 @@ ANDROID_NDK=$(cd "$ANDROID_NDK" && pwd)
 [ -d "$SYSROOT_LIB" ] || die "SYSROOT_LIB=$SYSROOT_LIB is not a folder"
 SYSROOT_LIB=$(cd "$SYSROOT_LIB" && pwd)
 
-# libSDL2, libmali und libdecor müssen vorhanden sein.
-# libSDL3 wird weiter unten aus dem Quellcode kompiliert; es muss zu
-# diesem Zeitpunkt noch nicht existieren.
+# libSDL2, libmali und libdecor müssen vorhanden sein. libSDL3 wird
+# weiter unten aus dem Quellcode kompiliert; es muss zu diesem
+# Zeitpunkt noch nicht existieren.
 for library in libSDL2-2.0.so.0 libmali.so.0 libdecor-0.so.0; do
     compgen -G "$SYSROOT_LIB/$library*" > /dev/null ||
         die "no $library* in SYSROOT_LIB=$SYSROOT_LIB (must be placed there before the build)"
@@ -91,7 +91,6 @@ if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
     cmake --build "$SDL3_BUILD" -j "$JOBS"
     cmake --install "$SDL3_BUILD"
 
-    # Die installierte .so suchen und als libSDL3.so.0 nach sysroot legen.
     SDL3_LIB=$(find "$SDL3_INSTALL" -name "libSDL3.so.0*" -type f | head -n 1)
     if [ -z "$SDL3_LIB" ]; then
         echo "FEHLER: libSDL3.so.0 wurde nach dem Build nicht gefunden."
