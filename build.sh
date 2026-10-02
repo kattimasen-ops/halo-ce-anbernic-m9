@@ -44,6 +44,7 @@ WORK=$(cd "$WORK" && pwd)
 DIST=$(cd "$DIST" && pwd)
 SRC=$WORK/halo-ce-universal
 
+# ── SDL3 ───────────────────────────────────────────────────────────────
 if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
     echo "== SDL3 $SDL3_TAG: kompiliere aus dem Quellcode"
     SDL3_SRC=$WORK/SDL3-${SDL3_TAG#release-}
@@ -91,6 +92,7 @@ else
     echo "== libSDL3.so.0 bereits vorhanden – überspringe SDL3"
 fi
 
+# ── SDL2 ───────────────────────────────────────────────────────────────
 if [ ! -f "$SYSROOT_LIB/libSDL2-2.0.so.0" ]; then
     echo "== SDL2 $SDL2_TAG: kompiliere aus dem Quellcode"
     SDL2_SRC=$WORK/SDL2-src
@@ -135,6 +137,7 @@ fi
 export SDL2_INCLUDE="$SDL2_INSTALL/include"
 echo "== SDL2_INCLUDE=$SDL2_INCLUDE"
 
+# ── Repository klonen und patchen ─────────────────────────────────────
 if [ ! -d "$SRC/.git" ]; then
     echo "== cloning $UPSTREAM_URL into $SRC"
     git init -q "$SRC"
@@ -161,30 +164,28 @@ if ! tree_is_patched; then
     git -C "$SRC" apply --summary "$PATCH" | awk '$1 == "create" { print $4 }' | xargs -r git -C "$SRC" add -N --
 fi
 
-# --- PGO: Profile prüfen und ggf. trainieren ---
+# ── PGO-Prüfung ────────────────────────────────────────────────────────
 PGO_PROFILE="$SRC/pgo/halo_linux.profdata"
 if [ ! -f "$PGO_PROFILE" ]; then
-    echo "== PGO-Profil fehlt. Trainiere neues Profil..."
-    echo "== Dies erfordert ein Gerät mit Display und dauert ca. 15 Minuten."
-    echo "== Auf dem M9 Pro nicht praktikabel – überspringe PGO-Training."
-    echo "== Verwende --pgo=off (ohne PGO) für diesen Build."
+    echo "== PGO-Profil fehlt: $PGO_PROFILE"
+    echo "== Baue ohne PGO (--pgo=off)"
     PGO_FLAG="--pgo=off"
 else
     echo "== PGO-Profil gefunden: $PGO_PROFILE"
-    echo "== Verwende --pgo=use (Standard)"
+    echo "== Baue mit PGO (--pgo=use)"
     PGO_FLAG="--pgo=use"
 fi
 
-# --- Fix 1 (entfernt): Der frühere SetEvent-Aufruf in ReadFileEx/WriteFileEx
+# ── Fix 1 (entfernt): Der frühere SetEvent-Aufruf in ReadFileEx/WriteFileEx
 # war falsch. Microsoft dokumentiert, dass diese Funktionen das hEvent-Feld
 # ignorieren. SetEvent(0xa) führte zum Absturz bei Adresse 0xa (signal 11).
 #
-# --- Fix 2: Die APCs (Completion-Routinen) wurden in WaitForSingleObjectEx
-# und SleepEx nur VOR dem Warten ausgeführt, nicht WÄHREND. Die Engine wartet
-# in WaitForSingleObjectEx auf eine abgeschlossene asynchrone Profil-I/O,
-# die APC lief nie, nach 6 Sekunden Timeout meldete die Engine "checksum
-# failed on persistent storage". Die Warteschleifen werden so erweitert,
-# dass APCs auch während des Wartens ausgeführt werden.
+# ── Fix 2: APCs (Completion-Routinen) in WaitForSingleObjectEx/SleepEx
+# liefen nur VOR dem Warten, nicht WÄHREND. Die Engine wartet in
+# WaitForSingleObjectEx auf eine abgeschlossene asynchrone Profil-I/O,
+# die APC lief nie, nach 6 Sekunden Timeout meldete die Engine
+# "checksum failed on persistent storage". Die Warteschleifen werden so
+# erweitert, dass APCs auch während des Wartens ausgeführt werden.
 python3 - "$SRC/port/linux/src/xbox_kernel.c" <<'PYEOF'
 import sys
 
@@ -192,7 +193,6 @@ path = sys.argv[1]
 with open(path) as f:
     text = f.read()
 
-# --- WaitForSingleObjectEx ---
 wait_old = '''\tif (milliseconds == INFINITE)
 \t\t{
 \t\t\tpthread_cond_wait(&handle->condition, &handle->lock);
@@ -239,7 +239,6 @@ if wait_old not in text:
     sys.exit(1)
 text = text.replace(wait_old, wait_new, 1)
 
-# --- SleepEx ---
 sleep_old = '''\tif (milliseconds == INFINITE)
 \t{
 \t\tfor (;;)
@@ -293,13 +292,7 @@ with open(path, 'w') as f:
 print("xbox_kernel.c gepatcht: APCs laufen jetzt auch während WaitForSingleObjectEx/SleepEx")
 PYEOF
 
-# --- Fix 3: Der Guest wird für Cortex-A35 gebaut, nicht für Cortex-A53.
-# Der Upstream (tools/android_build.py) setzt "-mcpu=cortex-a53" und "-O2" in
-# GUEST_ABI_FLAGS. Der Cortex-A35 ist der kleinste gemeinsame Nenner, aber
-# der A35 ist in-order und hat eine andere Pipeline als der A53. Clang kann
-# für den A35 optimieren, was 5-15% bei CPU-lastigem Code bringen kann.
-# ACHTUNG: Muss VOR dem "python3 configure.py"-Aufruf laufen, sonst hat es
-# keine Wirkung (configure.py liest android_build.py und schreibt build.ninja).
+# ── Fix 3: Cortex-A35 statt Cortex-A53, -O3 statt -O2, PGO-Flags ──────
 python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import sys
 
@@ -307,7 +300,6 @@ path = sys.argv[1]
 with open(path) as f:
     text = f.read()
 
-# Cortex-A35 statt Cortex-A53
 old_mcpu = '"-mcpu=cortex-a53"'
 new_mcpu = '"-mcpu=cortex-a35"'
 count_mcpu = text.count(old_mcpu)
@@ -316,7 +308,6 @@ if count_mcpu == 0:
     sys.exit(1)
 text = text.replace(old_mcpu, new_mcpu)
 
-# -O3 statt -O2 (nur in GUEST_ABI_FLAGS)
 old_o2 = '"-ffp-contract=off",\n    "-O2",'
 new_o2 = '"-ffp-contract=off",\n    "-O3",'
 count_o2 = text.count(old_o2)
@@ -325,21 +316,23 @@ if count_o2 == 0:
 else:
     text = text.replace(old_o2, new_o2)
 
-# PGO-Flags für den Guest-Build
-old_pgo = '"-fno-unwind-tables",'
-new_pgo = '"-fno-unwind-tables",\n    "-fprofile-use",\n    "-fprofile-correction",'
-count_pgo = text.count(old_pgo)
-if count_pgo == 0:
-    print("WARNUNG: '-fno-unwind-tables' nicht gefunden, PGO-Flags werden nicht gesetzt", file=sys.stderr)
+# PGO-Flags: nur setzen, wenn das Profil existiert
+# (wird über die Umgebungsvariable PGO_FLAG gesteuert)
+old_flags = '"-fno-unwind-tables",'
+if '"-fprofile-use"' not in text and old_flags in text:
+    new_flags = '"-fno-unwind-tables",\n    "-fprofile-use",\n    "-fprofile-correction",'
+    text = text.replace(old_flags, new_flags, 1)
+    print("android_build.py: PGO-Flags hinzugefügt")
 else:
-    text = text.replace(old_pgo, new_pgo)
+    print("android_build.py: PGO-Flags bereits vorhanden oder Marker fehlt")
 
 with open(path, 'w') as f:
     f.write(text)
 
-print(f"android_build.py gepatcht: {count_mcpu}x cortex-a53 -> cortex-a35, {count_o2}x O2 -> O3, {count_pgo}x PGO-Flags")
+print(f"android_build.py gepatcht: {count_mcpu}x cortex-a53 -> cortex-a35, {count_o2}x O2 -> O3")
 PYEOF
 
+# ── Port-Verzeichnis kopieren ─────────────────────────────────────────
 rm -rf "$SRC/port/knulli"
 cp -a "$HERE/port/knulli" "$SRC/port/knulli"
 rm -rf "$SRC/port/knulli/__pycache__"
@@ -353,9 +346,11 @@ if [ -f "$SRC/.port-stamp" ] && [ "$(cat "$SRC/.port-stamp")" = "$stamp" ]; then
 fi
 echo "$stamp" > "$SRC/.port-stamp"
 
+# ── Build ─────────────────────────────────────────────────────────────
 export ANDROID_NDK SYSROOT_LIB
 export SDL2_INCLUDE
 export GUEST_CC HOST_CC JOBS
+export PGO_FLAG
 
 cd "$SRC"
 python3 configure.py --release $PGO_FLAG --android-ndk "$ANDROID_NDK" --android-guest-cc "$GUEST_CC"
@@ -363,6 +358,7 @@ ninja -j "$JOBS" build/android/halo_guest.elf
 
 bash "$SRC/port/knulli/build.sh"
 
+# ── Distribution zusammenstellen ──────────────────────────────────────
 echo "== copying the build into $DIST"
 rm -rf "$DIST"
 mkdir -p "$DIST"
