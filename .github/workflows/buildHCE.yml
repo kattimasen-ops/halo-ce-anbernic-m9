@@ -50,7 +50,9 @@ jobs:
           apt-get install -y --no-install-recommends \
             libdrm-dev:arm64 \
             libgbm-dev:arm64 \
-            libasound2-dev:arm64
+            libasound2-dev:arm64 \
+            libegl1-mesa-dev:arm64 \
+            libgles2-mesa-dev:arm64
 
       - name: Place arm64 headers and libs on the cross-compile paths
         run: |
@@ -58,35 +60,50 @@ jobs:
           mkdir -p /usr/aarch64-linux-gnu/lib
           mkdir -p /usr/aarch64-linux-gnu/lib/pkgconfig
 
+          # Header
           cp -a /usr/include/libdrm /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
           cp -a /usr/include/gbm.h /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
           cp -a /usr/include/alsa /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
+          cp -a /usr/include/EGL /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
+          cp -a /usr/include/GLES2 /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
+          cp -a /usr/include/GLES3 /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
+          cp -a /usr/include/KHR /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
 
-          cp -a /usr/lib/aarch64-linux-gnu/libdrm.so* /usr/aarch64-linux-gnu/lib/ 2>/dev/null || true
-          cp -a /usr/lib/aarch64-linux-gnu/libgbm.so* /usr/aarch64-linux-gnu/lib/ 2>/dev/null || true
-          cp -a /usr/lib/aarch64-linux-gnu/libasound.so* /usr/aarch64-linux-gnu/lib/ 2>/dev/null || true
+          # Bibliotheken
+          for lib in libdrm libgbm libasound libEGL libGLESv2; do
+            cp -a /usr/lib/aarch64-linux-gnu/${lib}.so* /usr/aarch64-linux-gnu/lib/ 2>/dev/null || true
+          done
 
-          for pc in libdrm gbm alsa; do
-            src="/usr/lib/aarch64-linux-gnu/pkgconfig/${pc}.pc"
-            if [ -f "$src" ]; then
+          # pkg-config-Dateien mit Prefix auf den Cross-Pfad umgeschrieben
+          for pc in libdrm gbm alsa egl glesv2; do
+            src=""
+            for candidate in \
+              "/usr/lib/aarch64-linux-gnu/pkgconfig/${pc}.pc" \
+              "/usr/share/pkgconfig/${pc}.pc"; do
+              if [ -f "$candidate" ]; then
+                src="$candidate"
+                break
+              fi
+            done
+            if [ -n "$src" ]; then
               sed -e 's|^prefix=.*|prefix=/usr/aarch64-linux-gnu|' \
                   -e 's|^exec_prefix=.*|exec_prefix=${prefix}|' \
                   -e 's|^libdir=.*|libdir=${prefix}/lib|' \
                   -e 's|^includedir=.*|includedir=${prefix}/include|' \
                   "$src" > "/usr/aarch64-linux-gnu/lib/pkgconfig/${pc}.pc"
+              echo "== ${pc}.pc aus $src erstellt"
             fi
           done
 
-          echo "== libdrm Header:"
-          ls /usr/aarch64-linux-gnu/include/libdrm/ | head -5 || true
-          echo "== alsa Header:"
-          ls /usr/aarch64-linux-gnu/include/alsa/ | head -5 || true
-          echo "== libdrm Libs:"
-          ls /usr/aarch64-linux-gnu/lib/libdrm.so* || true
-          echo "== libgbm Libs:"
-          ls /usr/aarch64-linux-gnu/lib/libgbm.so* || true
-          echo "== libasound Libs:"
-          ls /usr/aarch64-linux-gnu/lib/libasound.so* || true
+          echo "== Verifikation:"
+          ls -la /usr/aarch64-linux-gnu/include/EGL/ 2>/dev/null || echo "  EGL-Header fehlen"
+          ls -la /usr/aarch64-linux-gnu/lib/libEGL.so* 2>/dev/null || echo "  libEGL fehlt"
+          ls -la /usr/aarch64-linux-gnu/lib/libGLESv2.so* 2>/dev/null || echo "  libGLESv2 fehlt"
+          echo "== egl.pc Inhalt:"
+          cat /usr/aarch64-linux-gnu/lib/pkgconfig/egl.pc 2>/dev/null || echo "  egl.pc fehlt"
+          echo "== pkg-config Test:"
+          PKG_CONFIG_LIBDIR=/usr/aarch64-linux-gnu/lib/pkgconfig \
+            pkg-config --exists 'libdrm gbm egl' && echo "  OK: libdrm gbm egl gefunden" || echo "  FEHLER: pkg-config findet das Trio nicht"
 
       - name: Checkout repository
         uses: actions/checkout@v4
