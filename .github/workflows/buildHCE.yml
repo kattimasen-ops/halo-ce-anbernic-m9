@@ -24,7 +24,10 @@ jobs:
           apt-get install -y --no-install-recommends \
             ca-certificates software-properties-common gnupg \
             python3 python3-pip ninja-build git curl wget tar unzip xz-utils \
-            build-essential gcc-aarch64-linux-gnu \
+            build-essential \
+            gcc-aarch64-linux-gnu \
+            libc6-dev-arm64-cross \
+            linux-libc-dev-arm64-cross \
             lsb-release apt-utils
 
       - name: Checkout repository
@@ -35,7 +38,6 @@ jobs:
           wget -q https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
           ./llvm.sh 22
-          # Sicherstellen, dass clang-22 im PATH liegt
           ln -sf /usr/bin/clang-22 /usr/local/bin/clang-22
           clang-22 --version
 
