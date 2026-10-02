@@ -163,9 +163,7 @@ fi
 
 # --- Fix 1 (entfernt): Der frühere SetEvent-Aufruf in ReadFileEx/WriteFileEx
 # war falsch. Microsoft dokumentiert, dass diese Funktionen das hEvent-Feld
-# ignorieren ("ReadFileEx 函数忽略 OVERLAPPED 结构的 hEvent 成员"). Die
-# Engine nutzt hEvent für eigene Zwecke, der Wert ist kein Host-Handle.
-# SetEvent(0xa) führte zum Absturz bei Adresse 0xa (signal 11).
+# ignorieren. SetEvent(0xa) führte zum Absturz bei Adresse 0xa (signal 11).
 #
 # --- Fix 2: Die APCs (Completion-Routinen) wurden in WaitForSingleObjectEx
 # und SleepEx nur VOR dem Warten ausgeführt, nicht WÄHREND. Die Engine wartet
@@ -279,6 +277,44 @@ with open(path, 'w') as f:
     f.write(text)
 
 print("xbox_kernel.c gepatcht: APCs laufen jetzt auch während WaitForSingleObjectEx/SleepEx")
+PYEOF
+
+# --- Fix 3: Der Guest wird für Cortex-A53 gebaut, nicht für Cortex-A35.
+# Der Upstream (tools/android_build.py) setzt "-mcpu=cortex-a53" und "-O2" in
+# GUEST_ABI_FLAGS. Der Cortex-A35 ist der kleinste gemeinsame Nenner, aber
+# der A35 ist in-order und hat eine andere Pipeline als der A53. Clang kann
+# für den A35 optimieren, was 5-15% bei CPU-lastigem Code bringen kann.
+# ACHTUNG: Muss VOR dem "python3 configure.py"-Aufruf laufen, sonst hat es
+# keine Wirkung (configure.py liest android_build.py und schreibt build.ninja).
+python3 - "$SRC/tools/android_build.py" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+with open(path) as f:
+    text = f.read()
+
+# Cortex-A35 statt Cortex-A53
+old_mcpu = '"-mcpu=cortex-a53"'
+new_mcpu = '"-mcpu=cortex-a35"'
+count_mcpu = text.count(old_mcpu)
+if count_mcpu == 0:
+    print(f"FEHLER: {old_mcpu} nicht gefunden", file=sys.stderr)
+    sys.exit(1)
+text = text.replace(old_mcpu, new_mcpu)
+
+# -O3 statt -O2 (nur in GUEST_ABI_FLAGS)
+old_o2 = '"-ffp-contract=off",\n    "-O2",'
+new_o2 = '"-ffp-contract=off",\n    "-O3",'
+count_o2 = text.count(old_o2)
+if count_o2 == 0:
+    print("WARNUNG: '-O2' am erwarteten Platz nicht gefunden, -O3 wird nicht gesetzt", file=sys.stderr)
+else:
+    text = text.replace(old_o2, new_o2)
+
+with open(path, 'w') as f:
+    f.write(text)
+
+print(f"android_build.py gepatcht: {count_mcpu}x cortex-a53 -> cortex-a35, {count_o2}x O2 -> O3")
 PYEOF
 
 rm -rf "$SRC/port/knulli"
