@@ -84,6 +84,10 @@ if ! tree_is_patched; then
     git -C "$SRC" apply "$PATCH"
     git -C "$SRC" apply --summary "$PATCH" | awk '$1 == "create" { print $4 }' | xargs -r git -C "$SRC" add -N --
 fi
+
+# port/knulli in den Upstream-Baum kopieren: das Skript dort läuft, damit
+# sein cd in den Baum mit build.ninja landet. Damit ist es unabhängig vom
+# Ort dieses Skripts.
 rm -rf "$SRC/port/knulli"
 cp -a "$HERE/port/knulli" "$SRC/port/knulli"
 rm -rf "$SRC/port/knulli/__pycache__"
@@ -115,10 +119,10 @@ cd "$SRC"
 python3 configure.py --release --android-ndk "$ANDROID_NDK" --android-guest-cc "$GUEST_CC"
 ninja -j "$JOBS" build/android/halo_guest.elf
 
-# port/knulli/build.sh ist eine Shell-Datei, deren x-Bit je nach Checkout
-# fehlen kann. Über "sh" aufrufen, damit die Datei unabhängig von den
-# Dateirechten ausgeführt wird.
-sh "$HERE/port/knulli/build.sh"
+# Wichtig: die KOPIE im Upstream-Baum aufrufen, nicht die Originaldatei
+# in $HERE. Nur so landet der cd des Skripts in $SRC (mit build.ninja).
+# Über sh aufrufen, damit das x-Bit nicht benötigt wird.
+sh "$SRC/port/knulli/build.sh"
 
 # ---------- dist
 echo "== copying the build into $DIST"
@@ -127,17 +131,12 @@ mkdir -p "$DIST"
 
 cp "$SRC/build/knulli/halo" "$DIST/halo"
 cp "$SRC/build/knulli/halo_guest.elf" "$DIST/halo_guest.elf"
-cp "$HERE/port/knulli/Halo.sh" "$DIST/Halo.sh"
-cp "$HERE/port/knulli/halo_extract.py" "$DIST/halo_extract.py"
-cp "$HERE/port/knulli/halo_screen.py" "$DIST/halo_screen.py"
-cp "$HERE/port/knulli/sdl_mapping.py" "$DIST/sdl_mapping.py"
+cp "$SRC/port/knulli/Halo.sh" "$DIST/Halo.sh"
+cp "$SRC/port/knulli/halo_extract.py" "$DIST/halo_extract.py"
+cp "$SRC/port/knulli/halo_screen.py" "$DIST/halo_screen.py"
+cp "$SRC/port/knulli/sdl_mapping.py" "$DIST/sdl_mapping.py"
 
 # ── Laufzeitbibliotheken mit in das Artifact kopieren ───────────────────
-# Sie liegen nach dem Host-Build in build/knulli/libs.aarch64/ und werden
-# unverändert nach dist/libs.aarch64/ übernommen. Halo.sh nimmt diesen
-# Ordner über LD_LIBRARY_PATH auf, sodass das Gerät libSDL3 und libmali
-# findet, auch wenn sie dort nicht (in der passenden Version) installiert
-# sind.
 if [ -d "$SRC/build/knulli/libs.aarch64" ]; then
     mkdir -p "$DIST/libs.aarch64"
     cp -a "$SRC/build/knulli/libs.aarch64/." "$DIST/libs.aarch64/"
@@ -147,8 +146,6 @@ else
     echo "WARNUNG: $SRC/build/knulli/libs.aarch64 fehlt – Artifact enthält keine Bibliotheken." >&2
 fi
 
-# Die Skripte müssen auf dem Gerät ausführbar sein; im ZIP werden die
-# Rechte möglicherweise nicht erhalten. Ein Hinweis für den Benutzer.
 chmod +x "$DIST/Halo.sh" 2>/dev/null || true
 
 echo "== Inhalt von $DIST:"
