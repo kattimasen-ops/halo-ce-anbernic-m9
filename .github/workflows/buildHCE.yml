@@ -57,47 +57,64 @@ jobs:
       # ── libSDL2: Focal-Version (GLIBC 2.31 kompatibel) ────────────────
       - name: Download and extract libSDL2 (Focal, GLIBC 2.31 compatible)
         run: |
-          URL="https://dl.khadas.com/repos/debs/vim3/focal/sdl2/sdl2.tgz"
-          echo "== Lade SDL2-Tarball von Khadas herunter..."
-          wget -q -O /tmp/sdl2.tgz "$URL"
-          mkdir -p /tmp/sdl2-extract
-          tar -xzf /tmp/sdl2.tgz -C /tmp/sdl2-extract
-          
-          # Suche die .deb-Datei und entpacke sie
-          SDL2_DEB=$(find /tmp/sdl2-extract -name "libsdl2-2.0-0_*.deb" | head -n 1)
-          if [ -z "$SDL2_DEB" ]; then
-            echo "FEHLER: libsdl2-2.0-0 .deb nicht gefunden."
-            find /tmp/sdl2-extract -name "*.deb"
+          URLS=(
+            "http://ports.ubuntu.com/ubuntu-ports/pool/main/libs/libsdl2/libsdl2-2.0-0_2.0.10+dfsg1-3_arm64.deb"
+            "http://ports.ubuntu.com/ubuntu-ports/pool/main/libs/libsdl2/libsdl2-2.0-0_2.0.10+dfsg1-3ubuntu1.1_arm64.deb"
+            "http://ports.ubuntu.com/ubuntu-ports/pool/main/libs/libsdl2/libsdl2-2.0-0_2.0.10+dfsg1-3ubuntu1_arm64.deb"
+          )
+          SDL_DEB=""
+          for url in "${URLS[@]}"; do
+            echo "== Versuche: $url"
+            if curl -fsSL --retry 2 --connect-timeout 30 -o /tmp/libsdl2.deb "$url"; then
+              if dpkg-deb --info /tmp/libsdl2.deb > /dev/null 2>&1; then
+                SDL_DEB=/tmp/libsdl2.deb
+                break
+              fi
+            fi
+          done
+          if [ -z "$SDL_DEB" ]; then
+            echo "FEHLER: libSDL2 konnte von keiner Quelle geladen werden."
             exit 1
           fi
-          dpkg-deb -x "$SDL2_DEB" /tmp/sdl2-deb-extract
-          
-          SDL_LIB=$(find /tmp/sdl2-deb-extract -name "libSDL2-2.0.so.0*" -type f | head -n 1)
+          dpkg-deb -x "$SDL_DEB" /tmp/libsdl2-extract
+          SDL_LIB=$(find /tmp/libsdl2-extract -name "libSDL2-2.0.so.0*" -type f | head -n 1)
           cp "$SDL_LIB" sysroot/libSDL2-2.0.so.0
           echo "libSDL2-2.0.so.0: $(stat -c%s sysroot/libSDL2-2.0.so.0) Bytes"
-          
-          # GLIBC-Kompatibilität prüfen
           echo "== GLIBC-Versionen in libSDL2:"
           aarch64-linux-gnu-readelf -V sysroot/libSDL2-2.0.so.0 | grep GLIBC | sort -u || true
 
       # ── libdecor: Focal-Version (GLIBC 2.31 kompatibel) ──────────────
       - name: Download and extract libdecor (Focal, GLIBC 2.31 compatible)
         run: |
-          URL="http://ftp.ubuntu-tw.org/ubuntu-ports/ubuntu-ports/ubuntu-ports/pool/main/libd/libdecor-0/libdecor-0-0_0.1.0-3build1_arm64.deb"
-          echo "== Lade libdecor (Focal) herunter..."
-          wget -q -O /tmp/libdecor.deb "$URL"
-          
-          dpkg-deb -x /tmp/libdecor.deb /tmp/libdecor-extract
+          URLS=(
+            "http://ports.ubuntu.com/ubuntu-ports/pool/main/libd/libdecor-0/libdecor-0-0_0.1.0-3build1_arm64.deb"
+            "http://ports.ubuntu.com/ubuntu-ports/pool/main/libd/libdecor-0/libdecor-0-0_0.1.0-3_arm64.deb"
+          )
+          DECOR_DEB=""
+          for url in "${URLS[@]}"; do
+            echo "== Versuche: $url"
+            if curl -fsSL --retry 2 --connect-timeout 30 -o /tmp/libdecor.deb "$url"; then
+              if dpkg-deb --info /tmp/libdecor.deb > /dev/null 2>&1; then
+                DECOR_DEB=/tmp/libdecor.deb
+                break
+              fi
+            fi
+          done
+          if [ -z "$DECOR_DEB" ]; then
+            echo "FEHLER: libdecor konnte von keiner Quelle geladen werden."
+            exit 1
+          fi
+          dpkg-deb -x "$DECOR_DEB" /tmp/libdecor-extract
           DECOR_LIB=$(find /tmp/libdecor-extract -name "libdecor-0.so.0*" -type f | head -n 1)
           cp "$DECOR_LIB" sysroot/libdecor-0.so.0
           echo "libdecor-0.so.0: $(stat -c%s sysroot/libdecor-0.so.0) Bytes"
 
-      # ── libmali: vom ODROID-Paket oder vom Gerät ─────────────────────
+      # ── libmali: vom ODROID-Paket oder bereits im Repo ──────────────
       - name: Download and extract libmali (Mali-G31 Bifrost for RK3326)
         run: |
-          # Prüfe, ob libmali bereits im Repo liegt (echte Datei, > 5 MB)
           if [ -f sysroot/libmali.so.0 ] && [ ! -L sysroot/libmali.so.0 ] && [ "$(stat -c%s sysroot/libmali.so.0 2>/dev/null || echo 0)" -gt 5000000 ]; then
             echo "OK: sysroot/libmali.so.0 existiert bereits (echtes Binary)."
+            aarch64-linux-gnu-readelf -V sysroot/libmali.so.0 | grep GLIBC | sort -u || true
             exit 0
           fi
 
@@ -128,24 +145,13 @@ jobs:
           cp "$MALI_LIB" sysroot/libmali.so.0
           echo "libmali.so.0: $(stat -c%s sysroot/libmali.so.0) Bytes"
 
-          # SONAME prüfen
           SONAME=$(aarch64-linux-gnu-readelf -d sysroot/libmali.so.0 2>/dev/null | grep SONAME | sed 's/.*\[\(.*\)\].*/\1/' || echo "")
           echo "SONAME: $SONAME"
           if [ -n "$SONAME" ] && [ "$SONAME" != "libmali.so.0" ]; then
             patchelf --set-soname libmali.so.0 sysroot/libmali.so.0
           fi
-
-      # ── libSDL3: aus dem Quellcode kompilieren (GLIBC 2.31 kompatibel) ─
-      # Kein fertiges SDL3-Paket für Focal. Der Build.sh-Schritt unten
-      # kompiliert SDL3 gegen die GLIBC 2.31 des Containers. Wir legen
-      # lediglich die Umgebungsvariable fest, damit build.sh weiß, wo
-      # es suchen soll.
-      - name: Prepare SDL3 source (compiled in build.sh)
-        run: |
-          echo "SDL3 wird in build.sh aus dem Quellcode kompiliert."
-          # Platzhalter: build.sh erwartet eine libSDL3.so.0 in sysroot.
-          # Der Download-/Kompilierungsschritt in build.sh erledigt das.
-          touch sysroot/.sdl3-placeholder
+          echo "== GLIBC-Versionen in libmali:"
+          aarch64-linux-gnu-readelf -V sysroot/libmali.so.0 | grep GLIBC | sort -u || true
 
       - name: Verify sysroot libraries
         run: |
@@ -155,7 +161,8 @@ jobs:
             if [ -f "$f" ] && [ ! -L "$f" ] && [ "$(stat -c%s "$f" 2>/dev/null || echo 0)" -gt 10240 ]; then
               echo "OK: $f ($(stat -c%s "$f") Bytes)"
             else
-              echo "WARNUNG: $f fehlt oder ist zu klein."
+              echo "FEHLER: $f fehlt oder ist zu klein."
+              exit 1
             fi
           done
 
