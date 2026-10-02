@@ -35,7 +35,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install clang-22 (for the arm64_32 guest build)
+      - name: Install clang-22
         run: |
           wget -q https://apt.llvm.org/llvm.sh
           chmod +x llvm.sh
@@ -54,13 +54,13 @@ jobs:
           mkdir -p sysroot
           rm -f sysroot/libSDL2* sysroot/libSDL3* sysroot/libdecor* sysroot/libmali*
 
-      # ── libSDL2: Focal-Version (GLIBC 2.31 kompatibel) ────────────────
-      - name: Download and extract libSDL2 (Focal, GLIBC 2.31 compatible)
+      # ── libSDL2: Focal 2.0.10+dfsg1-3 aus dem UNIVERSE-Zweig ─────────
+      - name: Download and extract libSDL2 (Focal, universe branch)
         run: |
           URLS=(
-            "http://ports.ubuntu.com/ubuntu-ports/pool/main/libs/libsdl2/libsdl2-2.0-0_2.0.10+dfsg1-3_arm64.deb"
-            "http://ports.ubuntu.com/ubuntu-ports/pool/main/libs/libsdl2/libsdl2-2.0-0_2.0.10+dfsg1-3ubuntu1.1_arm64.deb"
-            "http://ports.ubuntu.com/ubuntu-ports/pool/main/libs/libsdl2/libsdl2-2.0-0_2.0.10+dfsg1-3ubuntu1_arm64.deb"
+            "https://mirror.eu.ossplanet.net/ubuntu-ports/ubuntu-ports/pool/universe/libs/libsdl2/libsdl2-2.0-0_2.0.10+dfsg1-3_arm64.deb"
+            "https://mirror.nikhef.nl/mirror/ubuntu-ports/pool/universe/libs/libsdl2/libsdl2-2.0-0_2.0.10+dfsg1-3_arm64.deb"
+            "http://ftp.ubuntu-tw.org/ubuntu-ports/ubuntu-ports/ubuntu-ports/pool/universe/libs/libsdl2/libsdl2-2.0-0_2.0.10+dfsg1-3_arm64.deb"
           )
           SDL_DEB=""
           for url in "${URLS[@]}"; do
@@ -83,12 +83,13 @@ jobs:
           echo "== GLIBC-Versionen in libSDL2:"
           aarch64-linux-gnu-readelf -V sysroot/libSDL2-2.0.so.0 | grep GLIBC | sort -u || true
 
-      # ── libdecor: Focal-Version (GLIBC 2.31 kompatibel) ──────────────
-      - name: Download and extract libdecor (Focal, GLIBC 2.31 compatible)
+      # ── libdecor: Focal 0.1.0-3build1 aus dem MAIN-Zweig ─────────────
+      - name: Download and extract libdecor (Focal, main branch)
         run: |
           URLS=(
-            "http://ports.ubuntu.com/ubuntu-ports/pool/main/libd/libdecor-0/libdecor-0-0_0.1.0-3build1_arm64.deb"
-            "http://ports.ubuntu.com/ubuntu-ports/pool/main/libd/libdecor-0/libdecor-0-0_0.1.0-3_arm64.deb"
+            "https://mirror.eu.ossplanet.net/ubuntu-ports/pool/main/libd/libdecor-0/libdecor-0-0_0.1.0-3build1_arm64.deb"
+            "http://ftp.ubuntu-tw.org/ubuntu-ports/ubuntu-ports/ubuntu-ports/pool/main/libd/libdecor-0/libdecor-0-0_0.1.0-3build1_arm64.deb"
+            "https://mirrors.dotsrc.org/ubuntu-ports/pool/main/libd/libdecor-0/libdecor-0-0_0.1.0-3build1_arm64.deb"
           )
           DECOR_DEB=""
           for url in "${URLS[@]}"; do
@@ -110,19 +111,17 @@ jobs:
           echo "libdecor-0.so.0: $(stat -c%s sysroot/libdecor-0.so.0) Bytes"
 
       # ── libmali: vom ODROID-Paket oder bereits im Repo ──────────────
-      - name: Download and extract libmali (Mali-G31 Bifrost for RK3326)
+      - name: Download and extract libmali
         run: |
           if [ -f sysroot/libmali.so.0 ] && [ ! -L sysroot/libmali.so.0 ] && [ "$(stat -c%s sysroot/libmali.so.0 2>/dev/null || echo 0)" -gt 5000000 ]; then
             echo "OK: sysroot/libmali.so.0 existiert bereits (echtes Binary)."
             aarch64-linux-gnu-readelf -V sysroot/libmali.so.0 | grep GLIBC | sort -u || true
             exit 0
           fi
-
           URLS=(
             "https://oph.mdrjr.net/meveric/pool/go2/libm/libmali-rk/libmali-rk-bifrost-g31-rxp0-gbm_1.7-2+deb10_arm64.deb"
             "https://cdn.opensuse.org/repositories/home:/amazingfate:/libmali-rockchip/Debian_Testing/arm64/libmali-bifrost-g31-g2p0-gbm_1.9-1+debian1_arm64.deb"
           )
-
           MALI_DEB=""
           for url in "${URLS[@]}"; do
             echo "== Versuche Download: $url"
@@ -134,17 +133,14 @@ jobs:
               fi
             fi
           done
-
           if [ -z "$MALI_DEB" ]; then
             echo "FEHLER: libmali konnte nicht heruntergeladen werden."
             exit 1
           fi
-
           dpkg-deb -x "$MALI_DEB" /tmp/libmali-extract
           MALI_LIB=$(find /tmp/libmali-extract -name "libmali*" -type f -size +5M | head -n 1)
           cp "$MALI_LIB" sysroot/libmali.so.0
           echo "libmali.so.0: $(stat -c%s sysroot/libmali.so.0) Bytes"
-
           SONAME=$(aarch64-linux-gnu-readelf -d sysroot/libmali.so.0 2>/dev/null | grep SONAME | sed 's/.*\[\(.*\)\].*/\1/' || echo "")
           echo "SONAME: $SONAME"
           if [ -n "$SONAME" ] && [ "$SONAME" != "libmali.so.0" ]; then
