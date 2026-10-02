@@ -28,7 +28,7 @@ jobs:
             gcc-aarch64-linux-gnu \
             libc6-dev-arm64-cross \
             linux-libc-dev-arm64-cross \
-            lsb-release apt-utils
+            lsb-release apt-utils dpkg-dev
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -47,14 +47,55 @@ jobs:
           unzip -q android-ndk-r28c-linux.zip
           echo "ANDROID_NDK=$PWD/android-ndk-r28c" >> $GITHUB_ENV
 
-      - name: Verify sysroot libraries
+      # ── NEU: libmali automatisch herunterladen und extrahieren ──────────
+      - name: Download and extract libmali (Mali-G31 Bifrost for RK3326)
         run: |
-          if [ -z "$(ls -A sysroot 2>/dev/null)" ]; then
-            echo "FEHLER: sysroot/ ist leer."
-            echo "Kopiere libSDL2-2.0.so.0* und libmali.so.0* vom M9 Pro nach sysroot/."
+          mkdir -p sysroot
+          # Falls libmali.so.0 bereits im Repo liegt (echte Datei), überspringen
+          if [ -f sysroot/libmali.so.0 ] && [ ! -L sysroot/libmali.so.0 ] && [ "$(stat -c%s sysroot/libmali.so.0)" -gt 10240 ]; then
+            echo "OK: sysroot/libmali.so.0 existiert bereits und ist ein echtes Binary."
+            exit 0
+          fi
+
+          echo "== Lade libmali-rk-bifrost-g31-rxp0-gbm von ODROID herunter..."
+          MALI_DEB_URL="https://oph.mdrjr.net/meveric/pool/go2/libm/libmali-rk/libmali-rk-bifrost-g31-rxp0-gbm_1.7-2+deb10_arm64.deb"
+          wget -q -O /tmp/libmali.deb "$MALI_DEB_URL"
+
+          echo "== Entpacke das Debian-Paket..."
+          dpkg-deb -x /tmp/libmali.deb /tmp/libmali-extract
+
+          echo "== Suche die libmali.so.0 im entpackten Paket..."
+          MALI_LIB=$(find /tmp/libmali-extract -name "libmali.so*" -type f | head -n 1)
+          if [ -z "$MALI_LIB" ]; then
+            echo "FEHLER: libmali.so wurde im Debian-Paket nicht gefunden."
+            find /tmp/libmali-extract -name "*mali*"
             exit 1
           fi
-          ls -l sysroot/
+          echo "Gefunden: $MALI_LIB"
+
+          cp "$MALI_LIB" sysroot/libmali.so.0
+          ls -la sysroot/libmali.so.0
+
+      # ── libSDL2 bleibt manuell (muss vom M9 Pro kopiert werden) ─────────
+      - name: Verify libSDL2 (must be copied from M9 Pro)
+        run: |
+          if [ ! -f sysroot/libSDL2-2.0.so.0 ]; then
+            echo "FEHLER: sysroot/libSDL2-2.0.so.0 fehlt."
+            echo "Kopiere die echte libSDL2-2.0.so.0 vom M9 Pro nach sysroot/."
+            echo "Auf dem M9 Pro: cp \$(readlink -f /usr/lib/libSDL2-2.0.so.0) /tmp/"
+            echo "Dann: scp root@<IP>:/tmp/libSDL2-2.0.so.0 sysroot/"
+            exit 1
+          fi
+          if [ -L sysroot/libSDL2-2.0.so.0 ]; then
+            echo "FEHLER: sysroot/libSDL2-2.0.so.0 ist ein symbolischer Link."
+            exit 1
+          fi
+          SIZE=$(stat -c%s sysroot/libSDL2-2.0.so.0)
+          if [ "$SIZE" -lt 10240 ]; then
+            echo "FEHLER: sysroot/libSDL2-2.0.so.0 ist nur $SIZE Bytes groß – kein echtes Binary."
+            exit 1
+          fi
+          echo "OK: sysroot/libSDL2-2.0.so.0 ($SIZE Bytes)"
 
       - name: Build
         run: |
