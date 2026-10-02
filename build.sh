@@ -6,7 +6,7 @@ UPSTREAM_URL=${UPSTREAM_URL:-https://github.com/cybersecurity/halo-ce-universal.
 UPSTREAM_COMMIT=$(tr -d '[:space:]' < "$HERE/UPSTREAM_COMMIT")
 PATCH=$HERE/patches/halo-ce-universal-knulli.patch
 SDL3_TAG=release-3.2.10
-SDL2_TAG=release-2.0.20
+SDL2_TAG=release-2.30.10
 SDL2_ARCHIVE=https://github.com/libsdl-org/SDL/archive/refs/tags/$SDL2_TAG.tar.gz
 GUEST_CC=${GUEST_CC:-clang-22}
 HOST_CC=${HOST_CC:-aarch64-linux-gnu-gcc}
@@ -32,8 +32,6 @@ ANDROID_NDK=$(cd "$ANDROID_NDK" && pwd)
 [ -d "$SYSROOT_LIB" ] || die "SYSROOT_LIB=$SYSROOT_LIB is not a folder"
 SYSROOT_LIB=$(cd "$SYSROOT_LIB" && pwd)
 
-# libdecor und libmali müssen vor dem Build vorhanden sein.
-# libSDL2 und libSDL3 werden weiter unten aus dem Quellcode kompiliert.
 for library in libdecor-0.so.0 libmali.so.0; do
     compgen -G "$SYSROOT_LIB/$library*" > /dev/null ||
         die "no $library* in SYSROOT_LIB=$SYSROOT_LIB"
@@ -46,7 +44,7 @@ WORK=$(cd "$WORK" && pwd)
 DIST=$(cd "$DIST" && pwd)
 SRC=$WORK/halo-ce-universal
 
-# ---------- SDL3 aus dem Quellcode kompilieren (GLIBC 2.31 kompatibel) ──
+# ---------- SDL3 aus dem Quellcode kompilieren (GLIBC 2.31 kompatibel) ----
 if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
     echo "== SDL3 $SDL3_TAG: kompiliere aus dem Quellcode"
     SDL3_SRC=$WORK/SDL3-${SDL3_TAG#release-}
@@ -96,7 +94,10 @@ else
     echo "== libSDL3.so.0 bereits vorhanden – überspringe SDL3"
 fi
 
-# ---------- SDL2 aus dem Quellcode kompilieren (GLIBC 2.31 kompatibel) ──
+# ---------- SDL2 aus dem Quellcode kompilieren (GLIBC 2.31 kompatibel) ----
+# Version 2.30.10 statt 2.0.20: behebt den R36S-Pageflip-Bug und enthält
+# die stabilere KMSDRM-Implementierung. Wird auf dem Gerät vom Host
+# (host_sdl2.c) verwendet.
 if [ ! -f "$SYSROOT_LIB/libSDL2-2.0.so.0" ]; then
     echo "== SDL2 $SDL2_TAG: kompiliere aus dem Quellcode"
     SDL2_SRC=$WORK/SDL2-src
@@ -194,7 +195,9 @@ cd "$SRC"
 python3 configure.py --release --android-ndk "$ANDROID_NDK" --android-guest-cc "$GUEST_CC"
 ninja -j "$JOBS" build/android/halo_guest.elf
 
-sh "$SRC/port/knulli/build.sh"
+# port/knulli/build.sh verwendet `set -euo pipefail`, was `dash` nicht kennt.
+# Deshalb mit bash aufrufen, nicht mit sh.
+bash "$SRC/port/knulli/build.sh"
 
 # ---------- dist
 echo "== copying the build into $DIST"
