@@ -1,17 +1,32 @@
 #!/bin/bash
-# Halo: Combat Evolved, the native port of the decompilation, for Knulli
-# handhelds with the Allwinner H700 (Anbernic RG35XX H and its family).
-# Refer to port/knulli/README.md.
+# Halo: Combat Evolved – angepasst für M9 Pro (RK3326, ArkOS 4)
 #
-# This script goes in /roms/ports, the game in the halo-ce folder beside
-# it. Put an Xbox disc image of the game (.iso) in that folder, or in ports
-# itself: the first start copies its maps folder out (a few minutes, with
-# its progress on the screen), then the image can be deleted. The log of
-# each start is halo-ce/log.txt; the settings are halo-ce/config.toml.
+# Liegt in /roms/ports, Spiel in halo-ce daneben.
+# Log: halo-ce/log.txt, Einstellungen: halo-ce/config.toml.
 #
-# Hold the hotkey (MENU or SELECT) and push START to quit.
+# Beim ersten Start (Marker save/.diag-done fehlt) läuft eine
+# 40-Sekunden-Eingabe-Diagnose: alle Tasten drücken, beide Sticks
+# bewegen. Das Ergebnis landet im Log.
+# Diagnose wiederholen: einfach save/.diag-done löschen.
 
-# ── FRÜHESTE FEHLERERKENNUNG ────────────────────────────────────────────
+log() {
+    if [ -n "$LOG_OPEN" ]; then
+        printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
+    else
+        printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >&2
+    fi
+}
+log_raw() {
+    if [ -n "$LOG_OPEN" ]; then cat; else cat >&2; fi
+}
+log_section() {
+    log ""
+    log "========================================================="
+    log "== $*"
+    log "========================================================="
+}
+
+LOG_OPEN=""
 echo "Halo.sh gestartet: $(date), USER=$(id -un), PID=$$" > /tmp/halo-start.log 2>&1 || true
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
@@ -20,8 +35,6 @@ if [ -z "$SCRIPT_DIR" ]; then
     exit 1
 fi
 GAMEDIR="$SCRIPT_DIR/halo-ce"
-echo "SCRIPT_DIR=$SCRIPT_DIR" >> /tmp/halo-start.log
-echo "GAMEDIR=$GAMEDIR" >> /tmp/halo-start.log
 
 if [ ! -d "$GAMEDIR" ]; then
     echo "FEHLER: $GAMEDIR existiert nicht." >> /tmp/halo-start.log
@@ -35,33 +48,30 @@ if ! touch "$LOG" 2>/dev/null; then
 fi
 
 exec >> "$LOG" 2>&1
+LOG_OPEN=1
 
-echo ""
-echo "=================================================================="
-echo "Halo for R36S, $(date)"
-echo "SCRIPT_DIR=$SCRIPT_DIR"
-echo "GAMEDIR=$GAMEDIR"
-echo "LOG=$LOG"
-echo "USER=$(id -un), UID=$(id -u)"
-echo "Kernel: $(uname -r)"
-echo "Arch: $(uname -m)"
-echo "Shell: $BASH_VERSION"
-echo "=================================================================="
+log_section "START"
+log "SCRIPT_DIR=$SCRIPT_DIR"
+log "GAMEDIR=$GAMEDIR"
+log "USER=$(id -un), UID=$(id -u)"
+log "Kernel: $(uname -r), Arch: $(uname -m)"
+log "Shell: $BASH_VERSION"
+log "Datum: $(date)"
 
-cd "$GAMEDIR" || { echo "FEHLER: cd $GAMEDIR fehlgeschlagen"; exit 1; }
+cd "$GAMEDIR" || { log "FEHLER: cd $GAMEDIR fehlgeschlagen"; exit 1; }
 
-exec 9> /tmp/halo-lock 2>/dev/null || echo "WARNUNG: /tmp/halo-lock nicht beschreibbar."
+exec 9> /tmp/halo-lock 2>/dev/null || log "WARNUNG: /tmp/halo-lock nicht beschreibbar."
 if [ -e /proc/self/fd/9 ]; then
     if ! { flock -n 9 || python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)' 2>/dev/null; } 2>/dev/null; then
-        echo "$(date): Halo läuft bereits; Start abgelehnt"
+        log "Halo läuft bereits; Start abgelehnt"
         exit 1
     fi
 fi
 
-trap 'echo "Signal empfangen: exit 143"; exit 143' TERM INT HUP
+trap 'log "Signal empfangen: exit 143"; exit 143' TERM INT HUP
 
 stop() {
-    echo "stop() aufgerufen"
+    log "stop() aufgerufen"
     stopping=1
     [ -n "$child" ] || return 0
     kill -TERM "$child" 2>/dev/null
@@ -70,7 +80,7 @@ stop() {
 supervised() {
     local status child="" watchdog="" stopping=""
     trap stop TERM INT HUP
-    echo "supervised: starte $*"
+    log "supervised: starte $*"
     "$@" &
     child=$!
     [ -z "$stopping" ] || stop
@@ -82,15 +92,14 @@ supervised() {
     trap 'exit 143' TERM INT HUP
     [ -z "$watchdog" ] || kill "$watchdog" 2>/dev/null
     if [ -n "$stopping" ]; then
-        echo "gestoppt (exit status $status)"
+        log "gestoppt (exit status $status)"
         exit 143
     fi
-    echo "supervised: $* beendet mit status $status"
+    log "supervised: $* beendet mit status $status"
     return "$status"
 }
 
-echo ""
-echo "── SYSTEMOPTIMIERUNGEN ──────────────────────────────────────────"
+log_section "SYSTEMOPTIMIERUNGEN"
 
 cpu_governor_path=""
 for candidate in \
@@ -105,7 +114,7 @@ done
 cpu_saved=""
 if [ -n "$cpu_governor_path" ]; then
     cpu_saved=$(cat "$cpu_governor_path" 2>/dev/null)
-    echo "CPU-Governor: $cpu_governor_path  $cpu_saved -> performance"
+    log "CPU-Governor: $cpu_governor_path  $cpu_saved -> performance"
     echo performance > "$cpu_governor_path" 2>/dev/null
 fi
 
@@ -125,7 +134,7 @@ gpu_governor_saved=""
 gpu_min_saved=""
 if [ -n "$gpu_devfreq_path" ]; then
     [ -r "$gpu_devfreq_path/governor" ] && gpu_governor_saved=$(cat "$gpu_devfreq_path/governor" 2>/dev/null)
-    echo "GPU-Governor: $gpu_devfreq_path  $gpu_governor_saved -> performance"
+    log "GPU-Governor: $gpu_devfreq_path  $gpu_governor_saved -> performance"
     [ -w "$gpu_devfreq_path/governor" ] && echo performance > "$gpu_devfreq_path/governor" 2>/dev/null
     if [ -r "$gpu_devfreq_path/available_frequencies" ] && [ -w "$gpu_devfreq_path/min_freq" ]; then
         gpu_min_saved=$(cat "$gpu_devfreq_path/min_freq" 2>/dev/null)
@@ -135,14 +144,14 @@ if [ -n "$gpu_devfreq_path" ]; then
 fi
 
 if swapon --show 2>/dev/null | grep -q zram; then
-    echo "ZRAM bereits aktiv."
+    log "ZRAM bereits aktiv."
 else
     modprobe zram 2>/dev/null
     if [ -e /dev/zram0 ]; then
         echo 512M > /sys/block/zram0/disksize 2>/dev/null
         mkswap /dev/zram0 >/dev/null 2>&1
         swapon /dev/zram0 2>/dev/null
-        echo "ZRAM aktiviert."
+        log "ZRAM aktiviert."
     fi
 fi
 
@@ -150,8 +159,7 @@ saved=/tmp/halo-clocks
 printf '%s|%s|%s\n' "$cpu_saved" "$gpu_governor_saved" "$gpu_min_saved" > "$saved" 2>/dev/null || true
 
 restore() {
-    echo ""
-    echo "── RESTORE ─────────────────────────────────────────────────────"
+    log_section "RESTORE"
     if [ -f "$saved" ]; then
         IFS='|' read -r cpu_gov gpu_gov gpu_min < "$saved"
         [ -n "$cpu_gov" ] && [ -n "$cpu_governor_path" ] && [ -w "$cpu_governor_path" ] && echo "$cpu_gov" > "$cpu_governor_path" 2>/dev/null
@@ -162,61 +170,92 @@ restore() {
         rm -f "$saved"
     fi
     rm -f /var/run/battery-saver/halo.pause 2>/dev/null
-    echo "Restore abgeschlossen."
+    log "Restore abgeschlossen."
 }
 trap restore EXIT
 
 mkdir -p /var/run/battery-saver 2>/dev/null && touch /var/run/battery-saver/halo.pause 2>/dev/null
-echo "Battery-Saver-Pause gesetzt (falls möglich)."
+log "Battery-Saver-Pause gesetzt (falls möglich)."
 
-# ── LAUFZEIT-BIBLIOTHEKEN DES PORTS ──────────────────────────────────────
+# ── Save-Verzeichnisse anlegen (behebt z:\saved-Fehler) ────────────────
+log_section "SAVE DIRECTORIES"
+mkdir -p save 2>/dev/null
+mkdir -p save/z 2>/dev/null
+mkdir -p save/saved 2>/dev/null
+mkdir -p save/saved/player_profiles 2>/dev/null
+mkdir -p save/saved/player_profiles/default_profile 2>/dev/null
+mkdir -p save/saved/playlists 2>/dev/null
+mkdir -p save/saved/playlists/default_playlist 2>/dev/null
+mkdir -p save/saved/recordings 2>/dev/null
+mkdir -p save/saved/recordings/last_recording 2>/dev/null
+
+if touch save/saved/.write_test 2>/dev/null; then
+    log "save/saved/ ist beschreibbar."
+    rm -f save/saved/.write_test
+else
+    log "WARNUNG: save/saved/ ist NICHT beschreibbar!"
+fi
+
+log "Struktur:"
+ls -la save/ save/saved/ 2>/dev/null | log_raw
+
+# ── Runtime-Bibliotheken ───────────────────────────────────────────────
+log_section "RUNTIME-BIBLIOTHEKEN"
 LIBS_DIR="$GAMEDIR/libs.aarch64"
 if [ -d "$LIBS_DIR" ]; then
     export LD_LIBRARY_PATH="$LIBS_DIR:$GAMEDIR:$LD_LIBRARY_PATH"
-    echo "LIBS_DIR=$LIBS_DIR"
+    log "LIBS_DIR=$LIBS_DIR"
 else
-    echo "WARNUNG: $LIBS_DIR existiert nicht."
+    log "WARNUNG: $LIBS_DIR existiert nicht."
     export LD_LIBRARY_PATH="$GAMEDIR:$LD_LIBRARY_PATH"
 fi
-echo "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+log "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+
+log "Inhalt von libs.aarch64:"
+ls -la "$LIBS_DIR" 2>/dev/null | log_raw
 
 if command -v ldd >/dev/null 2>&1; then
-    echo "== ldd-Prüfung (nur 'not found'-Zeilen):"
-    ldd ./halo 2>/dev/null | grep 'not found' || echo "   (alle Bibliotheken gefunden)"
+    log "ldd-Prüfung (nur 'not found'-Zeilen):"
+    ldd ./halo 2>/dev/null | grep 'not found' | log_raw || log "   (alle Bibliotheken gefunden)"
 fi
 
-echo ""
-echo "── MAPS ────────────────────────────────────────────────────────"
+# ── Maps prüfen ────────────────────────────────────────────────────────
+log_section "MAPS"
 if [ ! -s maps/ui.map ]; then
     shopt -s nullglob
     images=({.,..}/*.{iso,ISO,xiso,XISO})
     shopt -u nullglob
     if [ "${#images[@]}" -eq 0 ]; then
-        echo "FEHLER: Keine maps/ und kein Disc-Image in $GAMEDIR."
-        supervised python3 halo_screen.py wait 60 "Halo needs your disc" \
-            "Copy the disc image of Halo: Combat Evolved for the Xbox (an .iso file) into roms/ports/halo-ce on the SD card, then start Halo again. Press a button to go back."
+        log "FEHLER: Keine maps/ und kein Disc-Image in $GAMEDIR."
         exit 1
     fi
-    [ "${#images[@]}" -eq 1 ] || echo "${#images[@]} Disc-Images: das erste wird verwendet."
-    echo "Kopiere maps/ aus ${images[0]}..."
-    supervised python3 halo_extract.py --screen "${images[0]}" "$GAMEDIR" || exit 1
+    [ "${#images[@]}" -eq 1 ] || log "${#images[@]} Disc-Images: das erste wird verwendet."
+    log "Kopiere maps/ aus ${images[0]}..."
+    ( sleep 600; kill -KILL $$ ) &
+    supervised python3 halo_extract.py --screen "${images[0]}" "$GAMEDIR"
+    extract_status=$?
+    kill %1 2>/dev/null
+    if [ "$extract_status" -ne 0 ]; then
+        log "FEHLER: halo_extract.py beendet mit status $extract_status"
+        exit 1
+    fi
 else
-    echo "maps/ ist vorhanden."
+    log "maps/ ist vorhanden."
 fi
 
-echo ""
-echo "── CONFIG ──────────────────────────────────────────────────────"
+# ── config.toml ────────────────────────────────────────────────────────
+log_section "CONFIG"
 if [ ! -f config.toml ]; then
-    echo "Erstelle config.toml mit RK3326-Defaults..."
+    log "Erstelle config.toml..."
     if [ -e config.toml ] || [ -L config.toml ] || ! cat > config.toml.new <<'EOF' || ! mv -f config.toml.new config.toml; then
 [display]
 screen_width = 640
-render_scale = 0.5
+render_scale = 0.75
 interpolation = true
 fast_shaders = true
 fast_textures = true
-high_res_hud = false
-model_detail = 0.4
+high_res_hud = true
+model_detail = 0.7
 frame_pacing = true
 [update]
 auto = false
@@ -229,43 +268,75 @@ batch_quads = true
 alpha_test_elision = true
 EOF
         rm -f config.toml.new
-        echo "FEHLER: config.toml konnte nicht geschrieben werden."
-        supervised python3 halo_screen.py wait 60 "Halo could not start" \
-            "Halo could not write its settings. Press a button to go back."
+        log "FEHLER: config.toml konnte nicht geschrieben werden."
         exit 1
     fi
-    echo "config.toml erstellt."
+    log "config.toml erstellt."
 else
-    echo "config.toml existiert bereits."
+    log "config.toml existiert bereits."
 fi
+log "Inhalt von config.toml:"
+cat config.toml 2>/dev/null | log_raw
 
-echo ""
-echo "── CONTROLLER ──────────────────────────────────────────────────"
+# ── Controller-Mapping (nur Info) ──────────────────────────────────────
+log_section "CONTROLLER-MAPPING"
 if [ -f sdl_mapping.py ]; then
+    log "sdl_mapping.py Rohausgabe:"
+    python3 sdl_mapping.py 2>&1 | log_raw
     SDL_GAMECONTROLLERCONFIG="$(python3 sdl_mapping.py 2>/dev/null)"
     export SDL_GAMECONTROLLERCONFIG
-    echo "SDL_GAMECONTROLLERCONFIG: ${#SDL_GAMECONTROLLERCONFIG} Zeichen"
-    [ -z "$SDL_GAMECONTROLLERCONFIG" ] && echo "   (leer – SDL3 nutzt seine eigene Gamepad-DB)"
+    log "SDL_GAMECONTROLLERCONFIG-Länge: ${#SDL_GAMECONTROLLERCONFIG} Zeichen"
+    log "Inhalt:"
+    printf '%s\n' "$SDL_GAMECONTROLLERCONFIG" | log_raw
+else
+    log "sdl_mapping.py nicht vorhanden."
 fi
 
-echo ""
-echo "── SPIELSTART ──────────────────────────────────────────────────"
-if [ ! -d save/z ]; then
-    echo "Erster Start: Shader-Cache wird erstellt..."
-    if [ -f halo_screen.py ]; then
-        supervised python3 halo_screen.py wait 10 "Starting Halo" \
-            "The first start takes about a minute more, with a black screen, while the game sets up its shader cache. Press a button to continue."
+# ── INPUT-DIAGNOSE (läuft, wenn Marker fehlt) ──────────────────────────
+if [ ! -f save/.diag-done ]; then
+    log_section "INPUT-DIAGNOSE"
+    log "Erster Start mit neuer Skriptversion. 40-Sekunden-Aufzeichnung."
+    log "Bitte jetzt jede Taste drücken und beide Sticks bewegen."
+
+    if [ -f "$SCRIPT_DIR/halo_controls.py" ]; then
+        # Kein halo_screen.py mehr davor – der Bildschirm bleibt schwarz,
+        # damit nichts die Diagnose blockiert.
+        ( sleep 45; kill -KILL $(cat /tmp/halo-diag.pid 2>/dev/null) 2>/dev/null ) &
+        WATCHDOG=$!
+        python3 "$SCRIPT_DIR/halo_controls.py" 40 > /tmp/halo-diag.out 2>&1 &
+        DIAG_PID=$!
+        echo "$DIAG_PID" > /tmp/halo-diag.pid
+        wait "$DIAG_PID" 2>/dev/null
+        DIAG_STATUS=$?
+        kill "$WATCHDOG" 2>/dev/null
+
+        log "Diagnose beendet mit Status $DIAG_STATUS"
+        log "Diagnose-Ausgabe:"
+        cat /tmp/halo-diag.out 2>/dev/null | log_raw
+
+        touch save/.diag-done 2>/dev/null
+        log "Marker save/.diag-done angelegt."
+    else
+        log "halo_controls.py nicht gefunden – Diagnose übersprungen."
     fi
+else
+    log_section "INPUT-DIAGNOSE"
+    log "Bereits durchgeführt (save/.diag-done vorhanden)."
+    log "Wiederholen: Datei save/.diag-done löschen."
 fi
 
-echo "Starte ./halo ..."
+# ── Spielstart ─────────────────────────────────────────────────────────
+log_section "SPIELSTART"
+log "Starte ./halo ..."
 if [ ! -x ./halo ]; then
-    echo "FEHLER: ./halo fehlt oder ist nicht ausführbar."
-    ls -la ./halo 2>/dev/null
+    log "FEHLER: ./halo fehlt oder ist nicht ausführbar."
+    ls -la ./halo 2>/dev/null | log_raw
     exit 1
 fi
 
 supervised ./halo
 status=$?
-echo "halo beendet mit status $status"
+log "halo beendet mit status $status"
+
+log_section "ENDE"
 exit $status
