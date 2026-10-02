@@ -11,10 +11,11 @@ history as they land.
 
 ## Where it stands
 
-On the RG35XX H at render scale 0.75, the menus run at 60 fps. The a30
-opening (Halo) runs at 53 to 57 fps in the latest build, most frames at
-16.7 ms, the b30 beach battle (The Silent Cartographer) at 35 to 46 fps
-(about 40), and the c10 opening (343 Guilty Spark) at about 44 fps. With
+On the RG35XX H at render scale 0.75, the menus run at 60 fps. In the
+release of 2026-10-01 (the first minute after each level loads), the a30
+opening (Halo) runs at about 55 fps (39 to 60), most frames at 16.7 ms, the
+b30 beach battle (The Silent Cartographer) at 35 to 44 fps (about 40), and
+the c10 opening (343 Guilty Spark) at 31 to 44 fps. With
 the repeated model draws instanced, a30 is limited by the GPU, and the
 environment shadows are its largest cost: without them a30 holds 57.5 to
 59.9 fps. The next steps are to draw the shadows' textures without

@@ -212,6 +212,15 @@ it (a revert; saved games proper are the profile's persistent storage), so
 `game_state_xbox.c` keeps it in memory instead: a 14 ms copy, into a buffer
 whose pages are made at start-up.
 
+The maps on the Xbox disc are compressed. Before a level is played, the
+game decompresses it into one of its cache files in `z:\`
+(`save/z/cache000.map` to `cache005.map`: two campaign levels, the main
+menu and three multiplayer maps), behind the loading screen
+(`cache_files_decompress_windows.c`), as the Xbox did to its hard disk; a
+level already there loads without it. On the handheld that is about 150 MB
+read and up to 280 MB written, 20 to 25 s; the kernel writes the last 50 to
+70 MB out in the first seconds of the level ([Performance](PERFORMANCE.md#entering-a-level-2026-10-01)).
+
 ### Watching guest memory
 
 The renderer caches what it uploads from guest memory: textures, and the

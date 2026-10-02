@@ -63,7 +63,7 @@ replaces the Android-specific parts of the host:
 | GL thread | `host/host_glthread.c`, `glthread_gen.py` | Records the guest's OpenGL ES calls into a queue that another thread replays into the driver (below). |
 | Logging | `compat/android/log.h` | The NDK's log functions, written to the standard error stream (`halo/log.txt`). |
 | Profiling | `host/host_profile.c`, `host/host_gl_timing.c`, `profile.py` | A sampling profiler and a per-function timer of the driver's calls ([Profiling](PROFILING.md)). |
-| Launcher | `Halo.sh`, `halo_extract.py`, `sdl_mapping.py` | Extracts `maps/` from the disc image on the first launch, writes the handheld's defaults to `config.toml`, maps the controls, pins the clocks and restores them on exit ([Install](INSTALL.md)). |
+| Launcher | `Halo.sh`, `halo_extract.py`, `halo_screen.py`, `sdl_mapping.py` | Extracts `maps/` from the disc image on the first launch, with its progress and any problem shown on the screen; writes the handheld's defaults to `config.toml`, maps the controls, pins the clocks and restores them on exit ([Install](INSTALL.md)). |
 
 The loader, memory manager, thread and system-call code are the Android
 host's (`port/android/host`), compiled with the aarch64 glibc cross compiler

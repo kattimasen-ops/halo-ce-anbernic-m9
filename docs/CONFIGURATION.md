@@ -98,6 +98,7 @@ launcher writes another value, the table says so.
 | [`display.vsync`](#displayvsync) | boolean | `true` | | `HALO_NO_VSYNC` (set is false) |
 | [`display.interpolation`](#displayinterpolation) | boolean | `true` | `true` | `HALO_INTERPOLATION` (value) |
 | [`display.frame_pacing`](#displayframe_pacing) | boolean | `true` | | `HALO_FRAME_PACING` (value) |
+| [`display.high_res_hud`](#displayhigh_res_hud) | boolean | `true` | `false` | `HALO_HIGH_RES_HUD` (value) |
 | [`debug.sort_models`](#debugsort_models) | boolean | `true` | | `HALO_SORT_MODELS` (value) |
 | [`debug.instance_models`](#debuginstance_models) | boolean | `true` | | `HALO_INSTANCE_MODELS` (value) |
 | [`debug.alpha_test_elision`](#debugalpha_test_elision) | boolean | `true` | | `HALO_ALPHA_TEST_ELISION` (value) |
@@ -137,8 +138,8 @@ scale, the HUD and menus included. Values below 0.5 become 0.5, and values
 above 1.0 become 1.0. It also scales `display.model_detail`.
 
 **When to change it.** This is the main trade between sharpness and speed.
-At 1.0 the GPU's pixel and vertex work limits the frame rate (20 to 26 fps
-in the campaign on an earlier build); at 0.75 the limits are the CPU-side
+At 1.0 the GPU's pixel and vertex work limits the frame rate (about 24 to
+40 fps in the campaign); at 0.75 the limits are the CPU-side
 threads; see the [README's performance table](../README.md#performance).
 Lower it for more headroom in heavy scenes or when the handheld is hot.
 
@@ -267,6 +268,19 @@ the LCD timing controller) and vsync; elsewhere frames are not paced.
 same frame rate, with small timing errors on a third of the frames instead
 of fewer, larger ones (in the b30 battle, whole-refresh steps on 11% of
 frames against 17% paced). Try both.
+
+### `display.high_res_hud`
+
+| Type | Default | Launcher | Variable |
+| --- | --- | --- | --- |
+| boolean | `true` | `false` | `HALO_HIGH_RES_HUD` |
+
+Upstream's high-resolution HUD: the meters, counters, motion sensor,
+reticles, waypoints and scopes drawn from redrawn textures 8 times the size
+of the maps' bitmaps (`hud_hires.c`). At the handheld's 640x480 it looks the
+same, and in a30 it took 77 MB more memory and about 1 fps, so the launcher
+writes it off in a new `config.toml`. A `config.toml` from an earlier
+version gets it from the game, on: set it to `false` there by hand.
 
 ## Renderer switches
 

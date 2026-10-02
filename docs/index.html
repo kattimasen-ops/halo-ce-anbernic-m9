@@ -53,7 +53,7 @@
     "url": "https://github.com/kirklandsig"
   },
   "image": "https://kirklandsig.github.io/halo-ce-anbernic-rg35xx/screenshots/b30-beach.png",
-  "dateModified": "2026-09-30",
+  "dateModified": "2026-10-01",
   "keywords": [
     "Halo CE",
     "Halo Combat Evolved",
@@ -75,7 +75,8 @@
     "applicationCategory": "GameApplication",
     "operatingSystem": "Knulli",
     "processorRequirements": "Allwinner H700 (ARM Cortex-A53, AArch64)",
-    "memoryRequirements": "1 GB"
+    "memoryRequirements": "1 GB",
+    "downloadUrl": "https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/releases/latest"
   }
 }
 </script>
@@ -97,7 +98,7 @@
       "name": "What frame rate does Halo CE get on the RG35XX H?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "At the default render scale of 0.75: 60 fps in the menus, about 44 fps on 343 Guilty Spark (c10), about 40 fps in the beach battle of The Silent Cartographer (b30), and about 55 fps at the opening of Halo (a30). At the full 640x480 it is 20 to 26 fps. The numbers are improving; see the performance table."
+        "text": "At the default render scale of 0.75: 60 fps in the menus, about 40 fps on 343 Guilty Spark (c10, 31 to 44), about 40 fps in the beach battle of The Silent Cartographer (b30), and about 55 fps at the opening of Halo (a30). At the full 640x480 it is about 24 to 40 fps. The numbers are improving; see the performance table."
       }
     },
     {
@@ -113,7 +114,7 @@
       "name": "Is this legal?",
       "acceptedAnswer": {
         "@type": "Answer",
-        "text": "The repository contains only source code and documentation: the upstream decompilation's authors released their code under CC0, and so does this port. It contains no game files, disc images, maps or binaries of the game. You need your own copy of the Xbox game. Whether decompilation projects are lawful depends on where you live; this is not legal advice. See the legal notice."
+        "text": "The repository contains only source code and documentation, and its releases only the port's programs built from that source: the upstream decompilation's authors released their code under CC0, and so does this port. Neither contains game files, disc images or maps. You need your own copy of the Xbox game. Whether decompilation projects are lawful depends on where you live; this is not legal advice. See the legal notice."
       }
     },
     {
@@ -177,36 +178,36 @@
     },
     {
       "@type": "HowToSupply",
-      "name": "The files built from this repository: halo, halo_guest.elf, Halo.sh, halo_extract.py, sdl_mapping.py"
+      "name": "The latest release's zip, halo-ce-knulli-<version>.zip (or the files built from this repository)"
     }
   ],
   "step": [
     {
       "@type": "HowToStep",
       "position": 1,
-      "name": "Copy the game files",
-      "text": "Copy halo, halo_guest.elf, halo_extract.py and sdl_mapping.py into /userdata/roms/ports/halo/ on the handheld.",
+      "name": "Download the release",
+      "text": "Download halo-ce-knulli-<version>.zip from the latest release.",
       "url": "https://kirklandsig.github.io/halo-ce-anbernic-rg35xx/#install"
     },
     {
       "@type": "HowToStep",
       "position": 2,
-      "name": "Copy the launcher",
-      "text": "Copy Halo.sh into /userdata/roms/ports/.",
+      "name": "Unzip it onto the SD card",
+      "text": "Unzip it onto the SD card, into the partition that holds the roms folder (over the network, \\\\KNULLI\\share). It adds roms/ports/Halo.sh and the folder roms/ports/halo/.",
       "url": "https://kirklandsig.github.io/halo-ce-anbernic-rg35xx/#install"
     },
     {
       "@type": "HowToStep",
       "position": 3,
       "name": "Add your disc image",
-      "text": "Put your own Xbox disc image of Halo: Combat Evolved (.iso) in /userdata/roms/ports/halo/.",
+      "text": "Put your own Xbox disc image of Halo: Combat Evolved (.iso) in roms/ports/halo/.",
       "url": "https://kirklandsig.github.io/halo-ce-anbernic-rg35xx/#install"
     },
     {
       "@type": "HowToStep",
       "position": 4,
       "name": "Launch from Ports",
-      "text": "Start Halo from the Ports list. The first launch extracts the maps/ folder from the image, which takes a few minutes; the image can be deleted afterwards.",
+      "text": "Start Halo from the Ports list. The first launch copies the maps/ folder out of the image with its progress on the screen (about four minutes), then the game sets up its cache (about a minute, with a black screen); the image can be deleted afterwards.",
       "url": "https://kirklandsig.github.io/halo-ce-anbernic-rg35xx/#install"
     },
     {
@@ -319,7 +320,7 @@ footer p { margin: 0 0 10px; }
   <div class="hero">
     <h1>Halo: Combat Evolved on the Anbernic RG35XX H</h1>
     <p class="subtitle">A native ARM64 port for Knulli on the Allwinner H700 and its Mali-G31 GPU.</p>
-    <p class="lead">Yes, Halo CE runs natively on the Anbernic RG35XX H (RG35XXH) under Knulli: 60 fps in the menus and about 40 to 55 fps in campaign levels at the default render scale. The port builds the <a href="https://github.com/cybersecurity/halo-ce-universal">halo-ce-universal</a> decompilation of the Xbox game as AArch64 code, with no emulation, no Box64, no Wine and no xemu. You need your own copy of the original Xbox game; the project is source code and documentation only.</p>
+    <p class="lead">Yes, Halo CE runs natively on the Anbernic RG35XX H (RG35XXH) under Knulli: 60 fps in the menus and about 40 to 55 fps in campaign levels at the default render scale. The port builds the <a href="https://github.com/cybersecurity/halo-ce-universal">halo-ce-universal</a> decompilation of the Xbox game as AArch64 code, with no emulation, no Box64, no Wine and no xemu. You need your own copy of the original Xbox game; the <a href="https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/releases/latest">releases</a> hold the port's own programs and no game data.</p>
     <p class="buttons">
       <a class="button primary" href="https://github.com/kirklandsig/halo-ce-anbernic-rg35xx">Source on GitHub</a>
       <a class="button secondary" href="#install">How to install</a>
@@ -327,7 +328,7 @@ footer p { margin: 0 0 10px; }
     <!-- performance numbers: keep in step with the README's performance table -->
     <ul class="stats" aria-label="Frame rates at render scale 0.75">
       <li><strong>60 fps</strong><span>Main menu</span></li>
-      <li><strong>~44 fps</strong><span>343 Guilty Spark (c10)</span></li>
+      <li><strong>~40 fps</strong><span>343 Guilty Spark (c10)</span></li>
       <li><strong>~40 fps</strong><span>The Silent Cartographer battle (b30)</span></li>
       <li><strong>~55 fps</strong><span>Halo, level opening (a30)</span></li>
     </ul>
@@ -361,16 +362,16 @@ footer p { margin: 0 0 10px; }
 
   <section id="performance" aria-labelledby="performance-title">
     <h2 id="performance-title">Performance</h2>
-    <p>Frames per second on an Anbernic RG35XX H, Knulli Gladiator II, stock thermal limits. Last updated 2026-09-30; the numbers are improving.</p>
+    <p>Frames per second on an Anbernic RG35XX H, Knulli Gladiator II, stock thermal limits, with the level in the game&#39;s cache: the typical value and the range over the first minute of each level. Last updated 2026-10-01 (release v2026.10.01); the numbers are improving.</p>
     <!-- performance numbers: keep in step with the README's performance table -->
     <div class="table">
       <table>
         <thead><tr><th scope="col">Scene</th><th scope="col">Render scale 0.75 (default)</th><th scope="col">Render scale 1.0 (640x480)</th></tr></thead>
         <tbody>
           <tr><td>Main menu</td><td class="num">60</td><td class="num">60</td></tr>
-          <tr><td>c10, 343 Guilty Spark (swamp)</td><td class="num">about 44</td><td class="num">26</td></tr>
-          <tr><td>b30, The Silent Cartographer (beach battle)</td><td class="num">about 40</td><td class="num">26</td></tr>
-          <tr><td>a30, Halo (level opening)</td><td class="num">about 55</td><td class="num">20</td></tr>
+          <tr><td>c10, 343 Guilty Spark (swamp)</td><td class="num">about 40 (31–44)</td><td class="num">about 24 (19–28)</td></tr>
+          <tr><td>b30, The Silent Cartographer (beach battle)</td><td class="num">about 40 (35–44)</td><td class="num">about 30 (28–34)</td></tr>
+          <tr><td>a30, Halo (level opening)</td><td class="num">about 55 (39–60)</td><td class="num">about 40 (26–47)</td></tr>
         </tbody>
       </table>
     </div>
@@ -400,12 +401,12 @@ footer p { margin: 0 0 10px; }
 
   <section id="install" aria-labelledby="install-title">
     <h2 id="install-title">Install</h2>
-    <p>You need an H700 handheld with Knulli, your own Halo: Combat Evolved disc image for the original Xbox, about 2 GB free for the maps, and the files from a build (<a href="#build">below</a>).</p>
+    <p>You need an H700 handheld with Knulli, your own Halo: Combat Evolved disc image for the original Xbox, about 3 GB free on the card (the maps and the game's cache), and the <a href="https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/releases/latest">latest release</a> (or a build: <a href="#build">below</a>).</p>
     <ol class="steps">
-      <li><strong>Copy the game files.</strong> Copy <code>halo</code>, <code>halo_guest.elf</code>, <code>halo_extract.py</code> and <code>sdl_mapping.py</code> into <code>/userdata/roms/ports/halo/</code> on the handheld.</li>
-      <li><strong>Copy the launcher.</strong> Copy <code>Halo.sh</code> into <code>/userdata/roms/ports/</code>.</li>
-      <li><strong>Add your disc image.</strong> Put your own Xbox disc image of Halo: Combat Evolved (<code>.iso</code>) in <code>/userdata/roms/ports/halo/</code>.</li>
-      <li><strong>Launch from Ports.</strong> Start Halo from the Ports list. The first launch extracts the <code>maps/</code> folder from the image, which takes a few minutes; the image can be deleted afterwards.</li>
+      <li><strong>Download the release.</strong> Download <code>halo-ce-knulli-&lt;version&gt;.zip</code> from the <a href="https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/releases/latest">latest release</a>.</li>
+      <li><strong>Unzip it onto the SD card.</strong> Unzip it onto the SD card, into the partition that holds the <code>roms</code> folder (over the network, <code>\\KNULLI\share</code>). It adds <code>roms/ports/Halo.sh</code> and the folder <code>roms/ports/halo/</code>.</li>
+      <li><strong>Add your disc image.</strong> Put your own Xbox disc image of Halo: Combat Evolved (<code>.iso</code>) in <code>roms/ports/halo/</code>.</li>
+      <li><strong>Launch from Ports.</strong> Start Halo from the Ports list. The first launch copies the <code>maps/</code> folder out of the image with its progress on the screen (about four minutes), then the game sets up its cache (about a minute, with a black screen); the image can be deleted afterwards.</li>
       <li><strong>Quit.</strong> To quit, hold the hotkey (MENU or SELECT) and press START.</li>
     </ol>
     <p class="note">Settings are in <code>halo/config.toml</code> (for example <code>display.render_scale</code>, default 0.75), the log in <code>halo/log.txt</code>.</p>
@@ -418,7 +419,7 @@ footer p { margin: 0 0 10px; }
 cd halo-ce-anbernic-rg35xx
 mkdir -p sysroot   # copy libSDL2-2.0.so.0* and libmali.so.0* from the handheld here
 ANDROID_NDK=/path/to/android-ndk-r28c SYSROOT_LIB=$PWD/sysroot ./build.sh
-ls dist/           # halo  halo_guest.elf  Halo.sh  halo_extract.py  sdl_mapping.py</code></pre>
+ls dist/           # halo  halo_guest.elf  Halo.sh  halo_extract.py  halo_screen.py  sdl_mapping.py</code></pre>
     <p><code>build.sh</code> clones halo-ce-universal at a pinned commit, applies this project's patch, adds the Knulli host, and builds. The first build takes 10 to 30 minutes.</p>
   </section>
 
@@ -432,11 +433,11 @@ ls dist/           # halo  halo_guest.elf  Halo.sh  halo_extract.py  sdl_mapping
     <h3>Can the Anbernic RG35XX H run Halo: Combat Evolved?</h3>
     <p>Yes. This port runs Halo CE natively on the RG35XX H under Knulli, as AArch64 code on the H700's Cortex-A53 cores with the Mali-G31 GPU. It is built from the halo-ce-universal decompilation; you supply the Xbox game's data.</p>
     <h3>What frame rate does Halo CE get on the RG35XX H?</h3>
-    <p>At the default render scale of 0.75: 60 fps in the menus, about 44 fps on 343 Guilty Spark (c10), about 40 fps in the beach battle of The Silent Cartographer (b30), and about 55 fps at the opening of Halo (a30). At the full 640x480 it is 20 to 26 fps. The numbers are improving; see the <a href="#performance">performance table</a>.</p>
+    <p>At the default render scale of 0.75: 60 fps in the menus, about 40 fps on 343 Guilty Spark (c10, 31 to 44), about 40 fps in the beach battle of The Silent Cartographer (b30), and about 55 fps at the opening of Halo (a30). At the full 640x480 it is about 24 to 40 fps. The numbers are improving; see the <a href="#performance">performance table</a>.</p>
     <h3>Does it work with the Xbox version or the PC version of Halo?</h3>
     <p>The Xbox version. The decompilation is of the Xbox build, and it reads the Xbox maps. The PC version (Gearbox's port) has different map files that this code cannot load. Use a disc image of the original Xbox game.</p>
     <h3>Is this legal?</h3>
-    <p>The repository contains only source code and documentation: the upstream decompilation's authors released their code under CC0, and so does this port. It contains no game files, disc images, maps or binaries of the game. You need your own copy of the Xbox game. Whether decompilation projects are lawful depends on where you live; this is not legal advice. See the <a href="https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/blob/main/docs/LEGAL.md">legal notice</a>.</p>
+    <p>The repository contains only source code and documentation, and its releases only the port's programs built from that source: the upstream decompilation's authors released their code under CC0, and so does this port. Neither contains game files, disc images or maps. You need your own copy of the Xbox game. Whether decompilation projects are lawful depends on where you live; this is not legal advice. See the <a href="https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/blob/main/docs/LEGAL.md">legal notice</a>.</p>
     <h3>Does it need PortMaster?</h3>
     <p>No. It is a plain Knulli port: a launcher script in <code>roms/ports</code> and a folder. It uses the firmware's own SDL2 and Mali driver and none of PortMaster's runtimes.</p>
     <h3>Does it work on muOS or ROCKNIX?</h3>
@@ -451,7 +452,7 @@ ls dist/           # halo  halo_guest.elf  Halo.sh  halo_extract.py  sdl_mapping
 
   <section id="legal" aria-labelledby="legal-title">
     <h2 id="legal-title">Legal notice</h2>
-    <p>This is an unofficial fan project, not affiliated with, endorsed by or sponsored by Microsoft, Xbox Game Studios, Halo Studios or Bungie. Halo, Halo: Combat Evolved and Xbox are trademarks of Microsoft Corporation. The project contains no Halo game files (no disc images, maps, XBE, extracted assets or prebuilt game binaries) and no Arm Mali driver or device libraries. To play, you need your own copy of the original Xbox game. See <a href="https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/blob/main/docs/LEGAL.md">LEGAL.md</a>.</p>
+    <p>This is an unofficial fan project, not affiliated with, endorsed by or sponsored by Microsoft, Xbox Game Studios, Halo Studios or Bungie. Halo, Halo: Combat Evolved and Xbox are trademarks of Microsoft Corporation. The project and its releases contain no Halo game files (no disc images, maps, XBE or extracted assets) and no Arm Mali driver or device libraries; the releases hold only the port's own programs, built from this source. To play, you need your own copy of the original Xbox game. See <a href="https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/blob/main/docs/LEGAL.md">LEGAL.md</a>.</p>
   </section>
 </main>
 

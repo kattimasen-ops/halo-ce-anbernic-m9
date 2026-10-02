@@ -1,6 +1,6 @@
 # Halo: Combat Evolved on Anbernic RG35XX H (native Knulli port)
 
-> A native ARM64 (AArch64) port of the Halo: Combat Evolved decompilation, halo-ce-universal, to the Anbernic RG35XX H and other Allwinner H700 handhelds running Knulli (a Batocera fork). The game runs as native code on the Cortex-A53 cores with the Mali-G31 GPU: no emulation, no xemu, no Box64, no Wine. Source code and documentation only; players need their own copy of the original Xbox game. Released under CC0 1.0.
+> A native ARM64 (AArch64) port of the Halo: Combat Evolved decompilation, halo-ce-universal, to the Anbernic RG35XX H and other Allwinner H700 handhelds running Knulli (a Batocera fork). The game runs as native code on the Cortex-A53 cores with the Mali-G31 GPU: no emulation, no xemu, no Box64, no Wine. Source code, documentation, and releases of the port's own programs built from it (no game data); players need their own copy of the original Xbox game. Released under CC0 1.0.
 
 ## Key facts
 
@@ -16,25 +16,24 @@
 - Untested: Anbernic RG CubeXX (720x720), RG34XX (720x480); muOS and ROCKNIX firmware.
 - Not supported: TrimUI handhelds and other SoCs.
 
-## Frame rates (RG35XX H, last updated 2026-09-30)
+## Frame rates (RG35XX H, last updated 2026-10-01)
 
-- Render scale 0.75 (default): main menu 60 fps; c10, 343 Guilty Spark, about 44; b30, The Silent Cartographer beach battle, about 40; a30, Halo level opening, about 55.
-- Render scale 1.0 (640x480): main menu 60; c10 26; b30 26; a30 20.
+- Render scale 0.75 (default): main menu 60 fps; c10, 343 Guilty Spark, about 40 (31-44); b30, The Silent Cartographer beach battle, about 40 (35-44); a30, Halo level opening, about 55 (39-60).
+- Render scale 1.0 (640x480): main menu 60; c10 about 24; b30 about 30; a30 about 40.
 
 ## Install
 
-1. Copy halo, halo_guest.elf, halo_extract.py and sdl_mapping.py into /userdata/roms/ports/halo/.
-2. Copy Halo.sh into /userdata/roms/ports/.
-3. Put your own Xbox Halo disc image (.iso) in /userdata/roms/ports/halo/.
-4. Launch from Ports. The first launch extracts maps/ (a few minutes).
-5. Quit: hold the hotkey (MENU or SELECT) and press START. Settings: halo/config.toml (display.render_scale, default 0.75). Log: halo/log.txt.
+1. Download halo-ce-knulli-<version>.zip from https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/releases/latest and unzip it onto the SD card's share partition (the one with the roms folder). It adds roms/ports/Halo.sh and roms/ports/halo/.
+2. Put your own Xbox Halo disc image (.iso) in roms/ports/halo/.
+3. Launch from Ports. The first launch copies maps/ out of the disc image with its progress on the screen (about four minutes), then the game sets up its cache (about a minute, black screen).
+4. Quit: hold the hotkey (MENU or SELECT) and press START. Settings: halo/config.toml (display.render_scale, default 0.75). Log: halo/log.txt.
 
 ## Build
 
 - Linux x86-64 (Ubuntu 24.04, WSL works) with python3, ninja-build, git, curl, clang 22 from apt.llvm.org (arm64_32 target), Android NDK r28c and gcc-aarch64-linux-gnu.
 - Copy libSDL2-2.0.so.0* and libmali.so.0* from the handheld's /usr/lib into a folder (link time only, never committed).
 - Run: ANDROID_NDK=/path/to/android-ndk-r28c SYSROOT_LIB=/path/to/libs ./build.sh
-- Output in dist/: halo, halo_guest.elf, Halo.sh, halo_extract.py, sdl_mapping.py.
+- Output in dist/: halo, halo_guest.elf, Halo.sh, halo_extract.py, halo_screen.py, sdl_mapping.py. The releases are built the same way.
 
 ## How it works
 
@@ -44,7 +43,7 @@
 ## Legal
 
 - Unofficial fan project, not affiliated with Microsoft, Xbox Game Studios, Halo Studios or Bungie. Halo and Xbox are trademarks of Microsoft Corporation.
-- No game files, disc images, maps, XBE, extracted assets, prebuilt game binaries, Mali driver or device libraries are included.
+- No game files, disc images, maps, XBE, extracted assets, Mali driver or device libraries are included, in the repository or in the releases. The releases hold only the port's own programs, built from this source.
 
 ## Links
 

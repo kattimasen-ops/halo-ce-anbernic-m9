@@ -436,3 +436,71 @@ b30 battle the game's thread is the limit: of its time, about 48% is
 drawing (the game's renderer and the Direct3D translation), 23% the game's
 tick (objects, AI, collision) and 14% waiting for the GL thread.
 [Roadmap](ROADMAP.md) keeps the current list of limits and planned work.
+
+## Upstream at c55e4e2b (2026-10-01)
+
+Rebasing the port onto upstream's latest (62 commits) cost a30 2 to 3 fps
+(51.3 and 52.0 against 53.8), all of it on the game's thread. Under the same
+host the previous game image ran a30 at 54.5 fps, so the cost was in the
+game: profiles of the two images showed `tag_block_get_element_with_size`,
+`object_get_and_verify_type` and `tag_get` taking 7% more of the game's
+thread. Upstream's release builds now check the assertions and log the
+failed ones (`release_assert_failed`, commit f15c1e26). Before, the
+expressions were only evaluated, and the compiler dropped the checks in
+those accessors, which the game calls thousands of times a frame. The
+Knulli build keeps the retail behaviour (nothing checked, the expressions
+still evaluated): a30 is back at 53.4 fps, b30's walk at 48.8, and the game
+image is 400 KB smaller. Upstream's high-res HUD (`display.high_res_hud`)
+took 77 MB more memory and about 1 fps in a30; the launcher writes it off
+in a new `config.toml`.
+
+## Entering a level (2026-10-01)
+
+The maps on the Xbox disc are compressed. Before a level is played, the
+game decompresses it into one of its cache files (`save/z/cache000.map` to
+`cache005.map`: two campaign levels, the main menu and three multiplayer
+maps) behind the loading screen, as the Xbox did to its hard disk
+([Architecture](ARCHITECTURE.md#system-calls-files-and-time)). Measured on
+the RG35XX H's card with a per-second log of `/proc/diskstats` and the
+kernel's dirty memory: about 150 MB read and 215 to 280 MB written, 20 to
+25 s of loading screen. The kernel keeps at most 50 to 70 MB of those
+writes in memory, and writes the last of them in the level's first
+seconds. On a card in good shape that costs nothing visible: the level
+starts at its usual frame rate.
+
+Benchmarks that entered one level after another right after a large copy
+to the card (the maps folder copied out and compared, 1.8 GB each way) saw
+the level start at 1 to 8 fps for 30 s or more, with the processors idle:
+the card was still taking in the earlier writes, at a fraction of its usual
+speed, and the level's reads waited behind them. A player can meet this on
+the first level after installing (the maps, then the game's 760 MB of cache
+files, are all written just before).
+
+Flushing the cache file at the end of the copy (`fdatasync` through the
+FUSE exFAT driver), so that the loading screen would wait for the card,
+was tried and is not in the port: with it, on a card in good shape, the
+level started at 1 to 9 fps for 5 to 20 s (three levels, against none
+without), with the disk idle and the kernel reclaiming memory. A plain
+`sync()` (the card's dirty pages, without the driver's flush) is still to
+be tried, with a card made busy on purpose.
+
+The rebase onto c55e4e2b had also turned off the checkpoint kept in memory
+([Architecture](ARCHITECTURE.md#system-calls-files-and-time)): it was under `HALO_LINUX`,
+which upstream no longer defines (4adc3a87), so each checkpoint wrote its
+16 MB to `save/z/savegame.bin` again, on the game's thread. It is back
+under `HALO_ANDROID`, and `tools/upstream_check.sh` now lists the macros the
+patch's preprocessor conditions test and warns about any that no `#define`
+in the sources and no `-D` in the build's scripts defines.
+
+The release's numbers (2026-10-01; the 5 s samples of the first minute
+after each level loaded, the level in the cache; the README's table):
+
+| Scene | 0.75 | 1.0 |
+| --- | --- | --- |
+| c10, opening | 31–44 (44 after the first minute) | 19–28 |
+| b30, beach battle | 35–44 | 28–34 |
+| a30, opening | 39–60 | 26–47 |
+
+The 640x480 column's previous measurement, on 2026-09-30's first builds,
+gave 20 to 26 fps; a30 at 1.0 has since doubled, with the GPU work the
+history above took out.

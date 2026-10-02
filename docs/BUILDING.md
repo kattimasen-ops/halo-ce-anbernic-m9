@@ -7,7 +7,8 @@ two libraries to copy from the handheld, what `build.sh` does at each of its
 stages, how rebuilds stay incremental, what the output is, and the errors
 you are most likely to meet with their fixes. The build was done on
 Ubuntu 24.04 under WSL. Nothing here needs the Xbox SDK, and the build uses
-no game files. To install the result on the handheld, see
+no game files; the [releases](https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/releases/latest) are built this way, from the
+published commit. To install the result on the handheld, see
 [Install](INSTALL.md); to change the code, see
 [Contributing](CONTRIBUTING-DEV.md).
 
@@ -178,14 +179,16 @@ fix ([Common errors](#common-errors)).
 - It replaces `port/knulli/` in the tree with this repository's copy.
 - It computes a hash of the patch and of every file in `port/knulli/`. If it
   differs from `work/source.stamp`, it deletes the host's objects
-  (`build/knulli/obj`), because `port/knulli/build.sh` rebuilds a host file
-  only when the file itself is newer than its object, not when a header it
-  includes changed.
+  (`build/knulli/obj`): `port/knulli/build.sh` rebuilds an object when its
+  source, a header it included, the script or the compiler's options
+  change, but not when a new header would now be found before another on
+  the include path.
 
 **3. Gets the SDL2 headers** (`release-2.30.12`), if `work/sdl2-include`
 lacks them.
 
-**4. Configures upstream**, if `build.ninja` is missing:
+**4. Configures upstream**, if `build.ninja` is missing or was made for
+another upstream commit (`work/configured.commit`):
 
 ```sh
 python3 configure.py --release --android-ndk "$ANDROID_NDK" \
@@ -210,7 +213,9 @@ the Android guest; without a network connection `configure.py` leaves it out.
    `build/knulli/gl_include/`, and the device's libraries as `libSDL2.so` and
    `libmali.so` into `build/knulli/lib/`.
 3. It compiles the host with
-   `-O2 -g -mcpu=cortex-a53 -fPIC -Wall -Wno-unused-function -D_GNU_SOURCE`:
+   `-O2 -g -mcpu=cortex-a53 -fPIC -Wall -Wno-unused-function -D_GNU_SOURCE`
+   (and `-ffile-prefix-map`, so that the debug information names the tree
+   and the SDL2 headers by relative names):
    upstream's Android host files `host_debug.c`, `host_gl.c`,
    `host_loader.c`, `host_memory.c`, `host_syscall.c` and `host_thread.c`;
    the Knulli files `host_main.c`, `host_sdl2.c`, `host_profile.c`,
@@ -226,8 +231,8 @@ the Android guest; without a network connection `configure.py` leaves it out.
    and copies `build/android/halo_guest.elf` beside it.
 
 **6. Copies the results** into `dist/`: `halo`, `halo_guest.elf`, `Halo.sh`,
-`halo_extract.py` and `sdl_mapping.py`, with mode 755 on all but the guest
-image, and lists them.
+`halo_extract.py`, `halo_screen.py` and `sdl_mapping.py`, with mode 755, and
+lists them.
 
 ## The output
 
@@ -237,6 +242,7 @@ dist/
 ├── halo_guest.elf    the game (static ILP32 AArch64 image)
 ├── Halo.sh           the launcher
 ├── halo_extract.py   the maps extractor
+├── halo_screen.py    the launcher's messages and progress on the screen
 └── sdl_mapping.py    the controller mapping
 ```
 
@@ -262,8 +268,10 @@ Run `./build.sh` again. It is incremental:
   exactly the current patch, so unchanged files keep their times and ninja
   rebuilds only what changed.
 - The guest is rebuilt by ninja from its dependencies.
-- The host's objects are rebuilt when their source is newer, and all of
-  them when the patch or `port/knulli/` changed (the stamp above).
+- The host's objects are rebuilt when their source, a header they
+  included, `port/knulli/build.sh` or the compiler's options change, and
+  all of them when the patch or `port/knulli/` changed (the stamp above).
+- `configure.py` runs again when `UPSTREAM_COMMIT` names another commit.
 
 **Edits in `work/` are lost** when `build.sh` resets the tree. After changing
 an upstream file in `work/halo-ce-universal`, regenerate the patch before

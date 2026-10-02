@@ -780,10 +780,10 @@ index baa28789..26522655 100644
  #define HALO_GUEST_ABI_VERSION 1
  
 diff --git a/port/linux/include/halo_linux_source_fixups.h b/port/linux/include/halo_linux_source_fixups.h
-index dba15252..91c2c0d2 100644
+index 9f8dc6bc..81fbae12 100644
 --- a/port/linux/include/halo_linux_source_fixups.h
 +++ b/port/linux/include/halo_linux_source_fixups.h
-@@ -34,6 +34,10 @@ struct observer_result const *render_interpolation_camera(short local_player_ind
+@@ -35,6 +35,10 @@ struct observer_result const *render_interpolation_camera(short local_player_ind
  void render_interpolation_first_person(short local_player_index, struct real_matrix4x3 *node_matrices,
  	short node_count, struct render_camera const *camera);
  float render_interpolation_game_time_sec(long ticks);
@@ -795,7 +795,7 @@ index dba15252..91c2c0d2 100644
  /* the width of the screen the game draws, 480 lines tall: the device's or
  the display's shape, or 640 (port/linux/src/d3d8_gl.c) */
 diff --git a/port/linux/src/d3d8_gl.c b/port/linux/src/d3d8_gl.c
-index 36c5f238..a44af0cb 100644
+index 04ef8332..87dbbcac 100644
 --- a/port/linux/src/d3d8_gl.c
 +++ b/port/linux/src/d3d8_gl.c
 @@ -25,8 +25,11 @@ Conventions carried over from the Xbox:
@@ -2574,11 +2574,14 @@ index 36c5f238..a44af0cb 100644
  /* ---------- per-draw state */
  
  static unsigned long stage_texture_mode(int stage)
-@@ -1988,11 +3186,51 @@ static GLenum address_mode(DWORD mode)
+@@ -1988,14 +3186,54 @@ static GLenum address_mode(DWORD mode)
  	}
  }
  
--static void configure_sampler(int stage, BOOL mipmapped)
+-/* hires: a high-res HUD texture (hud_hires.h), drawn smaller than it is, so
+-filtered and from its mip levels whatever the game asks: the HUD's meters are
+-point sampled for one player, to keep the Xbox bitmaps' texels sharp */
+-static void configure_sampler(int stage, BOOL mipmapped, BOOL hires)
 +#ifdef HALO_ANDROID
 +/* ES: a sampler object for each distinct configuration, made once and bound
 +thereafter. Changing the parameters of a bound sampler makes Mali build the
@@ -2587,13 +2590,13 @@ index 36c5f238..a44af0cb 100644
 +
 +static struct
 +{
-+	DWORD inputs[10];
++	DWORD inputs[11];
 +	GLuint sampler;
 +} sampler_cache[SAMPLER_CACHE_SIZE];
 +
-+static GLuint sampler_for(const DWORD inputs[10], BOOL *created)
++static GLuint sampler_for(const DWORD inputs[11], BOOL *created)
 +{
-+	unsigned long hash = hash_words(inputs, 10 * sizeof(DWORD)), probe;
++	unsigned long hash = hash_words(inputs, 11 * sizeof(DWORD)), probe;
 +
 +	*created = FALSE;
 +	for (probe = 0; probe < SAMPLER_CACHE_SIZE; probe++)
@@ -2617,19 +2620,22 @@ index 36c5f238..a44af0cb 100644
 +#endif
 +
 +/* configures the stage's sampler from its texture stage state; returns the
-+sampler to bind */
-+static GLuint configure_sampler(int stage, BOOL mipmapped)
++sampler to bind. hires: a high-res HUD texture (hud_hires.h), drawn smaller
++than it is, so filtered and from its mip levels whatever the game asks: the
++HUD's meters are point sampled for one player, to keep the Xbox bitmaps'
++texels sharp */
++static GLuint configure_sampler(int stage, BOOL mipmapped, BOOL hires)
  {
  	/* the texture stage state each sampler was last configured from */
- 	static DWORD configured[D3DTSS_MAXSTAGES][10];
+ 	static DWORD configured[D3DTSS_MAXSTAGES][11];
  	static BOOL configured_valid[D3DTSS_MAXSTAGES];
 +	static GLuint configured_sampler[D3DTSS_MAXSTAGES];
  	GLuint sampler = device.samplers[stage];
  	DWORD *state = D3D__TextureState[stage];
- 	DWORD min_filter = state[D3DTSS_MINFILTER];
-@@ -2012,9 +3250,23 @@ static void configure_sampler(int stage, BOOL mipmapped)
- 	inputs[8] = state[D3DTSS_MAXANISOTROPY];
+ 	DWORD min_filter = hires ? D3DTEXF_LINEAR : state[D3DTSS_MINFILTER];
+@@ -2019,9 +3257,23 @@ static void configure_sampler(int stage, BOOL mipmapped, BOOL hires)
  	inputs[9] = state[D3DTSS_BORDERCOLOR];
+ 	inputs[10] = hires;
  	if (configured_valid[stage] && !memcmp(configured[stage], inputs, sizeof(inputs)))
 -		return;
 +		return configured_sampler[stage];
@@ -2652,7 +2658,7 @@ index 36c5f238..a44af0cb 100644
  
  	if (min_filter == D3DTEXF_POINT)
  		minification = mip_filter == D3DTEXF_NONE ? GL_NEAREST :
-@@ -2047,6 +3299,7 @@ static void configure_sampler(int stage, BOOL mipmapped)
+@@ -2054,6 +3306,7 @@ static void configure_sampler(int stage, BOOL mipmapped, BOOL hires)
  	color_to_vec4(state[D3DTSS_BORDERCOLOR], border);
  	glSamplerParameterfv(sampler, GL_TEXTURE_BORDER_COLOR, border);
  #endif
@@ -2660,7 +2666,7 @@ index 36c5f238..a44af0cb 100644
  }
  
  
-@@ -2062,31 +3315,60 @@ struct mip_composite
+@@ -2069,31 +3322,60 @@ struct mip_composite
  	struct mip_composite *next;
  	unsigned long data, width, height, levels;
  	GLuint texture;
@@ -2727,7 +2733,7 @@ index 36c5f238..a44af0cb 100644
  static GLuint mip_composite_get(const struct xgpu_texture_description *description, unsigned long data)
  {
  	struct mip_composite *composite;
-@@ -2121,6 +3403,11 @@ static GLuint mip_composite_get(const struct xgpu_texture_description *descripti
+@@ -2128,6 +3410,11 @@ static GLuint mip_composite_get(const struct xgpu_texture_description *descripti
  		composite->next = mip_composites;
  		mip_composites = composite;
  	}
@@ -2739,7 +2745,7 @@ index 36c5f238..a44af0cb 100644
  	for (level = 0; level < description->levels; level++)
  	{
  		unsigned long width = description->width >> level ? description->width >> level : 1;
-@@ -2131,16 +3418,29 @@ static GLuint mip_composite_get(const struct xgpu_texture_description *descripti
+@@ -2138,16 +3425,29 @@ static GLuint mip_composite_get(const struct xgpu_texture_description *descripti
  		if (!target || target->width != width || target->height != height ||
  			target->gl_width != width || target->gl_height != height)
  			break;
@@ -2771,7 +2777,7 @@ index 36c5f238..a44af0cb 100644
  	}
  	glBindTexture(GL_TEXTURE_2D, composite->texture);
  	/* levels the game did not render come from the ones it did */
-@@ -2154,10 +3454,72 @@ static GLuint mip_composite_get(const struct xgpu_texture_description *descripti
+@@ -2161,10 +3461,78 @@ static GLuint mip_composite_get(const struct xgpu_texture_description *descripti
  	return composite->texture;
  }
  
@@ -2833,6 +2839,11 @@ index 36c5f238..a44af0cb 100644
 +
 +/* the draw's textures bound: whether they could all be (a texture being
 +uploaded the first time, xbox_textures.c, cannot) */
++/* the stages bind_textures gave a high-res HUD texture (hud_hires.h): drawn
++without the game's LOD bias, in the sampler (configure_sampler) and in the
++pixel shader (texture_lod_bias) */
++static BOOL bound_hires[D3DTSS_MAXSTAGES];
++
 +static BOOL bind_textures(struct nv2a_pixel_shader_key *key, float texture_scale[4][4])
  {
 +	GLuint textures[D3DTSS_MAXSTAGES];
@@ -2840,12 +2851,13 @@ index 36c5f238..a44af0cb 100644
 +	unsigned long levels[D3DTSS_MAXSTAGES];
  	int stage;
  
++	memset(bound_hires, 0, sizeof(bound_hires));
 +	/* every stage's texture first: an upload or a copy made for one binds
 +	on the active unit, and would unbind a stage bound before it */
  	for (stage = 0; stage < D3DTSS_MAXSTAGES; stage++)
  	{
  		D3DBaseTexture *texture = device.textures[stage];
-@@ -2165,9 +3527,12 @@ static void bind_textures(struct nv2a_pixel_shader_key *key, float texture_scale
+@@ -2172,9 +3540,12 @@ static void bind_textures(struct nv2a_pixel_shader_key *key, float texture_scale
  
  		texture_scale[stage][0] = texture_scale[stage][1] = 1.0f;
  		texture_scale[stage][2] = texture_scale[stage][3] = 1.0f;
@@ -2859,7 +2871,7 @@ index 36c5f238..a44af0cb 100644
  			key->sampler_type[stage] = mode == 0x11 ? _xgpu_sampler_2d : _xgpu_sampler_none;
  			continue;
  		}
-@@ -2199,20 +3564,89 @@ static void bind_textures(struct nv2a_pixel_shader_key *key, float texture_scale
+@@ -2206,22 +3577,92 @@ static void bind_textures(struct nv2a_pixel_shader_key *key, float texture_scale
  					(const D3DCOLOR *)PLATFORM_PHYSICAL_TO_VIRTUAL(device.palettes[stage]->Data) : NULL;
  
  				gl_texture = xgpu_texture_get((const DWORD *)texture, palette, &gl_target, &description);
@@ -2874,10 +2886,13 @@ index 36c5f238..a44af0cb 100644
  			}
 -			state_texture(stage, gl_target, gl_texture);
 -			state_sampler(stage, device.samplers[stage]);
--			configure_sampler(stage, description.levels > 1);
+-			configure_sampler(stage, description.levels > 1, description.hires);
 +			textures[stage] = gl_texture;
 +			targets[stage] = gl_target;
 +			levels[stage] = description.levels;
++			bound_hires[stage] = description.hires;
+ 			if (stage == 0)
+ 				key->coverage_alpha = description.hires_coverage != FALSE;
  			key->sampler_type[stage] = gl_target == GL_TEXTURE_CUBE_MAP ? _xgpu_sampler_cube :
  				gl_target == GL_TEXTURE_3D ? _xgpu_sampler_3d : _xgpu_sampler_2d;
  		}
@@ -2889,7 +2904,7 @@ index 36c5f238..a44af0cb 100644
 +		else if (!debug_frozen("textures"))
 +		{
 +			state_texture(stage, targets[stage], textures[stage]);
-+			state_sampler(stage, configure_sampler(stage, levels[stage] > 1));
++			state_sampler(stage, configure_sampler(stage, levels[stage] > 1, bound_hires[stage]));
 +		}
 +	}
 +	return TRUE;
@@ -2952,7 +2967,7 @@ index 36c5f238..a44af0cb 100644
  
  static GLenum stencil_operation(DWORD operation)
  {
-@@ -2257,6 +3691,12 @@ static void apply_raster_state(BOOL has_depth)
+@@ -2266,6 +3707,12 @@ static void apply_raster_state(BOOL has_depth)
  	what keeps a split-screen window's geometry from bleeding across the divider */
  	/* (glScissor takes the corner and the size, as glViewport does) */
  	memcpy(scissor, viewport, sizeof(scissor));
@@ -2965,7 +2980,7 @@ index 36c5f238..a44af0cb 100644
  	if (memcmp(gl_state.scissor, scissor, sizeof(scissor)))
  	{
  		memcpy(gl_state.scissor, scissor, sizeof(scissor));
-@@ -2417,13 +3857,10 @@ static void apply_raster_state(BOOL has_depth)
+@@ -2426,13 +3873,10 @@ static void apply_raster_state(BOOL has_depth)
  each draw instead, reporting each distinct error a few times */
  static void gl_check_errors(const char *where)
  {
@@ -2980,11 +2995,10 @@ index 36c5f238..a44af0cb 100644
  		return;
  	while ((error = glGetError()) != GL_NO_ERROR)
  	{
-@@ -2443,7 +3880,166 @@ static DWORD draw_uniform_inputs[DRAW_UNIFORM_INPUT_COUNT];
+@@ -2452,6 +3896,165 @@ static DWORD draw_uniform_inputs[DRAW_UNIFORM_INPUT_COUNT];
  static struct draw_uniforms draw_uniforms;
  static unsigned long draw_uniforms_serial;
  
--/* sets a program's uniform unless it already holds value */
 +#ifdef HALO_ANDROID
 +/* The vertex constants of a program that reads many of them, from a uniform
 +block (nv2a_vertex_shader_to_glsl): the registers as this draw sees them are
@@ -3144,11 +3158,10 @@ index 36c5f238..a44af0cb 100644
 +
 +#endif
 +
-+/* sets a program's uniform unless it already holds value */
+ /* sets a program's uniform unless it already holds value */
  static void uniform_vec4(GLint location, float *shadow, const float *value, int count)
  {
- 	if (location < 0 || !memcmp(shadow, value, (size_t)count * 4 * sizeof(float)))
-@@ -2460,6 +4056,47 @@ static void uniform_float(GLint location, float *shadow, float value)
+@@ -2469,6 +4072,47 @@ static void uniform_float(GLint location, float *shadow, float value)
  	glUniform1f(location, value);
  }
  
@@ -3196,7 +3209,7 @@ index 36c5f238..a44af0cb 100644
  static struct program_entry *prepare_draw(BOOL immediate)
  {
  	struct vertex_shader_object *program = current_program();
-@@ -2468,12 +4105,20 @@ static struct program_entry *prepare_draw(BOOL immediate)
+@@ -2477,12 +4121,20 @@ static struct program_entry *prepare_draw(BOOL immediate)
  	struct draw_uniforms uniforms;
  	BOOL has_depth = FALSE;
  	int stage;
@@ -3217,7 +3230,7 @@ index 36c5f238..a44af0cb 100644
  	{
  		const char *skip = debug_settings.skip_vertex_shaders;
  
-@@ -2491,7 +4136,8 @@ static struct program_entry *prepare_draw(BOOL immediate)
+@@ -2500,7 +4152,8 @@ static struct program_entry *prepare_draw(BOOL immediate)
  		stats.skipped_no_target++;
  		return NULL;
  	}
@@ -3227,7 +3240,7 @@ index 36c5f238..a44af0cb 100644
  
  	memset(&key, 0, sizeof(key));
  	memcpy(key.combiner_state, D3D__RenderState, sizeof(key.combiner_state));
-@@ -2500,7 +4146,11 @@ static struct program_entry *prepare_draw(BOOL immediate)
+@@ -2509,7 +4162,11 @@ static struct program_entry *prepare_draw(BOOL immediate)
  	key.combiner_state[D3DRS_PSFINALCOMBINERCONSTANT0] = 0;
  	key.combiner_state[D3DRS_PSFINALCOMBINERCONSTANT1] = 0;
  	key.texture_modes = D3D__RenderState[D3DRS_PSTEXTUREMODES];
@@ -3240,7 +3253,7 @@ index 36c5f238..a44af0cb 100644
  	for (stage = 0; stage < D3DTSS_MAXSTAGES; stage++)
  	{
  		key.alpha_kill[stage] = D3D__TextureState[stage][D3DTSS_ALPHAKILL] == D3DTALPHAKILL_ENABLE;
-@@ -2511,27 +4161,64 @@ static struct program_entry *prepare_draw(BOOL immediate)
+@@ -2524,27 +4181,64 @@ static struct program_entry *prepare_draw(BOOL immediate)
  	key.fog_table_mode = (unsigned char)D3D__RenderState[D3DRS_FOGTABLEMODE];
  #ifdef HALO_ANDROID
  	key.count_samples = device.visibility_test_active && xgpu_capabilities.atomic_counters;
@@ -3307,12 +3320,21 @@ index 36c5f238..a44af0cb 100644
  	if (entry->constants >= 0 && entry->constants_serial != constants_serial)
  	{
  		unsigned long first = entry->constant_count, last = 0, index;
-@@ -2646,30 +4333,21 @@ static struct program_entry *prepare_draw(BOOL immediate)
+@@ -2622,7 +4316,7 @@ static struct program_entry *prepare_draw(BOOL immediate)
+ 			inputs[count++] = state[D3DTSS_BUMPENVMAT11];
+ 			inputs[count++] = state[D3DTSS_BUMPENVLSCALE];
+ 			inputs[count++] = state[D3DTSS_BUMPENVLOFFSET];
+-			inputs[count++] = state[D3DTSS_MIPMAPLODBIAS];
++			inputs[count++] = bound_hires[stage] ? 0 : state[D3DTSS_MIPMAPLODBIAS];
+ 		}
+ 		if (!draw_uniforms_serial || memcmp(inputs, draw_uniform_inputs, sizeof(inputs)))
+ 		{
+@@ -2659,30 +4353,21 @@ static struct program_entry *prepare_draw(BOOL immediate)
  				converted->bump_luminance[stage][0] = dword_to_float(state[D3DTSS_BUMPENVLSCALE]);
  				converted->bump_luminance[stage][1] = dword_to_float(state[D3DTSS_BUMPENVLOFFSET]);
  				converted->bump_luminance[stage][2] = converted->bump_luminance[stage][3] = 0.0f;
 -				converted->texture_lod_bias[stage] = dword_to_float(state[D3DTSS_MIPMAPLODBIAS]);
-+				converted->texture_lod_bias[stage] = dword_to_float(state[D3DTSS_MIPMAPLODBIAS])
++				converted->texture_lod_bias[stage] = (bound_hires[stage] ? 0.0f : dword_to_float(state[D3DTSS_MIPMAPLODBIAS]))
 +#ifdef HALO_ANDROID
 +					/* debug.lod_bias */
 +					+ debug_settings.lod_bias
@@ -3348,7 +3370,7 @@ index 36c5f238..a44af0cb 100644
  	return entry;
  }
  
-@@ -2876,6 +4554,10 @@ static BOOL mirror_refresh(unsigned long first, unsigned long last)
+@@ -2889,6 +4574,10 @@ static BOOL mirror_refresh(unsigned long first, unsigned long last)
  		}
  		address = PLATFORM_CONTIGUOUS_BASE + page * MIRROR_PAGE_SIZE;
  		size = (run - page) * MIRROR_PAGE_SIZE;
@@ -3359,7 +3381,7 @@ index 36c5f238..a44af0cb 100644
  		/* protect first, so a write racing with the upload is noticed */
  		memory_watch_protect(address, size);
  		for (; page < run; page++)
-@@ -2951,7 +4633,11 @@ static BOOL mirror_range(unsigned long address, unsigned long size, GLuint *buff
+@@ -2964,7 +4653,11 @@ static BOOL mirror_range(unsigned long address, unsigned long size, GLuint *buff
  	}
  	if (!present || memory_watch_generation(address, size) > oldest)
  	{
@@ -3372,7 +3394,7 @@ index 36c5f238..a44af0cb 100644
  			return FALSE;
  		for (newest = 0, page = first; page < last; page++)
  		{
-@@ -3022,49 +4708,125 @@ static void stream_reserve(unsigned long size)
+@@ -3035,49 +4728,125 @@ static void stream_reserve(unsigned long size)
  {
  	if (device.stream_offset + size > STREAM_BUFFER_SIZE)
  	{
@@ -3439,9 +3461,9 @@ index 36c5f238..a44af0cb 100644
 +	bound again after the room is made, as held draws drawn meanwhile can
 +	have moved the stream on into the spare (stream_reserve), and the write
 +	is flushed in the bound buffer */
- 	state_array_buffer(device.stream_buffer);
-+	stream_reserve(rounded);
 +	state_array_buffer(device.stream_buffer);
++	stream_reserve(rounded);
+ 	state_array_buffer(device.stream_buffer);
 +	offset = device.stream_offset;
 +	/* (the data's own bytes: past them is not the caller's) */
  #ifdef HALO_ANDROID
@@ -3515,7 +3537,7 @@ index 36c5f238..a44af0cb 100644
  		return stream_upload(data, size);
  	if (scratch_size < size)
  	{
-@@ -3073,39 +4835,40 @@ static unsigned long stream_upload_swizzled(const struct vertex_shader_object *d
+@@ -3086,39 +4855,40 @@ static unsigned long stream_upload_swizzled(const struct vertex_shader_object *d
  		scratch = malloc(scratch_size);
  	}
  	memcpy(scratch, data, size);
@@ -3573,7 +3595,7 @@ index 36c5f238..a44af0cb 100644
  	return offset;
  }
  
-@@ -3143,24 +4906,22 @@ static void attribute_format(const struct vertex_element *element, GLint *size,
+@@ -3156,24 +4926,22 @@ static void attribute_format(const struct vertex_element *element, GLint *size,
  /* upload vertices [first, first + count) of every stream the declaration
  uses and point the attributes at them; attribute data then starts at
  vertex 0 of the uploaded range */
@@ -3610,7 +3632,7 @@ index 36c5f238..a44af0cb 100644
  	struct vertex_shader_object *declaration = device.vertex_shader;
  	GLuint stream_buffers[16];
  	unsigned long stream_offsets[16];
-@@ -3190,6 +4951,21 @@ static void setup_streams(unsigned long first, unsigned long count)
+@@ -3203,6 +4971,21 @@ static void setup_streams(unsigned long first, unsigned long count)
  		stream_buffers[stream] = 0;
  		total += (bytes + 15) & ~15UL;
  	}
@@ -3632,7 +3654,7 @@ index 36c5f238..a44af0cb 100644
  	stream_reserve(total);
  	for (index = 0; index < declaration->element_count; index++)
  	{
-@@ -3233,6 +5009,7 @@ static void setup_streams(unsigned long first, unsigned long count)
+@@ -3246,6 +5029,7 @@ static void setup_streams(unsigned long first, unsigned long count)
  		if (!enabled[index])
  			state_attribute_value(index, declaration->packed_mask & (1UL << index) ? NULL : device.attributes[index]);
  	}
@@ -3640,7 +3662,7 @@ index 36c5f238..a44af0cb 100644
  }
  
  static GLenum primitive_mode(D3DPRIMITIVETYPE type)
-@@ -3290,13 +5067,287 @@ void WINAPI D3DDevice_SetIndices(D3DIndexBuffer *index_data, UINT base_vertex_in
+@@ -3303,13 +5087,287 @@ void WINAPI D3DDevice_SetIndices(D3DIndexBuffer *index_data, UINT base_vertex_in
  	D3D__IndexData = index_data ? (WORD *)index_data->Data : NULL;
  }
  
@@ -3931,7 +3953,7 @@ index 36c5f238..a44af0cb 100644
  	{
  		unsigned long count;
  		WORD *indices = quad_indices(NULL, vertex_count, &count);
-@@ -3312,15 +5363,414 @@ void WINAPI D3DDevice_DrawVertices(D3DPRIMITIVETYPE primitive_type, UINT start_v
+@@ -3325,15 +5383,414 @@ void WINAPI D3DDevice_DrawVertices(D3DPRIMITIVETYPE primitive_type, UINT start_v
  	gl_check_errors("draw");
  }
  
@@ -4321,8 +4343,7 @@ index 36c5f238..a44af0cb 100644
 +#ifdef HALO_ANDROID
 +	BOOL instancing;
 +#endif
- 
--	if (!vertex_count || !index_data || !prepare_draw(FALSE))
++
 +	draw_caller_count(DRAW_CALLER(), vertex_count);
 +#ifdef HALO_ANDROID
 +	if (debug_settings.draw_callers >= 3 && draw_signature_count(primitive_type, vertex_count, index_data))
@@ -4337,7 +4358,8 @@ index 36c5f238..a44af0cb 100644
 +#else
 +	batch_flush();
 +#endif
-+
+ 
+-	if (!vertex_count || !index_data || !prepare_draw(FALSE))
 +	device.drawing_points = primitive_type == D3DPT_POINTLIST;
 +	entry = vertex_count && index_data ? prepare_draw(FALSE) : NULL;
 +#ifdef HALO_ANDROID
@@ -4347,7 +4369,7 @@ index 36c5f238..a44af0cb 100644
  		return;
  	/* quads are drawn as triangles, from indices made for the draw */
  	mirrored = primitive_type != D3DPT_QUADLIST &&
-@@ -3331,15 +5781,40 @@ void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type, UINT
+@@ -3344,15 +5801,40 @@ void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type, UINT
  	index_extent(index_data, vertex_count, generation, mirrored, &minimum, &maximum);
  	trace_draw("indexed", primitive_type, vertex_count, NULL);
  	/* (the streams from the base vertex on: index i is vertex base + i) */
@@ -4391,7 +4413,7 @@ index 36c5f238..a44af0cb 100644
  	stats.streamed_bytes += vertex_count * sizeof(WORD);
  	count = vertex_count;
  	if (primitive_type == D3DPT_QUADLIST)
-@@ -3363,11 +5838,151 @@ void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type, UINT
+@@ -3376,11 +5858,151 @@ void WINAPI D3DDevice_DrawIndexedVertices(D3DPRIMITIVETYPE primitive_type, UINT
  	}
  #endif
  	(void)index;
@@ -4545,7 +4567,7 @@ index 36c5f238..a44af0cb 100644
  /* ---------- immediate mode */
  
  void WINAPI D3DDevice_Begin(D3DPRIMITIVETYPE primitive_type)
-@@ -3397,7 +6012,10 @@ void WINAPI D3DDevice_End(void)
+@@ -3410,7 +6032,10 @@ void WINAPI D3DDevice_End(void)
  	unsigned long offset, index, count = device.immediate_count;
  	D3DPRIMITIVETYPE type = device.immediate_type;
  
@@ -4556,7 +4578,7 @@ index 36c5f238..a44af0cb 100644
  	if (!count || !prepare_draw(TRUE))
  		return;
  	trace_draw("immediate", type, count, device.immediate_vertices);
-@@ -3567,7 +6185,7 @@ static void write_screenshot(struct render_target_entry *target)
+@@ -3580,7 +6205,7 @@ static void write_screenshot(struct render_target_entry *target)
  	if (!directory)
  		return;
  	pixels = malloc(image_size);
@@ -4565,7 +4587,7 @@ index 36c5f238..a44af0cb 100644
  	glReadPixels(0, 0, (GLsizei)width, (GLsizei)height, GL_BGRA, GL_UNSIGNED_BYTE, pixels);
  	/* the display ignores destination alpha, which the game uses as scratch;
  	image viewers would show it as transparency */
-@@ -3601,6 +6219,19 @@ static void write_screenshot(struct render_target_entry *target)
+@@ -3614,6 +6239,19 @@ static void write_screenshot(struct render_target_entry *target)
  	free(pixels);
  }
  
@@ -4585,7 +4607,7 @@ index 36c5f238..a44af0cb 100644
  void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destination_rectangle,
  	void *unused, void *unused2)
  {
-@@ -3612,11 +6243,15 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
+@@ -3625,11 +6263,15 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
  	(void)unused2;
  	if (screenshot_every < 0)
  		screenshot_every = config_integer("debug.screenshot_every");
@@ -4601,7 +4623,7 @@ index 36c5f238..a44af0cb 100644
  
  		if (trace_frame())
  			platform_log("present back buffer %08lx texture %u", (unsigned long)device.back_buffer.Data,
-@@ -3635,12 +6270,23 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
+@@ -3648,12 +6290,23 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
  		}
  		x = (window_width - width) / 2;
  		y = (window_height - height) / 2;
@@ -4626,7 +4648,7 @@ index 36c5f238..a44af0cb 100644
  		/* row 0 of the render target is the top of the picture */
  		glBlitFramebuffer(0, 0, (GLint)back_buffer->target.gl_width, (GLint)back_buffer->target.gl_height,
  			x, y + height, x + width, y, GL_COLOR_BUFFER_BIT, GL_LINEAR);
-@@ -3648,12 +6294,19 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
+@@ -3661,12 +6314,19 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
  		xgpu_gl_state_invalidate();
  		xgpu_texture_cache_begin_frame();
  #ifdef HALO_ANDROID
@@ -4646,7 +4668,7 @@ index 36c5f238..a44af0cb 100644
  		device.index_offset = 0;
  #else
  		device.stream_offset = STREAM_BUFFER_SIZE; /* orphan next frame */
-@@ -3664,12 +6317,23 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
+@@ -3677,12 +6337,23 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
  	stats.presents++;
  	if (debug_settings.statistics && device.frame % 60 == 0)
  	{
@@ -4672,7 +4694,7 @@ index 36c5f238..a44af0cb 100644
  	}
  	platform_pump_events();
  
-@@ -3688,6 +6352,8 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
+@@ -3701,6 +6372,8 @@ void WINAPI D3DDevice_Present(CONST RECT *source_rectangle, CONST RECT *destinat
  		pending_flips++;
  	}
  	pthread_mutex_unlock(&vertical_blank_lock);
@@ -4762,7 +4784,7 @@ index 578e0567..c5a2fd19 100644
  #define glShaderSource halo_glShaderSource
  #define glCompileShader halo_glCompileShader
 diff --git a/port/linux/src/nv2a_psh.c b/port/linux/src/nv2a_psh.c
-index 5223c9ab..bef36f9b 100644
+index bbea0de6..ccde29f2 100644
 --- a/port/linux/src/nv2a_psh.c
 +++ b/port/linux/src/nv2a_psh.c
 @@ -18,7 +18,6 @@ Register values are clamped to [-1, 1] between stages, as on the hardware.
@@ -5305,10 +5327,10 @@ index bfb1a7b1..460c3bbf 100644
  	return text.buffer;
  }
 diff --git a/port/linux/src/port_config.c b/port/linux/src/port_config.c
-index 004871e3..f9634f4b 100644
+index addf80e4..40d9672d 100644
 --- a/port/linux/src/port_config.c
 +++ b/port/linux/src/port_config.c
-@@ -73,11 +73,29 @@ static const struct config_setting config_settings[] =
+@@ -73,6 +73,19 @@ static const struct config_setting config_settings[] =
  	{ "display.screen_width", _config_integer, "0", "HALO_SCREEN_WIDTH", _environment_value, _platform_android,
  		"Columns of the 480-line picture: 0 for the display's shape, 640 for the\n"
  		"Xbox's 4:3." },
@@ -5328,8 +5350,10 @@ index 004871e3..f9634f4b 100644
  	{ "display.vsync", _config_boolean, "true", "HALO_NO_VSYNC", _environment_set_is_false, _platform_all,
  		"Wait for the display between frames; false draws as fast as possible." },
  	{ "display.interpolation", _config_boolean, "true", "HALO_INTERPOLATION", _environment_value, _platform_all,
- 		"Draw a frame for every display refresh, blending between the game's 30\n"
- 		"ticks a second; false keeps the original 30 frames a second." },
+@@ -86,6 +99,11 @@ static const struct config_setting config_settings[] =
+ 		"Draw the HUD (meters, counters, panels, motion sensor, reticles,\n"
+ 		"waypoints, scopes) from the high-res assets (8x the maps' bitmaps);\n"
+ 		"false draws the maps' own bitmaps." },
 +	{ "display.frame_pacing", _config_boolean, "true", "HALO_FRAME_PACING", _environment_value, _platform_android,
 +		"Show each frame at the display refresh it was drawn for, holding one that\n"
 +		"is ready early, so that motion advances as the screen shows it (the\n"
@@ -5338,7 +5362,7 @@ index 004871e3..f9634f4b 100644
  
  	{ "audio.enabled", _config_boolean, "true", "HALO_NO_AUDIO", _environment_set_is_false, _platform_all,
  		"Play sound." },
-@@ -213,6 +231,51 @@ static const struct config_setting config_settings[] =
+@@ -245,6 +263,51 @@ static const struct config_setting config_settings[] =
  	{ "debug.sample_seconds", _config_real, "0.0", "HALO_SAMPLE", _environment_value, _platform_android,
  		"Log where every game thread is this often, in seconds (read by the\n"
  		"app, port/android/host/host_debug.c); 0 never." },
@@ -5468,18 +5492,18 @@ index 04fc3267..b20400b4 100644
  }
  
 diff --git a/port/linux/src/xbox_textures.c b/port/linux/src/xbox_textures.c
-index 9bdcdc99..ef8a9ef0 100644
+index 4d0ac81d..ad87b98e 100644
 --- a/port/linux/src/xbox_textures.c
 +++ b/port/linux/src/xbox_textures.c
-@@ -17,6 +17,7 @@ memory_watch.c detects that by write-protecting the pages.
- #include "xgpu.h"
+@@ -18,6 +18,7 @@ memory_watch.c detects that by write-protecting the pages.
+ #include "hud_hires.h"
  #include "port_config.h"
  
 +#include <pthread.h>
  #include <stdio.h>
  #ifdef HALO_ANDROID
  #define GL_BGRA GL_RGBA
-@@ -418,14 +419,11 @@ static unsigned long mix(unsigned long a, unsigned long b, unsigned long weight_
+@@ -419,14 +420,11 @@ static unsigned long mix(unsigned long a, unsigned long b, unsigned long weight_
  	return result | 0xff000000UL;
  }
  
@@ -5496,7 +5520,7 @@ index 9bdcdc99..ef8a9ef0 100644
  
  	palette[0] = color565(c0);
  	palette[1] = color565(c1);
-@@ -439,6 +437,21 @@ static void dxt_color_block(const unsigned char *block, BOOL dxt1, unsigned long
+@@ -440,6 +438,21 @@ static void dxt_color_block(const unsigned char *block, BOOL dxt1, unsigned long
  		palette[2] = mix(palette[0], palette[1], 1, 1, 2);
  		palette[3] = 0;
  	}
@@ -5518,7 +5542,7 @@ index 9bdcdc99..ef8a9ef0 100644
  	for (index = 0; index < 16; index++)
  		colors[index] = palette[(bits >> (index * 2)) & 3];
  }
-@@ -454,9 +467,12 @@ static void dxt_decode_level(unsigned char kind, const unsigned char *source, un
+@@ -455,9 +468,12 @@ static void dxt_decode_level(unsigned char kind, const unsigned char *source, un
  	{
  		for (by = 0; by < blocks_y; by++)
  		{
@@ -5531,7 +5555,7 @@ index 9bdcdc99..ef8a9ef0 100644
  				unsigned long colors[16];
  				unsigned long alpha[16];
  				int index;
-@@ -501,18 +517,13 @@ static void dxt_decode_level(unsigned char kind, const unsigned char *source, un
+@@ -502,18 +518,13 @@ static void dxt_decode_level(unsigned char kind, const unsigned char *source, un
  							alpha[index] = values[(bits >> (index * 3)) & 7];
  					}
  				}
@@ -5555,7 +5579,7 @@ index 9bdcdc99..ef8a9ef0 100644
  				}
  			}
  		}
-@@ -572,8 +583,294 @@ static void texture_dump(GLenum target, const struct xgpu_texture_description *d
+@@ -573,8 +584,294 @@ static void texture_dump(GLenum target, const struct xgpu_texture_description *d
  }
  #endif
  
@@ -5852,7 +5876,7 @@ index 9bdcdc99..ef8a9ef0 100644
  {
  	struct format_information information = format_information(description->format);
  	unsigned long face_count = description->cube_map ? 6 : 1;
-@@ -582,18 +879,58 @@ static void upload(GLuint texture, GLenum target, const struct xgpu_texture_desc
+@@ -583,18 +880,58 @@ static void upload(GLuint texture, GLenum target, const struct xgpu_texture_desc
  	BOOL decode_compressed = FALSE;
  	unsigned long *converted;
  	unsigned long face, level;
@@ -5916,7 +5940,7 @@ index 9bdcdc99..ef8a9ef0 100644
  #endif
  	glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
  	glTexParameteri(target, GL_TEXTURE_BASE_LEVEL, 0);
-@@ -621,21 +958,47 @@ static void upload(GLuint texture, GLenum target, const struct xgpu_texture_desc
+@@ -622,21 +959,47 @@ static void upload(GLuint texture, GLenum target, const struct xgpu_texture_desc
  			else
  			{
  #ifdef HALO_ANDROID
@@ -5971,10 +5995,10 @@ index 9bdcdc99..ef8a9ef0 100644
  }
  
  /* ---------- cache */
-@@ -651,6 +1014,16 @@ struct texture_entry
- 	unsigned long address, size;
- 	unsigned long generation;
+@@ -654,6 +1017,16 @@ struct texture_entry
  	unsigned long last_used_frame;
+ 	/* the high-res HUD texture drawn in its place (hud_hires.h), or -1 */
+ 	long override;
 +	/* whether texture has been uploaded; the texture the worker is uploading
 +	(the same, the first time) until it is done, the next in the worker's
 +	queue, and what the worker found: 0 while it is not done, 2 if every
@@ -5988,10 +6012,11 @@ index 9bdcdc99..ef8a9ef0 100644
  };
  
  #define TEXTURE_BUCKET_COUNT 4096
-@@ -675,6 +1048,168 @@ static struct
+@@ -678,29 +1051,165 @@ static struct
  static unsigned long texture_drop_serial = 1;
  static unsigned long texture_frame = 0;
  
+-static unsigned long bucket_index(DWORD data, DWORD format_word, DWORD size_word)
 +#ifdef HALO_ANDROID
 +/* ---------- the texture worker
 +
@@ -6012,7 +6037,8 @@ index 9bdcdc99..ef8a9ef0 100644
 +static BOOL worker_running;
 +
 +static void *texture_worker(void *unused)
-+{
+ {
+-	return ((data >> 7) ^ (format_word * 2654435761UL) ^ size_word) % TEXTURE_BUCKET_COUNT;
 +	struct texture_decoder decoder = { NULL, 0, TRUE };
 +
 +	(void)unused;
@@ -6043,20 +6069,33 @@ index 9bdcdc99..ef8a9ef0 100644
 +		__atomic_store_n(&entry->upload_done, opaque ? 2u : 1u, __ATOMIC_RELEASE);
 +	}
 +	return NULL;
-+}
-+
+ }
+ 
+-/* palettized textures are cached per palette contents: the game rewrites
+-palettes freely, and often cycles a texture through a few of them */
+-static unsigned long palette_hash(const D3DCOLOR *palette)
 +void xgpu_texture_worker_start(void)
-+{
+ {
+-	unsigned long hash = 2166136261UL, index;
 +	pthread_t thread;
-+
+ 
+-	if (!palette)
+-		return 0;
+-	for (index = 0; index < 256; index++)
+-		hash = (hash ^ palette[index]) * 16777619UL;
+-	return hash ? hash : 1;
 +	if (config_boolean("debug.async_textures") && pthread_create(&thread, NULL, texture_worker, NULL) == 0)
 +		pthread_detach(thread);
-+}
-+
+ }
+ 
+-/* an entry's GL texture and description: its high-res HUD texture's, if it has
+-one, with the bitmap's own size (which its coordinates are in) */
+-static GLuint texture_entry_result(struct texture_entry *entry, GLenum *target,
+-	struct xgpu_texture_description *description)
 +/* the entry's upload handed to the worker, with a copy of its palette if it
 +is palettized: whether it was (it is made here otherwise) */
 +static BOOL texture_upload_queue(struct texture_entry *entry, const D3DCOLOR *palette)
-+{
+ {
 +	if (!__atomic_load_n(&worker_running, __ATOMIC_ACQUIRE))
 +		return FALSE;
 +	if (palette)
@@ -6144,20 +6183,44 @@ index 9bdcdc99..ef8a9ef0 100644
 +}
 +#endif
 +
-+/* what a lookup of the entry returns: its texture, 0 until it is first in */
++/* what a lookup of the entry returns: its texture, 0 until it is first in;
++or its high-res HUD texture (hud_hires.h), with the bitmap's own size (which
++its coordinates are in) */
 +static GLuint texture_found(struct texture_entry *entry, GLenum *target, struct xgpu_texture_description *description)
 +{
 +	texture_collect(entry);
 +	entry->last_used_frame = texture_frame;
-+	*target = entry->target;
-+	*description = entry->description;
+ 	*target = entry->target;
+ 	*description = entry->description;
+ 	if (entry->override >= 0)
+@@ -714,7 +1223,25 @@ static GLuint texture_entry_result(struct texture_entry *entry, GLenum *target,
+ 			return texture;
+ 		}
+ 	}
+-	return entry->texture;
 +	return entry->ready ? entry->texture : 0;
 +}
 +
- static unsigned long bucket_index(DWORD data, DWORD format_word, DWORD size_word)
- {
- 	return ((data >> 7) ^ (format_word * 2654435761UL) ^ size_word) % TEXTURE_BUCKET_COUNT;
-@@ -699,7 +1234,6 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
++static unsigned long bucket_index(DWORD data, DWORD format_word, DWORD size_word)
++{
++	return ((data >> 7) ^ (format_word * 2654435761UL) ^ size_word) % TEXTURE_BUCKET_COUNT;
++}
++
++/* palettized textures are cached per palette contents: the game rewrites
++palettes freely, and often cycles a texture through a few of them */
++static unsigned long palette_hash(const D3DCOLOR *palette)
++{
++	unsigned long hash = 2166136261UL, index;
++
++	if (!palette)
++		return 0;
++	for (index = 0; index < 256; index++)
++		hash = (hash ^ palette[index]) * 16777619UL;
++	return hash ? hash : 1;
+ }
+ 
+ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *target,
+@@ -723,7 +1250,6 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
  	DWORD data = resource[1], format_word = resource[3], size_word = resource[4];
  	struct texture_entry **bucket = &texture_buckets[bucket_index(data, format_word, size_word)];
  	struct texture_entry *entry;
@@ -6165,20 +6228,18 @@ index 9bdcdc99..ef8a9ef0 100644
  	BOOL palettized = ((format_word & D3DFORMAT_FORMAT_MASK) >> D3DFORMAT_FORMAT_SHIFT) == 0x0b;
  	unsigned long hash = palettized ? palette_hash(palette) : 0;
  
-@@ -714,11 +1248,7 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
+@@ -738,9 +1264,7 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
  		recent_textures[recent].watch_serial == watch_serial &&
  		recent_textures[recent].drop_serial == texture_drop_serial)
  	{
 -		entry = recent_textures[recent].entry;
 -		entry->last_used_frame = texture_frame;
--		*target = entry->target;
--		*description = entry->description;
--		return entry->texture;
+-		return texture_entry_result(entry, target, description);
 +		return texture_found(recent_textures[recent].entry, target, description);
  	}
  
  	for (entry = *bucket; entry; entry = entry->next)
-@@ -728,13 +1258,18 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
+@@ -750,13 +1274,18 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
  			if (entry->palette_hash == hash)
  				break;
  			variant_count++;
@@ -6199,7 +6260,7 @@ index 9bdcdc99..ef8a9ef0 100644
  		entry = oldest_variant;
  		entry->palette_hash = hash;
  		entry->generation = 0;
-@@ -759,8 +1294,10 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
+@@ -782,8 +1311,10 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
  
  	if (no_cache < 0)
  		no_cache = config_boolean("debug.texture_no_cache");
@@ -6212,7 +6273,7 @@ index 9bdcdc99..ef8a9ef0 100644
  	{
  		/* protect first, so a write racing with the upload is noticed */
  		memory_watch_protect(entry->address, entry->size);
-@@ -785,11 +1322,22 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
+@@ -820,11 +1351,24 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
  					entry->description.height, entry->size, entry->generation,
  					ones * 100 / entry->size, zeros * 100 / entry->size);
  			}
@@ -6229,7 +6290,9 @@ index 9bdcdc99..ef8a9ef0 100644
 +				xgpu_hitch_texture(entry->size, start);
 +			}
  		}
-+		else
++		/* (not when its high-res HUD texture is drawn in its place: its own is
++		not uploaded, and is drawn once it is, if the override ends) */
++		else if (entry->override < 0)
 +			entry->ready = TRUE;
  	}
 -	entry->last_used_frame = texture_frame;
@@ -6238,13 +6301,11 @@ index 9bdcdc99..ef8a9ef0 100644
  	{
  		recent_textures[recent].data = data;
  		recent_textures[recent].format_word = format_word;
-@@ -798,15 +1346,21 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
+@@ -833,13 +1377,21 @@ GLuint xgpu_texture_get(const DWORD *resource, const D3DCOLOR *palette, GLenum *
  		recent_textures[recent].watch_serial = watch_serial;
  		recent_textures[recent].drop_serial = texture_drop_serial;
  	}
--	*target = entry->target;
--	*description = entry->description;
--	return entry->texture;
+-	return texture_entry_result(entry, target, description);
 +	return texture_found(entry, target, description);
  }
  
@@ -6263,7 +6324,7 @@ index 9bdcdc99..ef8a9ef0 100644
  	texture_frame++;
  	if (texture_frame % 600)
  		return;
-@@ -819,12 +1373,15 @@ void xgpu_texture_cache_begin_frame(void)
+@@ -852,12 +1404,15 @@ void xgpu_texture_cache_begin_frame(void)
  		{
  			struct texture_entry *entry = *link;
  
@@ -6281,7 +6342,7 @@ index 9bdcdc99..ef8a9ef0 100644
  			}
  			else
 diff --git a/port/linux/src/xgpu.h b/port/linux/src/xgpu.h
-index 7d276da8..2b267bec 100644
+index 3016c4e7..b47ee25a 100644
 --- a/port/linux/src/xgpu.h
 +++ b/port/linux/src/xgpu.h
 @@ -14,6 +14,7 @@ device itself (d3d8_gl.c).
@@ -6398,11 +6459,10 @@ index 7d276da8..2b267bec 100644
  
  /* ---------- pixel shaders */
  
-@@ -100,14 +173,20 @@ struct nv2a_pixel_shader_key
- 	unsigned char fog_table_mode;
- 	/* inside a visibility test: count the samples that pass (Android) */
- 	unsigned char count_samples;
--	unsigned char pad;
+@@ -106,13 +179,20 @@ struct nv2a_pixel_shader_key
+ 	behind it only where it covers it (the Xbox's point-sampled meters stop
+ 	at their texels' edges; filtered ones have a fringe of faint texels) */
+ 	unsigned char coverage_alpha;
 +	/* stage 0 read as the average of four taps half a texel of a 128-texel
 +	texture apart diagonally: the shadows' blur, drawn with the shadow
 +	rather than as a pass of its own (rasterizer_xbox_shadows.c, Android) */
@@ -6421,7 +6481,7 @@ index 7d276da8..2b267bec 100644
  #else
  #define XGPU_PIXEL_UNIFORMS_ES ""
  #endif
-@@ -120,11 +199,11 @@ C0/C1 of each stage and the final combiner, and texture constants */
+@@ -125,11 +205,11 @@ C0/C1 of each stage and the final combiner, and texture constants */
  	"uniform vec4 ps_final_c0;\n" \
  	"uniform vec4 ps_final_c1;\n" \
  	"uniform vec4 fog_color;\n" \
@@ -6436,15 +6496,15 @@ index 7d276da8..2b267bec 100644
  	XGPU_PIXEL_UNIFORMS_ES
  
  /* ---------- textures */
-@@ -137,6 +216,7 @@ struct xgpu_texture_description
- 	BOOL linear;        /* not swizzled; addressed with texel coordinates */
- 	BOOL compressed;
+@@ -144,6 +224,7 @@ struct xgpu_texture_description
  	unsigned long pitch; /* linear textures */
+ 	BOOL hires;         /* a high-res HUD texture drawn in the texture's place (hud_hires.h) */
+ 	BOOL hires_coverage; /* ... whose green is its coverage (a meter's) */
 +	BOOL opaque;        /* every texel's alpha is 1 (Android: known after upload) */
  };
  
  void xgpu_texture_describe(DWORD format_word, DWORD size_word, struct xgpu_texture_description *description);
-@@ -146,10 +226,15 @@ unsigned long xgpu_texture_level_offset(const struct xgpu_texture_description *d
+@@ -153,10 +234,15 @@ unsigned long xgpu_texture_level_offset(const struct xgpu_texture_description *d
  unsigned long xgpu_texture_level_pitch(const struct xgpu_texture_description *description, unsigned long level);
  
  /* the GL texture for an Xbox texture header, uploading or refreshing it
@@ -6461,7 +6521,7 @@ index 7d276da8..2b267bec 100644
  
  /* ---------- render targets */
  
-@@ -159,6 +244,9 @@ struct xgpu_render_target
+@@ -166,6 +252,9 @@ struct xgpu_render_target
  	unsigned long width, height;
  	BOOL depth;
  	GLuint texture;
@@ -6640,21 +6700,21 @@ index 23beb89c..45c93a44 100644
 +	return (int)length;
  }
 diff --git a/port/linux/src/xinput_sdl.c b/port/linux/src/xinput_sdl.c
-index 287c1137..8247e31b 100644
+index 68e32a0a..32b9fd53 100644
 --- a/port/linux/src/xinput_sdl.c
 +++ b/port/linux/src/xinput_sdl.c
-@@ -226,6 +226,7 @@ static void test_input_gamepad(XINPUT_GAMEPAD *pad)
- {
+@@ -259,6 +259,7 @@ static void test_input_gamepad(XINPUT_GAMEPAD *pad)
  	static int checked;
  	static int seed = -1;
+ 	static int looking;
 +	static int walking;
  	double t;
  
  	if (!checked)
-@@ -237,9 +238,39 @@ static void test_input_gamepad(XINPUT_GAMEPAD *pad)
- 			seed = atoi(setting + 4);
- 		else if (!strcmp(setting, "bot"))
- 			seed = 0;
+@@ -275,9 +276,39 @@ static void test_input_gamepad(XINPUT_GAMEPAD *pad)
+ 			seed = atoi(setting + 5);
+ 			looking = 1;
+ 		}
 +		else if (!strncmp(setting, "walk", 4))
 +		{
 +			/* "walk[:<seed>]": forward, looking around, jumping over what is in
@@ -6691,19 +6751,49 @@ index 287c1137..8247e31b 100644
  	if (test_input_holding_action)
  	{
  		/* (standing still, the button held from a second on) */
-@@ -247,7 +278,6 @@ static void test_input_gamepad(XINPUT_GAMEPAD *pad)
+@@ -285,7 +316,6 @@ static void test_input_gamepad(XINPUT_GAMEPAD *pad)
  			pad->bAnalogButtons[XINPUT_GAMEPAD_X] = 255;
  		return;
  	}
 -	t = (double)SDL_GetTicks() / 1000.0 + seed * 1.7;
- 	pad->sThumbLY = (SHORT)(sin(t * 0.9) * 32000.0);
- 	pad->sThumbLX = (SHORT)(cos(t * 0.6 + seed) * 20000.0);
- 	pad->sThumbRX = (SHORT)(sin(t * 0.4) * 14000.0);
+ 	if (looking)
+ 	{
+ 		pad->sThumbRX = (SHORT)(sin(t * 0.5) * 14000.0);
+diff --git a/source/cseries/cseries.h b/source/cseries/cseries.h
+index 9dfa3dfd..46a06290 100644
+--- a/source/cseries/cseries.h
++++ b/source/cseries/cseries.h
+@@ -115,12 +115,25 @@ data (csprintf of a bad index's name) was never evaluated in a release
+ build, and could fault where the game would carry on. Each is a statement
+ ending in a brace, like the checked form, which some uses rely on (no
+ semicolon). */
++#ifdef HALO_ANDROID
++/* the Knulli handheld: nothing is checked, as in the retail game, the
++expressions still evaluated for the few that do work. Checked, they cost
++the game's thread about a tenth of a frame in a30: the compiler can no
++longer drop the checks in the tag and object accessors the game calls
++thousands of times a frame (tag_get, tag_block_get_element_with_size,
++object_get_and_verify_type). */
++#define match_assert(file, line, expr) { (void)(expr); }
++#define match_vassert(file, line, expr, string) { (void)(expr); }
++#define match_warn(file, line, expr) { (void)(expr); }
++#define match_vwarn(file, line, expr, string) { (void)(expr); }
++#else
+ #define RELEASE_ASSERT_MESSAGE(string) \
+ 	(__builtin_constant_p(string) ? (char const *)(string) : "<message not formatted in release builds>")
+ #define match_assert(file, line, expr) if (!(expr)) { release_assert_failed(#expr, MATCH_FILE(file), MATCH_LINE(line), TRUE); }
+ #define match_vassert(file, line, expr, string) if (!(expr)) { release_assert_failed(RELEASE_ASSERT_MESSAGE(string), MATCH_FILE(file), MATCH_LINE(line), TRUE); }
+ #define match_warn(file, line, expr) if (!(expr)) { release_assert_failed(#expr, MATCH_FILE(file), MATCH_LINE(line), FALSE); }
+ #define match_vwarn(file, line, expr, string) if (!(expr)) { release_assert_failed(RELEASE_ASSERT_MESSAGE(string), MATCH_FILE(file), MATCH_LINE(line), FALSE); }
++#endif
+ #else
+ #define match_assert(file, line, expr) if (!(expr)) { display_assert(#expr, MATCH_FILE(file), MATCH_LINE(line), TRUE); system_exit(-1); }
+ #define match_vassert(file, line, expr, string) if (!(expr)) { display_assert(string, MATCH_FILE(file), MATCH_LINE(line), TRUE); system_exit(-1); }
 diff --git a/source/main/main.c b/source/main/main.c
-index 034b3858..8f6b3dbf 100644
+index e35691e1..7804b33c 100644
 --- a/source/main/main.c
 +++ b/source/main/main.c
-@@ -2167,7 +2167,8 @@ static boolean main_framerate_throttle_enabled(
+@@ -2174,7 +2174,8 @@ static boolean main_framerate_throttle_enabled(
  /* The native ports draw a frame whenever the display can show one, paced
  by vsync, and frames fall between the 30 Hz ticks
  (port/linux/game/render_interpolation.c): no vertical blank throttle, and
@@ -6713,7 +6803,7 @@ index 034b3858..8f6b3dbf 100644
  static void main_update_time_unthrottled(
  	void)
  {
-@@ -2178,6 +2179,7 @@ static void main_update_time_unthrottled(
+@@ -2185,6 +2186,7 @@ static void main_update_time_unthrottled(
  
  	QueryPerformanceCounter(&counter);
  	QueryPerformanceFrequency(&frequency);
@@ -6722,10 +6812,10 @@ index 034b3858..8f6b3dbf 100644
  	{
  		seconds_elapsed = (real)((double)(counter.QuadPart - previous_counter.QuadPart) /
 diff --git a/source/models/models.c b/source/models/models.c
-index ebaeaccc..2d69abf2 100644
+index 39d17db1..f82970ba 100644
 --- a/source/models/models.c
 +++ b/source/models/models.c
-@@ -262,6 +262,10 @@ typedef char verify_rasterizer_debug_options_size[sizeof(struct rasterizer_debug
+@@ -228,6 +228,10 @@ typedef char verify_rasterizer_model_begin_parameters_size[sizeof(struct rasteri
  
  #include "rasterizer/rasterizer_models.h"
  
@@ -6736,7 +6826,7 @@ index ebaeaccc..2d69abf2 100644
  static void render_model_parts(
  	struct model const *model,
  	char const *region_permutation_indices,
-@@ -837,7 +841,13 @@ void render_model(
+@@ -804,7 +808,13 @@ void render_model(
  
  		geometry_detail_level_index = NUMBER_OF_DETAIL_LEVELS_PER_MODEL-1;
  		while (geometry_detail_level_index>0 &&
@@ -6751,10 +6841,10 @@ index ebaeaccc..2d69abf2 100644
  			geometry_detail_level_index--;
  		}
 diff --git a/source/rasterizer/rasterizer.c b/source/rasterizer/rasterizer.c
-index f197c5c2..43598b5c 100644
+index 15ba5dd0..bacebc4c 100644
 --- a/source/rasterizer/rasterizer.c
 +++ b/source/rasterizer/rasterizer.c
-@@ -941,10 +941,19 @@ void rasterizer_decals_initialize_for_new_map(
+@@ -934,10 +934,19 @@ void rasterizer_decals_initialize_for_new_map(
  	return;
  }
  
@@ -6775,10 +6865,10 @@ index f197c5c2..43598b5c 100644
  }
  
 diff --git a/source/rasterizer/xbox/rasterizer_xbox.c b/source/rasterizer/xbox/rasterizer_xbox.c
-index 6b32a94f..2a6ba309 100644
+index 687b90dd..9aff70ca 100644
 --- a/source/rasterizer/xbox/rasterizer_xbox.c
 +++ b/source/rasterizer/xbox/rasterizer_xbox.c
-@@ -1390,6 +1390,75 @@ boolean rasterizer_set_texture_non_blocking(
+@@ -1356,6 +1356,75 @@ boolean rasterizer_set_texture_non_blocking(
  	return FALSE;
  }
  
@@ -6854,7 +6944,7 @@ index 6b32a94f..2a6ba309 100644
  void rasterizer_set_target_as_texture(
  	short stage,
  	short target,
-@@ -1709,6 +1778,10 @@ D3DSurface *rasterizer_get_target(
+@@ -1671,6 +1740,10 @@ D3DSurface *rasterizer_get_target(
  	return d3d_surface;
  }
  
@@ -6865,7 +6955,7 @@ index 6b32a94f..2a6ba309 100644
  void _rasterizer_window_begin(
  	struct rasterizer_window_begin_parameters const *parameters)
  {
-@@ -1736,6 +1809,13 @@ void _rasterizer_window_begin(
+@@ -1698,6 +1771,13 @@ void _rasterizer_window_begin(
  	}
  	rasterizer_water_set_visibility_for_window(FALSE);
  	rasterizer_active_camouflage_set_visibility(FALSE);
@@ -6880,10 +6970,10 @@ index 6b32a94f..2a6ba309 100644
  	rasterizer_set_stencil_mode(RASTERIZER_STENCIL_MODE_NONE);
  	rasterizer_window_set_fog(&parameters->fog);
 diff --git a/source/rasterizer/xbox/rasterizer_xbox_decals.c b/source/rasterizer/xbox/rasterizer_xbox_decals.c
-index 410140b9..62384cbf 100644
+index de201e0a..3f39deb0 100644
 --- a/source/rasterizer/xbox/rasterizer_xbox_decals.c
 +++ b/source/rasterizer/xbox/rasterizer_xbox_decals.c
-@@ -668,10 +668,74 @@ void _rasterizer_decals_begin(
+@@ -632,10 +632,74 @@ void _rasterizer_decals_begin(
  	return;
  }
  
@@ -6958,7 +7048,7 @@ index 410140b9..62384cbf 100644
  
  	match_assert(
  		"c:\\halo\\SOURCE\\rasterizer\\xbox\\rasterizer_xbox_decals.c",
-@@ -682,7 +746,12 @@ void _rasterizer_decals_draw(
+@@ -646,7 +710,12 @@ void _rasterizer_decals_draw(
  	if (!rasterizer_debug_options.draw_environment_decals)
  		return;
  
@@ -6971,7 +7061,7 @@ index 410140b9..62384cbf 100644
  	while (decal_index != NONE)
  	{
  		struct decal_datum *decal = DECAL_GET(decal_index);
-@@ -804,7 +873,11 @@ void _rasterizer_decals_draw(
+@@ -768,7 +837,11 @@ void _rasterizer_decals_draw(
  			rasterizer_frame_statistics.decal_vertex_count += 4*decal->quad_count;
  		}
  
@@ -6984,10 +7074,10 @@ index 410140b9..62384cbf 100644
  
  	return;
 diff --git a/source/rasterizer/xbox/rasterizer_xbox_models.c b/source/rasterizer/xbox/rasterizer_xbox_models.c
-index ef1545e6..93227980 100644
+index b7eecb48..f1e6c3be 100644
 --- a/source/rasterizer/xbox/rasterizer_xbox_models.c
 +++ b/source/rasterizer/xbox/rasterizer_xbox_models.c
-@@ -661,6 +661,317 @@ void rasterizer_model_ambient_reflection_tint(
+@@ -558,6 +558,317 @@ void rasterizer_model_ambient_reflection_tint(
  
  /* ---------- private code */
  
@@ -7305,7 +7395,7 @@ index ef1545e6..93227980 100644
  void _rasterizer_models_begin(
  	boolean sky)
  {
-@@ -668,6 +979,10 @@ void _rasterizer_models_begin(
+@@ -565,6 +876,10 @@ void _rasterizer_models_begin(
  	{
  		local_pixel_shader_dirty_flag = TRUE;
  		local_sky_flag = sky;
@@ -7316,7 +7406,7 @@ index ef1545e6..93227980 100644
  		if (sky)
  		{
  			rasterizer_profile_begin(_rasterizer_profile_model_sky);
-@@ -686,6 +1001,17 @@ void _rasterizer_models_end(
+@@ -583,6 +898,17 @@ void _rasterizer_models_end(
  {
  	if (rasterizer_debug_options.draw_models)
  	{
@@ -7334,7 +7424,7 @@ index ef1545e6..93227980 100644
  		if (local_sky_flag)
  		{
  			rasterizer_profile_end(_rasterizer_profile_model_sky);
-@@ -699,8 +1025,13 @@ void _rasterizer_models_end(
+@@ -596,8 +922,13 @@ void _rasterizer_models_end(
  	return;
  }
  
@@ -7348,7 +7438,7 @@ index ef1545e6..93227980 100644
  {
  	if (rasterizer_debug_options.draw_models)
  	{
-@@ -726,9 +1057,15 @@ void _rasterizer_model_end(
+@@ -623,9 +954,15 @@ void _rasterizer_model_end(
  	return;
  }
  
@@ -7364,7 +7454,7 @@ index ef1545e6..93227980 100644
  {
  	unsigned long skinning_work;
  	unsigned long lighting_work;
-@@ -1695,7 +2032,11 @@ void rasterizer_model_draw_environment_shader(
+@@ -1592,7 +1929,11 @@ void rasterizer_model_draw_environment_shader(
  	return;
  }
  
@@ -7376,7 +7466,7 @@ index ef1545e6..93227980 100644
  	struct shader *shader,
  	short shader_permutation_index,
  	struct triangle_buffer const *triangle_buffer,
-@@ -2429,13 +2770,18 @@ void _rasterizer_model_draw(
+@@ -2326,13 +2667,18 @@ void _rasterizer_model_draw(
  					D3DRS_CULLMODE,
  					D3DCULL_CCW);
  
@@ -7402,7 +7492,7 @@ index ef1545e6..93227980 100644
  
  				if (rasterizer_debug_options.statistics_mode ==
  					_rasterizer_statistics_mode_enabled)
-@@ -2449,7 +2795,11 @@ void _rasterizer_model_draw(
+@@ -2346,7 +2692,11 @@ void _rasterizer_model_draw(
  							vertex_buffer);
  				}
  
@@ -7415,7 +7505,7 @@ index ef1545e6..93227980 100644
  						shader_model->model.flags,
  						_shader_model_two_sided_bit))
  				{
-@@ -2538,7 +2888,34 @@ void _rasterizer_model_draw(
+@@ -2435,7 +2785,34 @@ void _rasterizer_model_draw(
  	return;
  }
  
@@ -7451,10 +7541,10 @@ index ef1545e6..93227980 100644
  	short shader_permutation_index,
  	struct triangle_buffer const *triangle_buffer,
 diff --git a/source/rasterizer/xbox/rasterizer_xbox_shadows.c b/source/rasterizer/xbox/rasterizer_xbox_shadows.c
-index 35dbdf72..38080fe8 100644
+index 80c3ac8d..191ed33f 100644
 --- a/source/rasterizer/xbox/rasterizer_xbox_shadows.c
 +++ b/source/rasterizer/xbox/rasterizer_xbox_shadows.c
-@@ -262,6 +262,97 @@ static boolean shadow_used = FALSE;
+@@ -193,6 +193,97 @@ static boolean shadow_used = FALSE;
  
  /* ---------- public code */
  
@@ -7552,7 +7642,7 @@ index 35dbdf72..38080fe8 100644
  void _rasterizer_environment_shadows_begin(
  	void)
  {
-@@ -290,6 +381,47 @@ boolean _rasterizer_environment_shadow_begin(
+@@ -221,6 +312,47 @@ boolean _rasterizer_environment_shadow_begin(
  			_rasterizer_target_render_primary &&
  		rasterizer_debug_options.draw_environment_shadows)
  	{
@@ -7600,7 +7690,7 @@ index 35dbdf72..38080fe8 100644
  		match_assert(
  			"c:\\halo\\SOURCE\\rasterizer\\xbox\\rasterizer_xbox_shadows.c",
  			153,
-@@ -605,6 +737,15 @@ void _rasterizer_environment_shadow_end(
+@@ -536,6 +668,15 @@ void _rasterizer_environment_shadow_end(
  				"### WARNING empty shadow has been cast");
  		}
  
@@ -7616,12 +7706,12 @@ index 35dbdf72..38080fe8 100644
  		if (!shadow_restored)
  		{
  			rasterizer_set_target(
-@@ -645,10 +786,23 @@ void _rasterizer_environment_shadow_draw(
+@@ -576,10 +717,23 @@ void _rasterizer_environment_shadow_draw(
  	{
  		if (!shadow_setup)
  		{
--			if (rasterizer_debug_options.shadows_convolution)
-+			if (rasterizer_debug_options.shadows_convolution
+-			if (rasterizer_debug_options.shadow_convolution_enabled)
++			if (rasterizer_debug_options.shadow_convolution_enabled
 +#ifdef HALO_ANDROID
 +				/* blurred as it is read (xgpu_sample_blurred) */
 +				&& !shadow_slot_ready
@@ -7631,7 +7721,7 @@ index 35dbdf72..38080fe8 100644
  				rasterizer_shadow_convolve();
  			}
 +#ifdef HALO_ANDROID
-+			if (shadow_slot_ready && rasterizer_debug_options.shadows_convolution)
++			if (shadow_slot_ready && rasterizer_debug_options.shadow_convolution_enabled)
 +			{
 +				rasterizer_set_target_as_texture(0, 2, FALSE);
 +				xgpu_sample_blurred(TRUE);
@@ -7641,7 +7731,7 @@ index 35dbdf72..38080fe8 100644
  
  			rasterizer_set_target_as_texture(
  				0,
-@@ -1038,7 +1192,13 @@ static void rasterizer_shadow_convolve(
+@@ -969,7 +1123,13 @@ static void rasterizer_shadow_convolve(
  		pixel_shader.final_combiner_inputs_abcd = 0x0C20001C;
  		rasterizer_set_pixel_shader(&pixel_shader);
  
@@ -7656,10 +7746,10 @@ index 35dbdf72..38080fe8 100644
  		IDirect3DDevice8_Begin(global_d3d_device, D3DPT_TRIANGLEFAN);
  		IDirect3DDevice8_SetVertexData2s(global_d3d_device, 4, 0, 0);
 diff --git a/source/rasterizer/xbox/rasterizer_xbox_water.c b/source/rasterizer/xbox/rasterizer_xbox_water.c
-index 322516f0..51a746a3 100644
+index 5a7274c4..a6097cae 100644
 --- a/source/rasterizer/xbox/rasterizer_xbox_water.c
 +++ b/source/rasterizer/xbox/rasterizer_xbox_water.c
-@@ -229,11 +229,48 @@ extern struct rasterizer_window_begin_parameters global_window_parameters;
+@@ -200,11 +200,48 @@ static boolean water_visible_for_window_flag = FALSE;
  
  /* ---------- public code */
  
@@ -7708,7 +7798,7 @@ index 322516f0..51a746a3 100644
  
  	return;
  }
-@@ -691,11 +728,26 @@ void rasterizer_water_draw(
+@@ -662,11 +699,26 @@ void rasterizer_water_draw(
  		{
  			write_depth = !TEST_FLAG(group->geometry_flags, _rasterizer_geometry_sky_bit) &&
  				!TEST_FLAG(water->flags, _shader_transparent_water_draw_before_fog_bit);
@@ -7736,13 +7826,13 @@ index 322516f0..51a746a3 100644
  			if (TEST_FLAG(water->flags, _shader_transparent_water_base_map_alpha_modulates_reflection_bit))
  			{
 diff --git a/source/render/render_objects.c b/source/render/render_objects.c
-index 95cb7853..f160eb3f 100644
+index dad616be..db228e0b 100644
 --- a/source/render/render_objects.c
 +++ b/source/render/render_objects.c
-@@ -284,6 +284,15 @@ void rasterizer_models_begin(
- 	boolean sky);
- void rasterizer_models_end(
- 	void);
+@@ -255,6 +255,15 @@ short structure_visibility_find_objects(
+ 	void (*get_bounding_sphere_function)(long object_index, real_point3d *center, real *radius),
+ 	boolean (*unmarked_function)(long object_index),
+ 	boolean (*mark_function)(long object_index));
 +#ifdef HALO_ANDROID
 +/* the Mali port's shadows in two passes (rasterizer_xbox_shadows.c) */
 +void rasterizer_environment_shadows_textures_begin(void);
@@ -7752,10 +7842,10 @@ index 95cb7853..f160eb3f 100644
 +boolean rasterizer_environment_shadow_draws_environment(void);
 +#endif
 +
- void rasterizer_environment_shadows_begin(
- 	void);
- void rasterizer_environment_shadows_end(
-@@ -429,7 +438,17 @@ void render_object_shadows(
+ 
+ extern boolean debug_objects;
+ extern short debug_rasterizer_light_count;
+@@ -384,7 +393,17 @@ void render_object_shadows(
  		rasterizer_environment_shadows_begin();
  
  		data.shadow = TRUE;
@@ -7773,7 +7863,7 @@ index 95cb7853..f160eb3f 100644
  
  		rasterizer_environment_shadows_end();
  	}
-@@ -911,6 +930,9 @@ static void render_object_shadow_end(
+@@ -866,6 +885,9 @@ static void render_object_shadow_end(
  	shadow_volume_bounds.z1 = shadow_volume_bounds.z1 * data->shadow_bounding_radius +
  		data->shadow_matrix.position.z;
  
@@ -7783,7 +7873,7 @@ index 95cb7853..f160eb3f 100644
  	structure_render_shadow(
  		&data->shadow_matrix.position,
  		data->shadow_bounding_radius * 4.f,
-@@ -1184,6 +1206,9 @@ static void render_object(
+@@ -1131,6 +1153,9 @@ static void render_object(
  
  				if (render_object_shadow_begin(data, darkness_fraction * size_fraction))
  				{
@@ -7794,14 +7884,14 @@ index 95cb7853..f160eb3f 100644
  					render_object_shadow_end(data);
  				}
 diff --git a/source/saved games/game_state_xbox.c b/source/saved games/game_state_xbox.c
-index 591a52b4..b5aa8d04 100644
+index 024dc41d..11818500 100644
 --- a/source/saved games/game_state_xbox.c	
 +++ b/source/saved games/game_state_xbox.c	
-@@ -151,6 +151,17 @@ static HANDLE game_state_open_persistent_storage(
+@@ -146,6 +146,17 @@ static HANDLE game_state_open_persistent_storage(
  
- struct xbox_game_state_globals_prefix xbox_game_state_globals = { 0 };
+ static struct xbox_game_state_globals_prefix xbox_game_state_globals = { 0 };
  
-+#ifdef HALO_LINUX
++#ifdef HALO_ANDROID
 +/* The Xbox kept the checkpoint in a file of its hard disk's cache partition
 +(z:\savegame.bin). Here z: is a folder of the save root, on Knulli a FUSE
 +file system, where writing the 16 MB game state took the game's thread
@@ -7815,11 +7905,11 @@ index 591a52b4..b5aa8d04 100644
  /* ---------- public code */
  
  void *game_state_allocate_buffer(
-@@ -232,6 +243,20 @@ void game_state_create_or_open_file(
+@@ -227,6 +238,20 @@ void game_state_create_or_open_file(
  		87,
  		!xbox_game_state_globals.file_open);
  
-+#ifdef HALO_LINUX
++#ifdef HALO_ANDROID
 +	/* zeroed now, so that its pages are made at start-up rather than by the
 +	first checkpoint's copy (which took twice as long) */
 +	checkpoint = debug_malloc(xbox_game_state_globals.buffer_size, TRUE, __FILE__, __LINE__);
@@ -7836,11 +7926,11 @@ index 591a52b4..b5aa8d04 100644
  	xbox_game_state_globals.handle = CreateFileA("z:\\savegame.bin",
  		GENERIC_READ|GENERIC_WRITE, 0, NULL, OPEN_ALWAYS,
  		FILE_FLAG_NO_BUFFERING|FILE_FLAG_SEQUENTIAL_SCAN, NULL);
-@@ -262,7 +287,13 @@ void game_state_close_file(
+@@ -257,7 +282,13 @@ void game_state_close_file(
  		"c:\\halo\\SOURCE\\saved games\\game_state_xbox.c",
  		106,
  		xbox_game_state_globals.file_open);
-+#ifdef HALO_LINUX
++#ifdef HALO_ANDROID
 +	free(checkpoint);
 +	checkpoint = NULL;
 +	xbox_game_state_globals.file_valid_for_read = FALSE;
@@ -7850,11 +7940,11 @@ index 591a52b4..b5aa8d04 100644
  	xbox_game_state_globals.file_open = FALSE;
  
  	return;
-@@ -283,6 +314,11 @@ boolean game_state_write_to_file(
+@@ -278,6 +309,11 @@ boolean game_state_write_to_file(
  		121,
  		xbox_game_state_globals.file_open);
  
-+#ifdef HALO_LINUX
++#ifdef HALO_ANDROID
 +	memcpy(checkpoint, xbox_game_state_globals.buffer, xbox_game_state_globals.buffer_size);
 +	xbox_game_state_globals.file_valid_for_read = TRUE;
 +	return TRUE;
@@ -7862,11 +7952,11 @@ index 591a52b4..b5aa8d04 100644
  	if (SetFilePointer(xbox_game_state_globals.handle, 0, NULL, FILE_BEGIN) !=
  			INVALID_SET_FILE_POINTER &&
  		WriteFile(xbox_game_state_globals.handle, xbox_game_state_globals.buffer,
-@@ -323,6 +359,14 @@ boolean game_state_read_from_file(
+@@ -318,6 +354,14 @@ boolean game_state_read_from_file(
  		146,
  		xbox_game_state_globals.file_valid_for_read || recover_saved_games_hack);
  
-+#ifdef HALO_LINUX
++#ifdef HALO_ANDROID
 +	/* (nothing written to the copy, even for recover_saved_games_hack: there
 +	is no file of an earlier session to recover) */
 +	if (!checkpoint || !xbox_game_state_globals.file_valid_for_read)

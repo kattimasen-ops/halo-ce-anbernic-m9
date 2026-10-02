@@ -13,15 +13,20 @@ here only to describe what the software is compatible with.
   tools.
 - Documentation and two screenshots of the game running on the handheld.
 
+Its [releases](https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/releases/latest) hold the port built from this source at the
+release's commit: the programs `halo` and `halo_guest.elf`, the launcher and
+its helpers, and the licences (`LICENSE.txt`, `THIRD-PARTY-NOTICES.txt`).
+
 ## What this repository does not contain
 
 - No Halo game files: no disc images (ISO or XISO), no maps, no XBE, no
-  extracted assets such as sounds, textures or models.
-- No prebuilt game binaries: `halo` and `halo_guest.elf` are built by you
-  from source, and the build output (`work/`, `dist/`) is not committed.
+  extracted assets such as sounds, textures or models. The releases have
+  none either.
+- No build output: `work/` and `dist/` are not committed. The programs are
+  published only in the releases, built from the published source.
 - No Arm Mali driver (`libmali`) and no other libraries from the handheld's
   firmware. The build links against copies you take from your own device;
-  they are never committed.
+  they are never committed, and the releases use the handheld's own.
 
 Please keep it that way: pull requests that add any of these files will not
 be accepted.
@@ -42,7 +47,11 @@ to Microsoft's or Bungie's game, data or trademarks.
 
 The build downloads third-party code under its own licences: SDL's headers
 (zlib licence) and, through the upstream build, musl (MIT) and SDL3 (zlib).
-The upstream tree also includes tomlc17 and miniupnpc under their licences.
+The upstream tree also includes tomlc17, kcp and miniupnpc under their
+licences. The releases' programs contain musl (MIT), tomlc17 (MIT), kcp
+(MIT), miniupnpc (BSD-3-Clause), code from SDL3's headers (zlib) and the
+game's own zlib 1.1.3; `THIRD-PARTY-NOTICES.txt` in each release has their
+notices. The launcher's font is font8x8, in the public domain.
 
 ## Decompilation and your jurisdiction
 

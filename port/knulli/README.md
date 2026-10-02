@@ -1,7 +1,7 @@
 # Knulli (Allwinner H700 handhelds)
 
 `port/knulli` runs the Android port's guest image (the game as ILP32 AArch64
-code, [port/android/README.md](https://github.com/cybersecurity/halo-ce-universal/blob/fd8fc72693bff0d2d7b4af56aab54b566a93eebb/port/android/README.md)) as an ordinary aarch64
+code, [port/android/README.md](https://github.com/cybersecurity/halo-ce-universal/blob/c55e4e2b9d90550b0e761eb78dfe9d7c74880cb9/port/android/README.md)) as an ordinary aarch64
 Linux program on handhelds with the Allwinner H700 under Knulli: the Anbernic
 RG35XX H, Plus, SP, 2024, RG40XX H/V, RG CubeXX and others. Their GPU, a
 Mali-G31, has only Arm's OpenGL ES driver for the framebuffer (no X11,
@@ -9,8 +9,9 @@ Wayland, DRM or Vulkan), which the firmware's SDL2 drives.
 
 ## Install
 
-1. Build the port (below), or take `halo`, `halo_guest.elf`, `halo_extract.py`
-   and `sdl_mapping.py` from a build.
+1. Take the files from a [release](https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/releases/latest),
+   or build the port (below) and take `halo`, `halo_guest.elf`,
+   `halo_extract.py`, `halo_screen.py` and `sdl_mapping.py`.
 2. Copy them into `/userdata/roms/ports/halo/`, and `Halo.sh` into
    `/userdata/roms/ports/`.
 3. Put an Xbox disc image of Halo (`.iso`) in `/userdata/roms/ports/halo/`.
@@ -52,7 +53,7 @@ replaced or added:
 | `host/host_profile.c`, `profile.py` | A sampling profiler (`HALO_PROFILE_HZ`). |
 | `host/host_gl_timing.c`, `.S` | A timer of the driver's functions (`HALO_GL_TIMING`). |
 | `compat/android/log.h` | The NDK's log functions, to the standard error stream. |
-| `Halo.sh`, `sdl_mapping.py`, `halo_extract.py` | The launcher: the controls, the clocks, the first start's maps. |
+| `Halo.sh`, `sdl_mapping.py`, `halo_extract.py`, `halo_screen.py` | The launcher: the controls, the clocks, the first start's maps, and messages on the screen while the game is not running. |
 
 ### The GL thread
 
@@ -181,6 +182,19 @@ second over the last 40 to 60 seconds of a level's opening:
 
 The tools below (`HALO_GPU_PASS_TIMING`, `HALO_GL_TIMING`) show which of the
 GPU, the GL thread and the game's thread limits a scene.
+
+### First start
+
+`Halo.sh` looks for a disc image (`.iso` or `.xiso`) in `halo/`, or in
+`ports/` beside it, when `halo/maps/ui.map` is missing. `halo_extract.py`
+copies the maps folder out of it with its progress on the screen
+(`halo_screen.py`, which draws on the framebuffer with Python's standard
+library), after checking that the card has room for the maps and the
+game's cache; the maps a stopped copy of the same image finished are kept.
+What goes wrong (no image, not an Xbox one, an incomplete one, no room) is
+said on the screen until a button is pressed. Before the game's own first
+start, which sets up its cache in `save/z` for about a minute with the
+screen black, the screen says so.
 
 ### Clocks
 

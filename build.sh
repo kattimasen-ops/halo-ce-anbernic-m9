@@ -92,7 +92,7 @@ fi
 # names are longer in a full clone than in this shallow one.
 tree_is_patched() {
 	[ "$(git -C "$SRC" rev-parse HEAD 2> /dev/null || true)" = "$UPSTREAM_COMMIT" ] &&
-		cmp -s <(git -C "$SRC" diff | grep -v '^index ') <(grep -v '^index ' "$PATCH")
+		cmp -s <(git -C "$SRC" diff HEAD | grep -v '^index ') <(grep -v '^index ' "$PATCH")
 }
 if ! tree_is_patched; then
 	echo "== checking out $UPSTREAM_COMMIT and applying $(basename "$PATCH")"
@@ -139,10 +139,12 @@ fi
 # ---------- build
 
 cd "$SRC"
-if [ ! -f build.ninja ]; then
+# (again for another upstream commit: its configure.py can need other files)
+if [ ! -f build.ninja ] || [ "$(cat "$WORK/configured.commit" 2> /dev/null || true)" != "$UPSTREAM_COMMIT" ]; then
 	echo "== configuring"
 	python3 configure.py --release --android-ndk "$ANDROID_NDK" --android-guest-cc "$GUEST_CC" \
 		--linux-cc "$GUEST_CC"
+	echo "$UPSTREAM_COMMIT" > "$WORK/configured.commit"
 fi
 grep -q 'halo_guest\.elf' build.ninja ||
 	die "build.ninja has no Android guest build: delete $SRC/build.ninja and check configure's output (it downloads musl and SDL3)"
@@ -151,10 +153,9 @@ echo "== building (this takes a while the first time)"
 SDL2_INCLUDE=$SDL2_INCLUDE SYSROOT_LIB=$SYSROOT_LIB ANDROID_NDK=$ANDROID_NDK CC=$HOST_CC JOBS=$JOBS \
 	sh port/knulli/build.sh
 
-# ---------- dist
+# ---------- dist: what goes on the handheld
 
-cp build/knulli/halo build/knulli/halo_guest.elf "$DIST/"
-cp port/knulli/Halo.sh port/knulli/halo_extract.py port/knulli/sdl_mapping.py "$DIST/"
-chmod 755 "$DIST/halo" "$DIST/Halo.sh" "$DIST/halo_extract.py" "$DIST/sdl_mapping.py"
+install -m 755 build/knulli/halo build/knulli/halo_guest.elf port/knulli/Halo.sh port/knulli/halo_extract.py \
+	port/knulli/halo_screen.py port/knulli/sdl_mapping.py "$DIST/"
 echo "== done: $DIST"
 ls -l "$DIST"

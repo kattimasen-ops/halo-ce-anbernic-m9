@@ -6,7 +6,9 @@ render scale. This repository is a native ARM64 (AArch64) port of the Halo:
 Combat Evolved decompilation, [halo-ce-universal](https://github.com/cybersecurity/halo-ce-universal),
 to the Allwinner H700 and its Mali-G31 GPU. There is no emulation: no xemu,
 no Box64, no Wine. You need your own copy of the original Xbox game. This
-repository contains source code and documentation only.
+repository has the source code, the documentation, and ready-made
+[releases](https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/releases/latest) that need only your disc image: they hold no game
+data.
 
 - Game: Halo: Combat Evolved, Xbox build 01.01.14.2342, decompiled to C.
 - Target: Anbernic RG35XX H and other Allwinner H700 retro handhelds running
@@ -61,21 +63,23 @@ Captured on an Anbernic RG35XX H (640x480 screen).
 ## Performance
 
 Frames per second on an Anbernic RG35XX H, Knulli Gladiator II, stock thermal
-limits, measured with `HALO_FPS_LOG` over the opening of each level. The b30
-battle varies from run to run by 2 or 3 fps.
+limits: the typical value and the range of `HALO_FPS_LOG`'s 5-second
+averages over the first minute of each level after it has loaded, with the
+level already in the game's cache (the first time a level is entered, its
+loading screen decompresses it there: [Install](docs/INSTALL.md#playing)).
+c10's opening dips to about 31 for a stretch, then holds 44; the b30 battle
+varies from run to run by 2 or 3 fps.
 
 <!-- performance table: update the numbers and the date here as optimisations land -->
-Last updated: 2026-09-30.
+Last updated: 2026-10-01 (release v2026.10.01).
 
 | Scene | `render_scale = 0.75` (480x360, default) | `render_scale = 1.0` (640x480) |
 | --- | --- | --- |
 | Main menu | 60 | 60 |
-| c10, 343 Guilty Spark (swamp) | about 44 | 26 |
-| b30, The Silent Cartographer (beach battle) | about 40 (35–46) | 26 |
-| a30, Halo (level opening) | about 55 | 20 |
+| c10, 343 Guilty Spark (swamp) | about 40 (31–44) | about 24 (19–28) |
+| b30, The Silent Cartographer (beach battle) | about 40 (35–44) | about 30 (28–34) |
+| a30, Halo (level opening) | about 55 (39–60) | about 40 (26–47) |
 <!-- end of performance table -->
-
-The 640x480 column was measured on an earlier build and is being re-measured.
 
 At 640x480 the GPU's pixel and vertex work is the limit. At 0.75 the limit is
 the Mali driver's CPU time for each draw call on the GL thread. The kernel's
@@ -108,25 +112,33 @@ the result and the `halo/log.txt`.
 
 - An H700 handheld with Knulli (tested with Gladiator II).
 - Your own disc image of Halo: Combat Evolved for the original Xbox (`.iso`
-  or `.xiso`). The Xbox version's maps are required; the PC version's files
-  do not work.
-- About 2 GB free on the card for the extracted `maps/`, plus room for the
-  disc image during the first launch.
-- The built files: `halo`, `halo_guest.elf`, `Halo.sh`, `halo_extract.py`
-  and `sdl_mapping.py`. This repository does not ship binaries; build them
-  as described in [Build from source](#build-from-source).
+  or `.xiso`), North American or European. The Xbox version's maps are
+  required; the PC version's files do not work.
+- About 3 GB free on the card: the extracted `maps/` (1.8 GB) and the cache
+  the game sets up at its first start (0.8 GB), plus room for the disc image
+  until the maps are copied.
+- The [latest release](https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/releases/latest) (`halo-ce-knulli-<version>.zip`), or the
+  files built as described in [Build from source](#build-from-source).
 
 ## Install
 
-1. Copy `halo`, `halo_guest.elf`, `halo_extract.py` and `sdl_mapping.py`
-   into `/userdata/roms/ports/halo/` on the handheld.
-2. Copy `Halo.sh` into `/userdata/roms/ports/`.
-3. Put your Xbox Halo disc image (`.iso`) in `/userdata/roms/ports/halo/`.
-4. Launch Halo from Ports. Refresh the game list if it does not appear.
-   The first launch extracts `maps/` from the image, which takes a few
-   minutes; the image can be deleted afterwards. Instead of an image you can
-   also copy an extracted Xbox `maps/` folder into `halo/`.
-5. To quit, hold the hotkey (MENU, or SELECT) and press START.
+1. Download `halo-ce-knulli-<version>.zip` from the
+   [latest release](https://github.com/kirklandsig/halo-ce-anbernic-rg35xx/releases/latest).
+2. Unzip it onto the SD card, into the partition that holds the `roms`
+   folder (over the network, `\\KNULLI\share`). It adds
+   `roms/ports/Halo.sh` and the folder `roms/ports/halo/`.
+3. Copy your Xbox Halo disc image (`.iso`) into `roms/ports/halo/`.
+4. On the handheld, start Halo from Ports. If it is not listed, update the
+   game lists in EmulationStation's menu, or restart the handheld.
+
+The first start copies `maps/` out of the disc image, with its progress on
+the screen (about four minutes); the image can be deleted afterwards. The
+game's own first start then takes about a minute more with a black screen
+while it sets up its cache (the screen says so first); later starts take
+seconds. Instead of a disc image you can also copy an extracted Xbox `maps/`
+folder into `halo/`. To quit, hold the hotkey (MENU, or SELECT) and press
+START. To update, unzip a newer release over the old files: `maps/`,
+`save/` and `config.toml` stay.
 
 The resulting layout:
 
@@ -137,6 +149,7 @@ The resulting layout:
     ├── halo
     ├── halo_guest.elf
     ├── halo_extract.py
+    ├── halo_screen.py
     ├── sdl_mapping.py
     ├── config.toml      written at the first launch
     ├── log.txt          the log of the last launch
@@ -197,10 +210,11 @@ ANDROID_NDK=$PWD/android-ndk-r28c SYSROOT_LIB=$PWD/sysroot ./build.sh
    into the upstream tree;
 3. downloads the SDL2 2.30.12 headers into `work/`;
 4. runs `python3 configure.py --release --android-ndk <ndk> --android-guest-cc clang-22`
-   (the first time; it downloads musl and SDL3 for the guest), then
+   (the first time, and again for another upstream commit; it downloads
+   musl and SDL3 for the guest), then
    `port/knulli/build.sh`;
-5. copies `halo`, `halo_guest.elf`, `Halo.sh`, `halo_extract.py` and
-   `sdl_mapping.py` into `dist/`.
+5. copies `halo`, `halo_guest.elf`, `Halo.sh`, `halo_extract.py`,
+   `halo_screen.py` and `sdl_mapping.py` into `dist/`.
 
 The first build takes 10 to 30 minutes; later builds are incremental.
 Optional variables: `GUEST_CC` (default `clang-22`), `HOST_CC` (default
@@ -276,10 +290,14 @@ A file `halo/init.txt` runs console commands at start-up, for example
 
 ## Troubleshooting
 
-- **Halo returns to the menu at once.** Read `halo/log.txt`. "no maps folder
-  and no disc image" means `halo/` has neither `maps/ui.map` nor an `.iso`.
-- **The first launch seems stuck.** Extracting `maps/` from the disc image
-  takes a few minutes with a black screen. The log shows the progress.
+- **Halo returns to the menu at once.** The screen says why first (no disc
+  image, not an Xbox disc image, an incomplete one, not enough free space);
+  `halo/log.txt` has the details. A start while the game runs already is
+  refused, and the log notes it.
+- **The first start seems stuck.** Copying `maps/` out of the disc image
+  takes about four minutes, with its progress on the screen; then the game
+  sets up its cache for about a minute with a black screen. A copy that was
+  stopped goes on where it stopped at the next start.
 - **The maps do not load.** The PC version's files do not work; use an Xbox
   disc image or an Xbox `maps/` folder.
 - **The buttons are wrong.** `sdl_mapping.py` builds the SDL mapping from
@@ -292,7 +310,8 @@ A file `halo/init.txt` runs console commands at start-up, for example
 - **The frame rate drops after a while.** At 70 °C the kernel lowers the CPU
   and GPU clocks. Lower `display.render_scale` for more headroom.
 - **The clocks stay high after a crash.** `Halo.sh` restores the CPU
-  governor and the GPU's minimum clock on exit; a reboot restores them too.
+  governor and the GPU's minimum clock on exit; the next start, or a
+  reboot, restores them too.
 
 ## FAQ
 
@@ -304,11 +323,11 @@ the halo-ce-universal decompilation; you supply the Xbox game's data.
 
 ### What frame rate does Halo CE get on the RG35XX H?
 
-At the default render scale of 0.75: 60 fps in the menus, about 44 fps on
-343 Guilty Spark (c10), about 40 fps in the beach battle of The Silent
-Cartographer (b30), and about 55 fps at the opening of Halo (a30). At
-the full 640x480 it is 20 to 26 fps. The numbers are improving; see the
-[performance table](#performance).
+At the default render scale of 0.75: 60 fps in the menus, about 40 fps on
+343 Guilty Spark (c10, 31 to 44), about 40 fps in the beach battle of The
+Silent Cartographer (b30), and about 55 fps at the opening of Halo (a30).
+At the full 640x480 it is about 24 to 40 fps. The numbers are improving;
+see the [performance table](#performance).
 
 ### Does it work with the Xbox version or the PC version of Halo?
 
@@ -318,9 +337,10 @@ code cannot load. Use a disc image of the original Xbox game.
 
 ### Is this legal?
 
-The repository contains only source code and documentation: the upstream
+The repository contains only source code and documentation, and its
+releases only the port's programs built from that source: the upstream
 decompilation's authors released their code under CC0, and so does this
-port. It contains no game files, disc images, maps or binaries of the game.
+port. Neither contains game files, disc images or maps.
 You need your own copy of the Xbox game. Whether decompilation projects are
 lawful depends on where you live; this is not legal advice. See the
 [legal notice](docs/LEGAL.md).
@@ -366,9 +386,10 @@ This is an unofficial fan project. It is not affiliated with, endorsed by or
 sponsored by Microsoft, Xbox Game Studios, Halo Studios or Bungie. Halo,
 Halo: Combat Evolved and Xbox are trademarks of Microsoft Corporation.
 
-The repository contains no Halo game files: no disc images, maps, XBE,
-extracted assets or prebuilt game binaries. It contains no Arm Mali driver
-binaries and no device libraries. To play, you need your own copy of the
+The repository and its releases contain no Halo game files: no disc
+images, maps, XBE or extracted assets. They contain no Arm Mali driver
+binaries and no device libraries; the releases hold only the port's own
+programs, built from this source. To play, you need your own copy of the
 original Xbox game. Details: [docs/LEGAL.md](docs/LEGAL.md).
 
 ## Credits

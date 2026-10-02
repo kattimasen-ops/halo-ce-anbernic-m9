@@ -10,11 +10,11 @@ the halo-ce-universal decompilation; you supply the Xbox game's data.
 
 ## What frame rate does Halo CE get on the RG35XX H?
 
-At the default render scale of 0.75: 60 fps in the menus, about 44 fps on
-343 Guilty Spark (c10), about 40 fps in the beach battle of The Silent
-Cartographer (b30), and about 55 fps at the opening of Halo (a30). At
-the full 640x480 it is 20 to 26 fps. The numbers are improving; see the
-[performance table](../README.md#performance).
+At the default render scale of 0.75: 60 fps in the menus, about 40 fps on
+343 Guilty Spark (c10, 31 to 44), about 40 fps in the beach battle of The
+Silent Cartographer (b30), and about 55 fps at the opening of Halo (a30).
+At the full 640x480 it is about 24 to 40 fps. The numbers are improving;
+see the [performance table](../README.md#performance).
 
 ## Does it work with the Xbox version or the PC version of Halo?
 
@@ -24,9 +24,10 @@ code cannot load. Use a disc image of the original Xbox game.
 
 ## Is this legal?
 
-The repository contains only source code and documentation: the upstream
+The repository contains only source code and documentation, and its
+releases only the port's programs built from that source: the upstream
 decompilation's authors released their code under CC0, and so does this
-port. It contains no game files, disc images, maps or binaries of the game.
+port. Neither contains game files, disc images or maps.
 You need your own copy of the Xbox game. Whether decompilation projects are
 lawful depends on where you live; this is not legal advice. See the
 [legal notice](LEGAL.md).
@@ -81,7 +82,7 @@ of the last launch in `log.txt`.
 
 Set `display.render_scale` in `config.toml`, from 0.5 to 1.0. The default,
 0.75, draws the 3D picture at 480x360 and scales it to the 640x480 screen.
-1.0 is sharper and slower (20 to 26 fps in the campaign).
+1.0 is sharper and slower (about 24 to 40 fps in the campaign).
 
 ## Why is the first launch slow?
 

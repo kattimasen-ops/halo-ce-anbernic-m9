@@ -125,8 +125,22 @@ if [ -f \$saved ] || [ -f \$none ]; then
 		exit 1
 	fi
 fi
+# the runner stopped (it stops the game, killed ten seconds later if it must
+# be, then puts the clocks back), twenty seconds at most
+runner=
+stop_runner() {
+	kill -TERM \$runner 2> /dev/null
+	waited=0
+	while kill -0 \$runner 2> /dev/null && [ \$waited -lt 20 ]; do
+		sleep 1
+		waited=\$((waited + 1))
+	done
+	! kill -0 \$runner 2> /dev/null || echo "the run could not be stopped"
+}
 trap 'restore; rm -f $staged /var/run/battery-saver/halo.pause' EXIT
-trap 'exit 143' TERM INT HUP
+# (a benchmark that is stopped stops its run first: the game's own init.txt
+# and the battery saver come back only after it)
+trap '[ -z "\$runner" ] || stop_runner > /dev/null 2>&1; exit 143' TERM INT HUP
 # the benchmark's init.txt in place of the game's own, which is kept aside
 # whole first (or noted as none)
 if [ -f \$init ]; then
@@ -153,8 +167,6 @@ knulli-screenshot /tmp/shot2.$token.png
 top -b -H -n 2 -d 3 | grep -E '^%Cpu|halo' | tail -24 > $top
 sleep $rest
 # the runner's end, two minutes after the game's at most; then it is stopped
-# (it stops the game, killed ten seconds later if it must be, then puts the
-# clocks back)
 waited=0
 while kill -0 \$runner 2> /dev/null && [ \$waited -lt 120 ]; do
 	sleep 1
@@ -162,13 +174,7 @@ while kill -0 \$runner 2> /dev/null && [ \$waited -lt 120 ]; do
 done
 if kill -0 \$runner 2> /dev/null; then
 	echo "the run did not end: stopped"
-	kill -TERM \$runner
-	waited=0
-	while kill -0 \$runner 2> /dev/null && [ \$waited -lt 20 ]; do
-		sleep 1
-		waited=\$((waited + 1))
-	done
-	! kill -0 \$runner 2> /dev/null || echo "the run could not be stopped"
+	stop_runner
 fi
 sleep 1
 cat /userdata/system/halo-dev/run.log

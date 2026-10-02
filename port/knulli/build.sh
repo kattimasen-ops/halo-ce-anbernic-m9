@@ -22,6 +22,7 @@ SDL2_INCLUDE=$(folder "${SDL2_INCLUDE:?the folder that holds SDL2/SDL.h}")
 SYSROOT_LIB=$(folder "${SYSROOT_LIB:?the device libraries}")
 NDK=$(folder "${ANDROID_NDK:?the Android NDK (for the OpenGL ES and EGL headers)}")
 cd "$(dirname "$0")/../.."
+ROOT=$(folder .)
 CC=${CC:-aarch64-linux-gnu-gcc}
 JOBS=${JOBS:-$(nproc)}
 OUT=build/knulli
@@ -41,6 +42,10 @@ for name in libSDL2-2.0.so.0:libSDL2.so libmali.so.0:libmali.so; do
 done
 
 CFLAGS="-O2 -g -mcpu=cortex-a53 -fPIC -Wall -Wno-unused-function -D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS"
+# (the debug information names the tree and the SDL2 headers by what they
+# are, not by where they are on this computer; the OpenGL ES headers are
+# found through build/knulli/gl_include, in the tree)
+CFLAGS="$CFLAGS -ffile-prefix-map=$ROOT=. -ffile-prefix-map=$SDL2_INCLUDE=sdl2"
 INCLUDES="-Iport/knulli/compat -Iport/knulli/host -Iport/android/include -Iport/android/host -Iport/linux/src
 	-Iport/third_party/tomlc17 -I$OUT/gl_include -I$SDL2_INCLUDE"
 MINIUPNPC="-Iport/third_party/miniupnpc/include -Iport/third_party/miniupnpc/src -DMINIUPNP_STATICLIB
