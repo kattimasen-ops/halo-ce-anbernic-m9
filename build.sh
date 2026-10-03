@@ -184,7 +184,12 @@ else
     PGO_FLAG="--pgo=use"
 fi
 
-# ── Fix 2: APCs in WaitForSingleObjectEx/SleepEx ─────────────────────
+# ── Fix 1: APCs in WaitForSingleObjectEx/SleepEx ─────────────────────
+# Die Completion-Routinen (APCs) liefen nur VOR dem Warten, nicht WÄHREND.
+# Die Engine wartet in WaitForSingleObjectEx auf eine abgeschlossene
+# asynchrone Profil-I/O, die APC lief nie, nach 6 Sekunden Timeout meldete
+# die Engine "checksum failed on persistent storage". Die Warteschleifen
+# werden so erweitert, dass APCs auch während des Wartens ausgeführt werden.
 python3 - "$SRC/port/linux/src/xbox_kernel.c" <<'PYEOF'
 import sys
 
@@ -291,7 +296,16 @@ with open(path, 'w') as f:
 print("xbox_kernel.c gepatcht: APCs laufen jetzt auch während WaitForSingleObjectEx/SleepEx")
 PYEOF
 
-# ── Fix 3: android_build.py (Guest-ELF) optimieren ──────────────────
+# ── Fix 2: android_build.py (Guest-ELF) optimieren ──────────────────
+# Cortex-A35 statt Cortex-A53, -O3 statt -O2, plus zusätzliche
+# Compiler-Flags für maximale Code-Optimierung:
+#   -mtune=cortex-a35      Feinabstimmung auf die A35-Pipeline
+#   -fomit-frame-pointer   Gibt ein Register frei (nur Guest, kein Stack-Walker)
+#   -funroll-loops         Entrollt häufige Schleifen
+#   -fno-math-errno        Keine errno-Prüfung bei Mathe-Funktionen
+#   -fno-trapping-math     Keine Trapping-Checks bei Gleitkomma
+#   -fmerge-all-constants  Führt konstante Daten zusammen
+#   -fno-strict-aliasing   Sicherer für älteren C-Code (Halo)
 python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import sys
 
@@ -299,33 +313,36 @@ path = sys.argv[1]
 with open(path) as f:
     text = f.read()
 
-# Cortex-A35 statt Cortex-A53
+# Cortex-A35 statt Cortex-A53, plus mtune
 old_mcpu = '"-mcpu=cortex-a53"'
-new_mcpu = '"-mcpu=cortex-a35"'
+new_mcpu = '"-mcpu=cortex-a35",\n    "-mtune=cortex-a35"'
 count_mcpu = text.count(old_mcpu)
 if count_mcpu == 0:
     print(f"FEHLER: {old_mcpu} nicht gefunden", file=sys.stderr)
     sys.exit(1)
 text = text.replace(old_mcpu, new_mcpu)
 
-# -O3 statt -O2 und zusätzliche Optimierungen in GUEST_ABI_FLAGS
+# -O3 statt -O2 und zusätzliche Optimierungen
 old_flags = '"-ffp-contract=off",\n    "-O2",'
 new_flags = '''"-ffp-contract=off",
     "-O3",
     "-fomit-frame-pointer",
     "-funroll-loops",
     "-fno-math-errno",
-    "-fno-trapping-math",'''
+    "-fno-trapping-math",
+    "-fmerge-all-constants",
+    "-fno-strict-aliasing",'''
 count_flags = text.count(old_flags)
 if count_flags == 0:
-    # Fallback: Suche nach dem Ende von GUEST_ABI_FLAGS
     old_flags = '"-ffp-contract=off",'
     new_flags = '''"-ffp-contract=off",
     "-O3",
     "-fomit-frame-pointer",
     "-funroll-loops",
     "-fno-math-errno",
-    "-fno-trapping-math",'''
+    "-fno-trapping-math",
+    "-fmerge-all-constants",
+    "-fno-strict-aliasing",'''
     count_flags = text.count(old_flags)
     if count_flags == 0:
         print("WARNUNG: GUEST_ABI_FLAGS-Marker nicht gefunden", file=sys.stderr)
@@ -337,10 +354,14 @@ else:
 with open(path, 'w') as f:
     f.write(text)
 
-print(f"android_build.py gepatcht: {count_mcpu}x cortex-a53 -> cortex-a35, {count_flags}x O2 -> O3 + extra flags")
+print(f"android_build.py gepatcht: {count_mcpu}x cortex-a53 -> cortex-a35+mtune, {count_flags}x O2 -> O3 + extra flags")
 PYEOF
 
-# ── Fix 4: linux_build.py (Host-Binary) optimieren ─────────────────
+# ── Fix 3: linux_build.py (Host-Binary) optimieren ──────────────────
+# Der Host-Build (halo) verwendet -O2. Hier auf -O3 hochsetzen und
+# zusätzliche sichere Flags ergänzen.
+# WICHTIG: -fomit-frame-pointer NICHT für den Host, weil der Stack-Walker
+# (get_return_eip) den Frame-Pointer benötigt.
 python3 - "$SRC/tools/linux_build.py" <<'PYEOF'
 import sys
 
@@ -357,13 +378,14 @@ if count_opt == 0:
 else:
     text = text.replace(old_opt, new_opt)
 
-# -fomit-frame-pointer für den Host-Build ist NICHT erlaubt (Stack-Walker),
-# aber -funroll-loops und -fno-math-errno sind safe.
+# Zusätzliche Flags in LINUX_ABI_FLAGS (ohne fomit-frame-pointer!)
 old_abi = '"-ffp-contract=off",\n    OPTIMISATION,'
 new_abi = '''"-ffp-contract=off",
     "-funroll-loops",
     "-fno-math-errno",
     "-fno-trapping-math",
+    "-fmerge-all-constants",
+    "-fno-strict-aliasing",
     OPTIMISATION,'''
 count_abi = text.count(old_abi)
 if count_abi > 0:
@@ -391,7 +413,7 @@ if [ -f "$SRC/.port-stamp" ] && [ "$(cat "$SRC/.port-stamp")" = "$stamp" ]; then
 fi
 echo "$stamp" > "$SRC/.port-stamp"
 
-# ── Build mit LTO + PGO ───────────────────────────────────────────────
+# ── Build mit LTO + PGO + allen Optimierungen ────────────────────────
 export ANDROID_NDK SYSROOT_LIB
 export SDL2_INCLUDE
 export GUEST_CC HOST_CC JOBS
@@ -405,7 +427,7 @@ python3 configure.py --release --lto=full $PGO_FLAG \
 echo "== Baue Guest-ELF (halo_guest.elf) ..."
 ninja -j "$JOBS" build/android/halo_guest.elf
 
-echo "== Baue Host-Binary (halo) ..."
+echo "== Baue Host-Binary (halo) über port/knulli/build.sh ..."
 bash "$SRC/port/knulli/build.sh"
 
 # ── Distribution zusammenstellen ──────────────────────────────────────
