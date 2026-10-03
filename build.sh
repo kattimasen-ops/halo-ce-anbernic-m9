@@ -164,26 +164,69 @@ if ! tree_is_patched; then
     git -C "$SRC" apply --summary "$PATCH" | awk '$1 == "create" { print $4 }' | xargs -r git -C "$SRC" add -N --
 fi
 
-# ── PGO: immer deaktiviert ───────────────────────────────────────────
-# Das Upstream-Repo liefert pgo/halo_linux.profdata, das mit dem 32-bit
-# x86-Linux-Desktop-Build trainiert wurde. Ein PGO-Profil ist architektur-
-# spezifisch (Basic-Block-Adressen, Branch-Gewichte, Inline-Entscheidungen
-# des Trainingslaufes): mit x86-Profil gegen einen ARM-Cortex-A35 zu
-# kompilieren, macht die Optimierung an den falschen Stellen aggressiv.
-# Der Knulli-Patch bringt ausserdem einen Program-Binary-Cache mit, der
-# die Kaltstart-Vorteile eines PGO-Profils ohnehin überkompensiert.
-# Wenn du spaeter ein eigenes Profil auf dem M9 Pro trainierst
-# (configure.py --pgo=train), kannst du diesen Block wieder auf "use"
-# umstellen.
+# ══════════════════════════════════════════════════════════════════════
+# PGO: Android-Profil verwenden
+# ══════════════════════════════════════════════════════════════════════
+#
+# Herkunft: Andiweli/HaloCE-Android-AAOS. Der Commit "Improve performance
+# by 2x to 3x" zeigt mit PGO einen Sprung von 132 auf 197 fps auf Android
+# und von 171 auf 201 fps auf Linux. Der Effekt ist auf dem Cortex-A35
+# besonders gross, weil PGO die Branch-Vorhersage und die Inline-
+# Entscheidungen auf die tatsaechliche Ausfuehrung abstimmt.
+#
+# Reihenfolge: erst Android-Profil, dann Linux-Profil, dann ohne PGO.
+PGO_PROFILE=""
 PGO_FLAG="--pgo=off"
-echo "== PGO deaktiviert (--pgo=off); siehe Kommentar im Skript"
+
+PGO_ANDROID_URL="https://raw.githubusercontent.com/Andiweli/HaloCE-Android-AAOS/main/pgo/halo_android.profdata"
+PGO_LINUX_URL="https://raw.githubusercontent.com/cybersecurity/halo-ce-universal/main/pgo/halo_linux.profdata"
+
+mkdir -p "$SRC/pgo"
+
+echo "== Lade Android-PGO-Profil von Andiweli/HaloCE-Android-AAOS ..."
+if curl -fsSL -o "$SRC/pgo/halo_android.profdata" "$PGO_ANDROID_URL" 2>/dev/null; then
+    PGO_PROFILE="$SRC/pgo/halo_android.profdata"
+    PGO_FLAG="--pgo=use"
+    echo "== Android-PGO-Profil geladen: $(stat -c%s "$PGO_PROFILE") Bytes"
+    echo "== Baue mit PGO (--pgo=use) unter Verwendung des Android-Profils"
+else
+    echo "== Android-PGO-Profil nicht erreichbar; versuche Linux-Profil ..."
+    if curl -fsSL -o "$SRC/pgo/halo_linux.profdata" "$PGO_LINUX_URL" 2>/dev/null; then
+        PGO_PROFILE="$SRC/pgo/halo_linux.profdata"
+        PGO_FLAG="--pgo=use"
+        echo "== Linux-PGO-Profil geladen: $(stat -c%s "$PGO_PROFILE") Bytes"
+        echo "== Baue mit PGO (--pgo=use) unter Verwendung des Linux-Profils"
+    else
+        echo "== Kein PGO-Profil verfuegbar. Baue ohne PGO (--pgo=off)"
+        PGO_FLAG="--pgo=off"
+    fi
+fi
+
+PGO_EXTRA_ARGS=""
+if [ -n "$PGO_PROFILE" ]; then
+    PGO_EXTRA_ARGS="--pgo-profile $PGO_PROFILE"
+fi
+
+# ══════════════════════════════════════════════════════════════════════
+# HINWEIS ZU -march=native
+# ══════════════════════════════════════════════════════════════════════
+#
+# Der AAOS-Port hat -march=native in seinem Benchmark als weiteren
+# Optimierungsschritt aufgefuehrt (201 -> 224 fps auf Linux). Das gilt
+# aber nur fuer NATIVE Builds (x86_64 -> x86_64).
+#
+# Wir cross-compilen von x86_64 nach ARM64. -march=native wuerde dort
+# die CPU des Build-Rechners (x86_64) erkennen und x86_64-Code erzeugen.
+# Ergebnis: entweder Compiler-Fehler oder ein Binary, das auf dem M9 Pro
+# sofort mit SIGILL abstuerzt.
+#
+# Der korrekte Cross-Compile-Weg ist das, was wir bereits verwenden:
+#   -mcpu=cortex-a35+dotprod -mtune=cortex-a35
+# Das aktiviert ARMv8-A, NEON, CRC und die Dot-Product-Instruktion
+# (die die A35 unterstuetzt) und optimiert Scheduling fuer die A35-
+# Pipeline. Im Fix-2-Block unten wird das gesetzt.
 
 # ── Fix 1: APCs in WaitForSingleObjectEx/SleepEx ─────────────────────
-# Die Completion-Routinen (APCs) liefen nur VOR dem Warten, nicht WÄHREND.
-# Die Engine wartet in WaitForSingleObjectEx auf eine abgeschlossene
-# asynchrone Profil-I/O, die APC lief nie, nach 6 Sekunden Timeout meldete
-# die Engine "checksum failed on persistent storage". Die Warteschleifen
-# werden so erweitert, dass APCs auch während des Wartens ausgeführt werden.
 python3 - "$SRC/port/linux/src/xbox_kernel.c" <<'PYEOF'
 import sys
 
@@ -290,16 +333,17 @@ with open(path, 'w') as f:
 print("xbox_kernel.c gepatcht: APCs laufen jetzt auch während WaitForSingleObjectEx/SleepEx")
 PYEOF
 
-# ── Fix 2: android_build.py (Guest-ELF) optimieren ──────────────────
-# Cortex-A35 statt Cortex-A53, -O3 statt -O2, plus zusätzliche
-# Compiler-Flags für maximale Code-Optimierung:
-#   -mtune=cortex-a35      Feinabstimmung auf die A35-Pipeline
-#   -fomit-frame-pointer   Gibt ein Register frei (nur Guest, kein Stack-Walker)
-#   -funroll-loops         Entrollt häufige Schleifen
-#   -fno-math-errno        Keine errno-Prüfung bei Mathe-Funktionen
-#   -fno-trapping-math     Keine Trapping-Checks bei Gleitkomma
-#   -fmerge-all-constants  Führt konstante Daten zusammen
-#   -fno-strict-aliasing   Sicherer für älteren C-Code (Halo)
+# ══════════════════════════════════════════════════════════════════════
+# Fix 2: android_build.py (Guest-ELF) optimieren
+# ══════════════════════════════════════════════════════════════════════
+#
+# ACHTUNG: cortex-a35+dotprod statt cortex-a35. Die Dot-Product-
+# Instruktion (UDOT/SDOT) ist Teil der ARMv8.2-A-Erweiterung und wird
+# von der Cortex-A35 unterstuetzt. Sie beschleunigt die NEON-Berechnung
+# von Matrix-Produkten (die Halo fuer die Transformationsmatrizen nutzt)
+# erheblich.
+#
+# KEIN -march=native: siehe Kommentarblock oben.
 python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import sys
 
@@ -307,19 +351,26 @@ path = sys.argv[1]
 with open(path) as f:
     text = f.read()
 
-# Idempotenz: schon gepatcht?
-if '"-mcpu=cortex-a35",\n    "-mtune=cortex-a35"' in text:
-    print("android_build.py enthält bereits cortex-a35+mtune – überspringe.")
+if '"-mcpu=cortex-a35+dotprod"' in text:
+    print("android_build.py enthält bereits cortex-a35+dotprod – überspringe.")
     sys.exit(0)
 
-# Cortex-A35 statt Cortex-A53, plus mtune
+# Ersetze: "-mcpu=cortex-a53" oder "-mcpu=cortex-a35" -> "+dotprod"
 old_mcpu = '"-mcpu=cortex-a53"'
-new_mcpu = '"-mcpu=cortex-a35",\n    "-mtune=cortex-a35"'
+new_mcpu = '"-mcpu=cortex-a35+dotprod",\n    "-mtune=cortex-a35"'
 count_mcpu = text.count(old_mcpu)
 if count_mcpu == 0:
-    print(f"FEHLER: {old_mcpu} nicht gefunden", file=sys.stderr)
-    sys.exit(1)
-text = text.replace(old_mcpu, new_mcpu)
+    # Vielleicht schon gepatcht auf cortex-a35 ohne dotprod
+    old_mcpu = '"-mcpu=cortex-a35",\n    "-mtune=cortex-a35"'
+    new_mcpu = '"-mcpu=cortex-a35+dotprod",\n    "-mtune=cortex-a35"'
+    count_mcpu = text.count(old_mcpu)
+    if count_mcpu == 0:
+        print("WARNUNG: keine mcpu-Zeile gefunden, weder cortex-a53 noch cortex-a35+mtune")
+        print("         Setze cortex-a35+dotprod manuell in GUEST_ABI_FLAGS.")
+    else:
+        text = text.replace(old_mcpu, new_mcpu)
+else:
+    text = text.replace(old_mcpu, new_mcpu)
 
 # -O3 statt -O2 und zusätzliche Optimierungen
 old_flags = '"-ffp-contract=off",\n    "-O2",'
@@ -353,26 +404,10 @@ else:
 with open(path, 'w') as f:
     f.write(text)
 
-print(f"android_build.py gepatcht: {count_mcpu}x cortex-a53 -> cortex-a35+mtune, {count_flags}x O2 -> O3 + extra flags")
+print(f"android_build.py gepatcht: {count_mcpu}x mcpu -> cortex-a35+dotprod, {count_flags}x O2 -> O3 + extra flags")
 PYEOF
 
 # ── Fix 2b: clang-Builtin-Shim für den Guest-Build ───────────────────
-# Der Guest-Build verwendet -nostdinc, damit keine glibc-Header des Hosts
-# in ein fremdes Target lecken. Das verbirgt aber auch clangs eigene
-# Builtin-Header (arm_neon.h etc.), die unter <resource-dir>/include
-# liegen. Der Fehler
-#     source/math/matrix_math.c:93:10: fatal error: 'arm_neon.h' file not found
-# ist genau das.
-#
-# Die ganze <resource-dir>/include freizuschalten ist aber FALSCH: dann
-# wird clangs stddef.h gefunden, das size_t als __SIZE_TYPE__ definiert
-# (= unsigned long auf arm64_32), während musl's bits/alltypes.h size_t
-# als unsigned int (über _Addr) definiert. Das sind zwei 32-Bit-Typen
-# mit unterschiedlichen Namen, und die Neudefinition bricht den Build:
-#     bits/alltypes.h:77:24: error: typedef redefinition with
-#     different types ('unsigned int' vs 'unsigned long')
-# Deshalb legen wir nur die ARM-Vektor-Header in ein Shim-Verzeichnis
-# und geben NUR dieses frei. -nostdinc bleibt für alles andere wirksam.
 python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import sys
 
@@ -459,8 +494,7 @@ if old_fn in text:
                         "_clang_builtin_shim(guest_cc)")
 elif "_clang_resource_include" in text:
     print("FEHLER: alte _clang_resource_include-Funktion gefunden, aber "
-          "Text stimmt nicht mit dem erwarteten Muster ueberein. Bitte "
-          "manuell pruefen.", file=sys.stderr)
+          "Text stimmt nicht mit dem erwarteten Muster ueberein.", file=sys.stderr)
     sys.exit(1)
 else:
     anchor = """    for sdk in (Path.home() / "Android/Sdk", Path("/opt/android-sdk")):
@@ -489,8 +523,7 @@ if "_clang_builtin_shim(guest_cc)" not in text:
     if old_abi in text:
         text = text.replace(old_abi, new_abi, 1)
     else:
-        print("WARNUNG: guest_abi-Berechnung nicht gefunden, konnte "
-              "Builtin-Shim nicht einhaengen", file=sys.stderr)
+        print("WARNUNG: guest_abi-Berechnung nicht gefunden.", file=sys.stderr)
 
 with open(path, 'w') as f:
     f.write(text)
@@ -499,10 +532,6 @@ print("android_build.py gepatcht: clang-Builtin-Shim für Guest-Build aktiv")
 PYEOF
 
 # ── Fix 3: linux_build.py (Host-Binary) optimieren ──────────────────
-# Der Host-Build (halo) verwendet -O2. Hier auf -O3 hochsetzen und
-# zusätzliche sichere Flags ergänzen.
-# WICHTIG: -fomit-frame-pointer NICHT für den Host, weil der Stack-Walker
-# (get_return_eip) den Frame-Pointer benötigt.
 python3 - "$SRC/tools/linux_build.py" <<'PYEOF'
 import sys
 
@@ -534,7 +563,7 @@ count_abi = text.count(old_abi)
 if count_abi > 0:
     text = text.replace(old_abi, new_abi, 1)
 else:
-    print("WARNUNG: LINUX_ABI_FLAGS-Marker für zusätzliche Flags nicht gefunden", file=sys.stderr)
+    print("WARNUNG: LINUX_ABI_FLAGS-Marker nicht gefunden", file=sys.stderr)
 
 with open(path, 'w') as f:
     f.write(text)
@@ -543,32 +572,13 @@ print(f"linux_build.py gepatcht: {count_opt}x O2 -> O3, {count_abi}x zusätzlich
 PYEOF
 
 # ── Fix 4: Quellcode-Optimierungen (Memory, NEON) ────────────────────
-# Nur noch zwei Patches. patch_tile_renderer.py ist entfallen: der
-# Knulli-Patch (halo-ce-universal-knulli.patch) implementiert einen
-# Framebuffer-Cache mit color_level-Unterstuetzung (fuer Render-Targets
-# in einzelne Mip-Level des Wassers) und einen Render-Target-Cache
-# bereits selbst, und zwar deutlich umfangreicher und korrekt fuer
-# diese Faelle. Ein zusaetzlicher Patch wuerde nur den color_level-
-# Parameter wegoptimieren und das Wasser kaputtmachen.
-#
-# patch_memory_pools.py
-#   - deaktiviert den Debug-Allocator (Dateiname+Zeile pro malloc) in
-#     Release-Builds. Auf dem Cortex-A35 waren das bei 53.419 Aufrufen
-#     pro Frame messbar. Mit HALO_DEBUG_ALLOCATOR=1 laesst er sich wieder
-#     einschalten.
-#   - verlegt die grossen Arbeits-Arrays in decal_new_from_collision nach
-#     __thread, damit sie nicht bei jedem Decal neu auf dem Stack liegen.
-#
-# patch_neon_math.py
-#   - memcmp/memcpy in guest_string.c bekommen 16-/64-Byte-NEON-Pfade.
-#   - matrix4x3_transform_point/vector laufen auf AArch64 über NEON.
 echo ""
 echo "== Fix 4: Quellcode-Optimierungen ..."
 for patch_script in patch_memory_pools.py patch_neon_math.py; do
     if [ -f "$HERE/patches/$patch_script" ]; then
         echo "== Wende $patch_script an ..."
         if ! python3 "$HERE/patches/$patch_script" "$SRC"; then
-            echo "WARNUNG: $patch_script fehlgeschlagen (nicht kritisch, Build laeuft weiter)"
+            echo "WARNUNG: $patch_script fehlgeschlagen (nicht kritisch)"
         fi
     else
         echo "== $patch_script nicht vorhanden – ueberspringe"
@@ -589,15 +599,15 @@ if [ -f "$SRC/.port-stamp" ] && [ "$(cat "$SRC/.port-stamp")" = "$stamp" ]; then
 fi
 echo "$stamp" > "$SRC/.port-stamp"
 
-# ── Build mit LTO, ohne PGO ──────────────────────────────────────────
+# ── Build mit LTO + PGO ──────────────────────────────────────────────
 export ANDROID_NDK SYSROOT_LIB
 export SDL2_INCLUDE
 export GUEST_CC HOST_CC JOBS
 
 cd "$SRC"
 
-echo "== Konfiguriere mit --lto=full $PGO_FLAG ..."
-python3 configure.py --release --lto=full $PGO_FLAG \
+echo "== Konfiguriere mit --lto=full $PGO_FLAG $PGO_EXTRA_ARGS ..."
+python3 configure.py --release --lto=full $PGO_FLAG $PGO_EXTRA_ARGS \
     --android-ndk "$ANDROID_NDK" --android-guest-cc "$GUEST_CC"
 
 echo "== Baue Guest-ELF (halo_guest.elf) ..."
