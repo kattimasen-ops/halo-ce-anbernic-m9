@@ -186,11 +186,18 @@ else
 fi
 
 # ── Fix 1: APCs in WaitForSingleObjectEx/SleepEx ─────────────────────
+# Die Completion-Routinen (APCs) liefen nur VOR dem Warten, nicht WÄHREND.
+# Die Engine wartet in WaitForSingleObjectEx auf eine abgeschlossene
+# asynchrone Profil-I/O, die APC lief nie, nach 6 Sekunden Timeout meldete
+# die Engine "checksum failed on persistent storage". Die Warteschleifen
+# werden so erweitert, dass APCs auch während des Wartens ausgeführt werden.
 python3 - "$SRC/port/linux/src/xbox_kernel.c" <<'PYEOF'
 import sys
+
 path = sys.argv[1]
 with open(path) as f:
     text = f.read()
+
 wait_old = '''\tif (milliseconds == INFINITE)
 \t\t{
 \t\t\tpthread_cond_wait(&handle->condition, &handle->lock);
@@ -201,6 +208,7 @@ wait_old = '''\tif (milliseconds == INFINITE)
 \t\t\t\tresult = WAIT_TIMEOUT;
 \t\t\tbreak;
 \t\t}'''
+
 wait_new = '''\tif (alertable && platform_run_apcs())
 \t\t{
 \t\t\tpthread_mutex_unlock(&handle->lock);
@@ -208,6 +216,7 @@ wait_new = '''\tif (alertable && platform_run_apcs())
 \t\t}
 \t\tif (milliseconds == INFINITE)
 \t\t{
+\t\t\t/* 10 ms aufwachen, damit fertige APCs laufen können */
 \t\t\tstruct timespec short_wait;
 \t\t\tclock_gettime(CLOCK_REALTIME, &short_wait);
 \t\t\tshort_wait.tv_nsec += 10000000;
@@ -229,6 +238,7 @@ wait_new = '''\tif (alertable && platform_run_apcs())
 \t\t\t\tresult = WAIT_TIMEOUT;
 \t\t\tbreak;
 \t\t}'''
+
 if wait_old not in text:
     print("FEHLER: WaitForSingleObjectEx-Warteschleife nicht gefunden", file=sys.stderr)
     sys.exit(1)
@@ -246,6 +256,7 @@ sleep_old = '''\tif (milliseconds == INFINITE)
 \tif (alertable && platform_run_apcs())
 \t\treturn WAIT_IO_COMPLETION;
 \treturn 0;'''
+
 sleep_new = '''\tif (milliseconds == INFINITE)
 \t{
 \t\tfor (;;)
@@ -274,6 +285,7 @@ sleep_new = '''\tif (milliseconds == INFINITE)
 \t\t\treturn WAIT_IO_COMPLETION;
 \t}
 \treturn 0;'''
+
 if sleep_old not in text:
     print("FEHLER: SleepEx-Schleife nicht gefunden", file=sys.stderr)
     sys.exit(1)
@@ -281,15 +293,28 @@ text = text.replace(sleep_old, sleep_new, 1)
 
 with open(path, 'w') as f:
     f.write(text)
+
 print("xbox_kernel.c gepatcht: APCs laufen jetzt auch während WaitForSingleObjectEx/SleepEx")
 PYEOF
 
 # ── Fix 2: android_build.py (Guest-ELF) optimieren ──────────────────
+# Cortex-A35 statt Cortex-A53, -O3 statt -O2, plus zusätzliche
+# Compiler-Flags für maximale Code-Optimierung:
+#   -mtune=cortex-a35      Feinabstimmung auf die A35-Pipeline
+#   -fomit-frame-pointer   Gibt ein Register frei (nur Guest, kein Stack-Walker)
+#   -funroll-loops         Entrollt häufige Schleifen
+#   -fno-math-errno        Keine errno-Prüfung bei Mathe-Funktionen
+#   -fno-trapping-math     Keine Trapping-Checks bei Gleitkomma
+#   -fmerge-all-constants  Führt konstante Daten zusammen
+#   -fno-strict-aliasing   Sicherer für älteren C-Code (Halo)
 python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import sys
+
 path = sys.argv[1]
 with open(path) as f:
     text = f.read()
+
+# Cortex-A35 statt Cortex-A53, plus mtune
 old_mcpu = '"-mcpu=cortex-a53"'
 new_mcpu = '"-mcpu=cortex-a35",\n    "-mtune=cortex-a35"'
 count_mcpu = text.count(old_mcpu)
@@ -297,6 +322,8 @@ if count_mcpu == 0:
     print(f"FEHLER: {old_mcpu} nicht gefunden", file=sys.stderr)
     sys.exit(1)
 text = text.replace(old_mcpu, new_mcpu)
+
+# -O3 statt -O2 und zusätzliche Optimierungen
 old_flags = '"-ffp-contract=off",\n    "-O2",'
 new_flags = '''"-ffp-contract=off",
     "-O3",
@@ -324,17 +351,26 @@ if count_flags == 0:
         text = text.replace(old_flags, new_flags, 1)
 else:
     text = text.replace(old_flags, new_flags, 1)
+
 with open(path, 'w') as f:
     f.write(text)
+
 print(f"android_build.py gepatcht: {count_mcpu}x cortex-a53 -> cortex-a35+mtune, {count_flags}x O2 -> O3 + extra flags")
 PYEOF
 
 # ── Fix 3: linux_build.py (Host-Binary) optimieren ──────────────────
+# Der Host-Build (halo) verwendet -O2. Hier auf -O3 hochsetzen und
+# zusätzliche sichere Flags ergänzen.
+# WICHTIG: -fomit-frame-pointer NICHT für den Host, weil der Stack-Walker
+# (get_return_eip) den Frame-Pointer benötigt.
 python3 - "$SRC/tools/linux_build.py" <<'PYEOF'
 import sys
+
 path = sys.argv[1]
 with open(path) as f:
     text = f.read()
+
+# -O3 statt -O2 (OPTIMISATION-Konstante)
 old_opt = 'OPTIMISATION = "-O2"'
 new_opt = 'OPTIMISATION = "-O3"'
 count_opt = text.count(old_opt)
@@ -342,6 +378,8 @@ if count_opt == 0:
     print("WARNUNG: OPTIMISATION = \"-O2\" nicht gefunden", file=sys.stderr)
 else:
     text = text.replace(old_opt, new_opt)
+
+# Zusätzliche Flags in LINUX_ABI_FLAGS (ohne fomit-frame-pointer!)
 old_abi = '"-ffp-contract=off",\n    OPTIMISATION,'
 new_abi = '''"-ffp-contract=off",
     "-funroll-loops",
@@ -355,25 +393,43 @@ if count_abi > 0:
     text = text.replace(old_abi, new_abi, 1)
 else:
     print("WARNUNG: LINUX_ABI_FLAGS-Marker für zusätzliche Flags nicht gefunden", file=sys.stderr)
+
 with open(path, 'w') as f:
     f.write(text)
+
 print(f"linux_build.py gepatcht: {count_opt}x O2 -> O3, {count_abi}x zusätzliche Flags")
 PYEOF
 
-# ── Fix 4: Quellcode-Optimierungen (Memory Pools, NEON, Tile-Renderer) ──
-# Diese Patches sind optional. Sie werden nur angewendet, wenn die
-# Patch-Skripte vorhanden sind. Sie erfordern eine genaue Kenntnis des
-# Quellcodes und müssen ggf. an die tatsächlichen Funktionsnamen angepasst
-# werden. Bei Fehlern wird der Build fortgesetzt.
-echo "== Quellcode-Optimierungen (optional) ..."
+# ── Fix 4: Quellcode-Optimierungen (Memory, NEON, Tile-Renderer) ─────
+# Diese drei Patches sind eigenstaendig. Jeder prueft selbst, ob die
+# Ziel-Strings im Quellcode vorhanden sind. Wenn ein Patch nicht passt,
+# wird der Build fortgesetzt (die Patches sind optional).
+#
+# patch_memory_pools.py
+#   - deaktiviert den Debug-Allocator (Dateiname+Zeile pro malloc) in
+#     Release-Builds. Auf dem Cortex-A35 waren das bei 53.419 Aufrufen
+#     pro Frame messbar. Mit HALO_DEBUG_ALLOCATOR=1 laesst er sich wieder
+#     einschalten.
+#   - verlegt die grossen Arbeits-Arrays in decal_new_from_collision nach
+#     __thread, damit sie nicht bei jedem Decal neu auf dem Stack liegen.
+#
+# patch_neon_math.py
+#   - memcmp/memcpy in guest_string.c bekommen 16-/64-Byte-NEON-Pfade.
+#   - dot_product3d wird als out-of-line NEON-Variante bereitgestellt.
+#
+# patch_tile_renderer.py
+#   - host_gl.c bekommt einen Framebuffer-Bind-Cache (bereit zur Nutzung
+#     durch d3d8_gl.c, falls dessen state_framebuffer ihn aufruft).
+echo ""
+echo "== Fix 4: Quellcode-Optimierungen (optional) ..."
 for patch_script in patch_memory_pools.py patch_neon_math.py patch_tile_renderer.py; do
     if [ -f "$HERE/patches/$patch_script" ]; then
         echo "== Wende $patch_script an ..."
         if ! python3 "$HERE/patches/$patch_script" "$SRC"; then
-            echo "WARNUNG: $patch_script fehlgeschlagen (nicht kritisch, Build läuft weiter)"
+            echo "WARNUNG: $patch_script fehlgeschlagen (nicht kritisch, Build laeuft weiter)"
         fi
     else
-        echo "== $patch_script nicht vorhanden – überspringe"
+        echo "== $patch_script nicht vorhanden – ueberspringe"
     fi
 done
 
