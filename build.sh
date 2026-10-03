@@ -164,12 +164,20 @@ if ! tree_is_patched; then
     git -C "$SRC" apply --summary "$PATCH" | awk '$1 == "create" { print $4 }' | xargs -r git -C "$SRC" add -N --
 fi
 
-# ── PGO-Prüfung (OHNE manuellen -fprofile-use-Patch!) ──────────────────
+# ── PGO-Prüfung: Profile vorhanden? ───────────────────────────────────
 PGO_PROFILE="$SRC/pgo/halo_linux.profdata"
 if [ ! -f "$PGO_PROFILE" ]; then
     echo "== PGO-Profil fehlt: $PGO_PROFILE"
-    echo "== Baue ohne PGO (--pgo=off)"
-    PGO_FLAG="--pgo=off"
+    echo "== Versuche, das Profil vom Upstream-Repo zu laden..."
+    mkdir -p "$SRC/pgo"
+    if curl -fsSL -o "$PGO_PROFILE" \
+        "https://raw.githubusercontent.com/cybersecurity/halo-ce-universal/main/pgo/halo_linux.profdata"; then
+        echo "== PGO-Profil heruntergeladen: $(stat -c%s "$PGO_PROFILE") Bytes"
+        PGO_FLAG="--pgo=use"
+    else
+        echo "== Kein PGO-Profil verfügbar. Baue ohne PGO (--pgo=off)"
+        PGO_FLAG="--pgo=off"
+    fi
 else
     echo "== PGO-Profil gefunden: $PGO_PROFILE"
     echo "== Baue mit PGO (--pgo=use)"
@@ -283,9 +291,7 @@ with open(path, 'w') as f:
 print("xbox_kernel.c gepatcht: APCs laufen jetzt auch während WaitForSingleObjectEx/SleepEx")
 PYEOF
 
-# ── Fix 3: Cortex-A35 statt Cortex-A53, -O3 statt -O2 ────────────────
-# KEIN -fprofile-use-Patch! Das Projekt setzt die PGO-Flags selbst über
-# profile_use_flags() mit dem vollständigen Pfad zur Profildatei.
+# ── Fix 3: android_build.py (Guest-ELF) optimieren ──────────────────
 python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import sys
 
@@ -293,6 +299,7 @@ path = sys.argv[1]
 with open(path) as f:
     text = f.read()
 
+# Cortex-A35 statt Cortex-A53
 old_mcpu = '"-mcpu=cortex-a53"'
 new_mcpu = '"-mcpu=cortex-a35"'
 count_mcpu = text.count(old_mcpu)
@@ -301,18 +308,73 @@ if count_mcpu == 0:
     sys.exit(1)
 text = text.replace(old_mcpu, new_mcpu)
 
-old_o2 = '"-ffp-contract=off",\n    "-O2",'
-new_o2 = '"-ffp-contract=off",\n    "-O3",'
-count_o2 = text.count(old_o2)
-if count_o2 == 0:
-    print("WARNUNG: '-O2' am erwarteten Platz nicht gefunden, -O3 wird nicht gesetzt", file=sys.stderr)
+# -O3 statt -O2 und zusätzliche Optimierungen in GUEST_ABI_FLAGS
+old_flags = '"-ffp-contract=off",\n    "-O2",'
+new_flags = '''"-ffp-contract=off",
+    "-O3",
+    "-fomit-frame-pointer",
+    "-funroll-loops",
+    "-fno-math-errno",
+    "-fno-trapping-math",'''
+count_flags = text.count(old_flags)
+if count_flags == 0:
+    # Fallback: Suche nach dem Ende von GUEST_ABI_FLAGS
+    old_flags = '"-ffp-contract=off",'
+    new_flags = '''"-ffp-contract=off",
+    "-O3",
+    "-fomit-frame-pointer",
+    "-funroll-loops",
+    "-fno-math-errno",
+    "-fno-trapping-math",'''
+    count_flags = text.count(old_flags)
+    if count_flags == 0:
+        print("WARNUNG: GUEST_ABI_FLAGS-Marker nicht gefunden", file=sys.stderr)
+    else:
+        text = text.replace(old_flags, new_flags, 1)
 else:
-    text = text.replace(old_o2, new_o2)
+    text = text.replace(old_flags, new_flags, 1)
 
 with open(path, 'w') as f:
     f.write(text)
 
-print(f"android_build.py gepatcht: {count_mcpu}x cortex-a53 -> cortex-a35, {count_o2}x O2 -> O3")
+print(f"android_build.py gepatcht: {count_mcpu}x cortex-a53 -> cortex-a35, {count_flags}x O2 -> O3 + extra flags")
+PYEOF
+
+# ── Fix 4: linux_build.py (Host-Binary) optimieren ─────────────────
+python3 - "$SRC/tools/linux_build.py" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+with open(path) as f:
+    text = f.read()
+
+# -O3 statt -O2 (OPTIMISATION-Konstante)
+old_opt = 'OPTIMISATION = "-O2"'
+new_opt = 'OPTIMISATION = "-O3"'
+count_opt = text.count(old_opt)
+if count_opt == 0:
+    print("WARNUNG: OPTIMISATION = \"-O2\" nicht gefunden", file=sys.stderr)
+else:
+    text = text.replace(old_opt, new_opt)
+
+# -fomit-frame-pointer für den Host-Build ist NICHT erlaubt (Stack-Walker),
+# aber -funroll-loops und -fno-math-errno sind safe.
+old_abi = '"-ffp-contract=off",\n    OPTIMISATION,'
+new_abi = '''"-ffp-contract=off",
+    "-funroll-loops",
+    "-fno-math-errno",
+    "-fno-trapping-math",
+    OPTIMISATION,'''
+count_abi = text.count(old_abi)
+if count_abi > 0:
+    text = text.replace(old_abi, new_abi, 1)
+else:
+    print("WARNUNG: LINUX_ABI_FLAGS-Marker für zusätzliche Flags nicht gefunden", file=sys.stderr)
+
+with open(path, 'w') as f:
+    f.write(text)
+
+print(f"linux_build.py gepatcht: {count_opt}x O2 -> O3, {count_abi}x zusätzliche Flags")
 PYEOF
 
 # ── Port-Verzeichnis kopieren ─────────────────────────────────────────
@@ -329,16 +391,21 @@ if [ -f "$SRC/.port-stamp" ] && [ "$(cat "$SRC/.port-stamp")" = "$stamp" ]; then
 fi
 echo "$stamp" > "$SRC/.port-stamp"
 
-# ── Build ─────────────────────────────────────────────────────────────
+# ── Build mit LTO + PGO ───────────────────────────────────────────────
 export ANDROID_NDK SYSROOT_LIB
 export SDL2_INCLUDE
 export GUEST_CC HOST_CC JOBS
-export PGO_FLAG
 
 cd "$SRC"
-python3 configure.py --release $PGO_FLAG --android-ndk "$ANDROID_NDK" --android-guest-cc "$GUEST_CC"
+
+echo "== Konfiguriere mit --lto=full $PGO_FLAG ..."
+python3 configure.py --release --lto=full $PGO_FLAG \
+    --android-ndk "$ANDROID_NDK" --android-guest-cc "$GUEST_CC"
+
+echo "== Baue Guest-ELF (halo_guest.elf) ..."
 ninja -j "$JOBS" build/android/halo_guest.elf
 
+echo "== Baue Host-Binary (halo) ..."
 bash "$SRC/port/knulli/build.sh"
 
 # ── Distribution zusammenstellen ──────────────────────────────────────
