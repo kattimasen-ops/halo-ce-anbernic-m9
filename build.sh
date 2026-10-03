@@ -176,26 +176,35 @@ fi
 # PGO: Android-Profil verwenden
 # ══════════════════════════════════════════════════════════════════════
 #
-# Herkunft: Andiweli/HaloCE-Android-AAOS. Der Commit "Improve performance
-# by 2x to 3x" zeigt mit PGO einen Sprung von 132 auf 197 fps auf Android
-# und von 171 auf 201 fps auf Linux. Der Effekt ist auf dem Cortex-A35
-# besonders gross, weil PGO die Branch-Vorhersage und die Inline-
-# Entscheidungen auf die tatsaechliche Ausfuehrung abstimmt.
+# Reihenfolge der Quellen:
+#   1. Lokales Profil im Repo (pgo/halo_android.profdata) – beste Wahl
+#   2. Android-Profil aus Andiwelis Repo (per URL)
+#   3. Linux-Profil aus cybersecurity's Repo (per URL) – Fallback
+#   4. Ohne PGO (--pgo=off)
 #
-# Reihenfolge: erst Android-Profil, dann Linux-Profil, dann ohne PGO.
+# Andiwelis Android-Profil ist auf ARM64 getestet und passt zum
+# Cortex-A35 des RK3326. Das Linux-Profil ist auf x86_64 trainiert
+# und trifft die Branch-Muster auf ARM nur ungefaehr.
 PGO_PROFILE=""
 PGO_FLAG="--pgo=off"
 
+LOCAL_PGO="$HERE/pgo/halo_android.profdata"
 PGO_ANDROID_URL="https://raw.githubusercontent.com/Andiweli/HaloCE-Android-AAOS/main/pgo/halo_android.profdata"
 PGO_LINUX_URL="https://raw.githubusercontent.com/cybersecurity/halo-ce-universal/main/pgo/halo_linux.profdata"
 
 mkdir -p "$SRC/pgo"
 
-echo "== Lade Android-PGO-Profil von Andiweli/HaloCE-Android-AAOS ..."
-if curl -fsSL -o "$SRC/pgo/halo_android.profdata" "$PGO_ANDROID_URL" 2>/dev/null; then
+echo "== Suche Android-PGO-Profil ..."
+if [ -f "$LOCAL_PGO" ]; then
+    cp "$LOCAL_PGO" "$SRC/pgo/halo_android.profdata"
     PGO_PROFILE="$SRC/pgo/halo_android.profdata"
     PGO_FLAG="--pgo=use"
-    echo "== Android-PGO-Profil geladen: $(stat -c%s "$PGO_PROFILE") Bytes"
+    echo "== Lokales Android-PGO-Profil verwendet: $(stat -c%s "$PGO_PROFILE") Bytes"
+    echo "== Baue mit PGO (--pgo=use) unter Verwendung des Android-Profils"
+elif curl -fsSL -o "$SRC/pgo/halo_android.profdata" "$PGO_ANDROID_URL" 2>/dev/null; then
+    PGO_PROFILE="$SRC/pgo/halo_android.profdata"
+    PGO_FLAG="--pgo=use"
+    echo "== Android-PGO-Profil aus dem Netz geladen: $(stat -c%s "$PGO_PROFILE") Bytes"
     echo "== Baue mit PGO (--pgo=use) unter Verwendung des Android-Profils"
 else
     echo "== Android-PGO-Profil nicht erreichbar; versuche Linux-Profil ..."
@@ -219,21 +228,16 @@ fi
 # HINWEIS ZU -march=native
 # ══════════════════════════════════════════════════════════════════════
 #
-# Der AAOS-Port hat -march=native in seinem Benchmark als weiteren
-# Optimierungsschritt aufgefuehrt (201 -> 224 fps auf Linux). Das gilt
-# aber nur fuer NATIVE Builds (x86_64 -> x86_64).
+# Der AAOS-Port hat -march=native als weiteren Optimierungsschritt
+# aufgefuehrt. Das gilt nur fuer NATIVE Builds (x86_64 -> x86_64).
+# Wir cross-compilen nach ARM64, -march=native wuerde die CPU des
+# Build-Rechners (x86_64) erkennen und x86_64-Code erzeugen.
 #
-# Wir cross-compilen von x86_64 nach ARM64. -march=native wuerde dort
-# die CPU des Build-Rechners (x86_64) erkennen und x86_64-Code erzeugen.
-# Ergebnis: entweder Compiler-Fehler oder ein Binary, das auf dem M9 Pro
-# sofort mit SIGILL abstuerzt.
-#
-# Der korrekte Cross-Compile-Weg ist das, was wir bereits verwenden:
+# Der korrekte Cross-Compile-Weg ist:
 #   -mcpu=cortex-a35 -mtune=cortex-a35
-# Das aktiviert ARMv8-A, NEON und CRC (die Dot-Product-Instruktion
-# wird NICHT aktiviert, weil der arm64_32-Guest-Assembler sie nicht
-# akzeptiert; siehe Fix 2 unten). Der Cortex-A35 profitiert trotzdem
-# von NEON und CRC.
+# Das aktiviert ARMv8-A, NEON und CRC. Dot-Product (UDOT/SDOT) wird
+# NICHT aktiviert, weil der arm64_32-Guest-Assembler sie nicht
+# akzeptiert (siehe Fix 2 unten).
 
 # ── Fix 1: APCs in WaitForSingleObjectEx/SleepEx ─────────────────────
 python3 - "$SRC/port/linux/src/xbox_kernel.c" <<'PYEOF'
@@ -346,17 +350,13 @@ PYEOF
 # Fix 2: android_build.py (Guest-ELF) optimieren
 # ══════════════════════════════════════════════════════════════════════
 #
-# ACHTUNG: KEIN +dotprod. Der Guest wird mit --target=arm64_32-apple-watchos
-# kompiliert und anschliessend mit --target=aarch64-linux-android assembliert.
-# Der Assembler fuer aarch64-linux-android lehnt udot ab, weil die
-# dotprod-Erweiterung dort nicht aktiviert ist. Ohne +dotprod wird
-# ARMv8-A + NEON + CRC aktiviert (die der Cortex-A35 voll unterstuetzt),
-# ohne dass der Assembler meckert.
-#
-# -mcpu=cortex-a35 aktiviert: ARMv8-A, NEON, CRC, LSE (Large System Extensions)
-# -mcpu=cortex-a35+dotprod wuerde zusaetzlich UDOT/SDOT aktivieren, was
-# der arm64_32-Guest-Assembler aber nicht akzeptiert (Build-Fehler:
+# ACHTUNG: KEIN +dotprod. Der Guest wird mit
+# --target=arm64_32-apple-watchos kompiliert und anschliessend mit
+# --target=aarch64-linux-android assembliert. Der Assembler lehnt
+# udot ab, wenn dotprod nicht aktiviert ist (Build-Fehler:
 # "instruction requires: dotprod").
+#
+# -mcpu=cortex-a35 aktiviert: ARMv8-A, NEON, CRC, LSE.
 python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import sys
 
@@ -633,6 +633,9 @@ stamp=$({
     cat "$PATCH"
     cat "$HERE/patches/patch_memory_pools.py" 2>/dev/null || true
     cat "$HERE/patches/patch_neon_math.py"    2>/dev/null || true
+    if [ -f "$LOCAL_PGO" ]; then
+        sha256sum "$LOCAL_PGO" | cut -d' ' -f1
+    fi
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 if [ -f "$SRC/.port-stamp" ] && [ "$(cat "$SRC/.port-stamp")" = "$stamp" ]; then
