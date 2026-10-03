@@ -164,25 +164,19 @@ if ! tree_is_patched; then
     git -C "$SRC" apply --summary "$PATCH" | awk '$1 == "create" { print $4 }' | xargs -r git -C "$SRC" add -N --
 fi
 
-# ── PGO-Prüfung: Profile vorhanden? ───────────────────────────────────
-PGO_PROFILE="$SRC/pgo/halo_linux.profdata"
-if [ ! -f "$PGO_PROFILE" ]; then
-    echo "== PGO-Profil fehlt: $PGO_PROFILE"
-    echo "== Versuche, das Profil vom Upstream-Repo zu laden..."
-    mkdir -p "$SRC/pgo"
-    if curl -fsSL -o "$PGO_PROFILE" \
-        "https://raw.githubusercontent.com/cybersecurity/halo-ce-universal/main/pgo/halo_linux.profdata"; then
-        echo "== PGO-Profil heruntergeladen: $(stat -c%s "$PGO_PROFILE") Bytes"
-        PGO_FLAG="--pgo=use"
-    else
-        echo "== Kein PGO-Profil verfügbar. Baue ohne PGO (--pgo=off)"
-        PGO_FLAG="--pgo=off"
-    fi
-else
-    echo "== PGO-Profil gefunden: $PGO_PROFILE"
-    echo "== Baue mit PGO (--pgo=use)"
-    PGO_FLAG="--pgo=use"
-fi
+# ── PGO: immer deaktiviert ───────────────────────────────────────────
+# Das Upstream-Repo liefert pgo/halo_linux.profdata, das mit dem 32-bit
+# x86-Linux-Desktop-Build trainiert wurde. Ein PGO-Profil ist architektur-
+# spezifisch (Basic-Block-Adressen, Branch-Gewichte, Inline-Entscheidungen
+# des Trainingslaufes): mit x86-Profil gegen einen ARM-Cortex-A35 zu
+# kompilieren, macht die Optimierung an den falschen Stellen aggressiv.
+# Der Knulli-Patch bringt ausserdem einen Program-Binary-Cache mit, der
+# die Kaltstart-Vorteile eines PGO-Profils ohnehin überkompensiert.
+# Wenn du spaeter ein eigenes Profil auf dem M9 Pro trainierst
+# (configure.py --pgo=train), kannst du diesen Block wieder auf "use"
+# umstellen.
+PGO_FLAG="--pgo=off"
+echo "== PGO deaktiviert (--pgo=off); siehe Kommentar im Skript"
 
 # ── Fix 1: APCs in WaitForSingleObjectEx/SleepEx ─────────────────────
 # Die Completion-Routinen (APCs) liefen nur VOR dem Warten, nicht WÄHREND.
@@ -313,6 +307,11 @@ path = sys.argv[1]
 with open(path) as f:
     text = f.read()
 
+# Idempotenz: schon gepatcht?
+if '"-mcpu=cortex-a35",\n    "-mtune=cortex-a35"' in text:
+    print("android_build.py enthält bereits cortex-a35+mtune – überspringe.")
+    sys.exit(0)
+
 # Cortex-A35 statt Cortex-A53, plus mtune
 old_mcpu = '"-mcpu=cortex-a53"'
 new_mcpu = '"-mcpu=cortex-a35",\n    "-mtune=cortex-a35"'
@@ -357,15 +356,23 @@ with open(path, 'w') as f:
 print(f"android_build.py gepatcht: {count_mcpu}x cortex-a53 -> cortex-a35+mtune, {count_flags}x O2 -> O3 + extra flags")
 PYEOF
 
-# ── Fix 2b: clang-Builtin-Include für den Guest-Build ────────────────
+# ── Fix 2b: clang-Builtin-Shim für den Guest-Build ───────────────────
 # Der Guest-Build verwendet -nostdinc, damit keine glibc-Header des Hosts
 # in ein fremdes Target lecken. Das verbirgt aber auch clangs eigene
-# Builtin-Header (arm_neon.h, immintrin.h, stddef.h, ...), die unter
-# <resource-dir>/include liegen. Der Fehler
+# Builtin-Header (arm_neon.h etc.), die unter <resource-dir>/include
+# liegen. Der Fehler
 #     source/math/matrix_math.c:93:10: fatal error: 'arm_neon.h' file not found
-# ist genau das. Wir fragen clang nach seinem Resource-Verzeichnis und
-# hängen nur dieses Include-Verzeichnis per -isystem an, damit -nostdinc
-# überall sonst weiter wirkt.
+# ist genau das.
+#
+# Die ganze <resource-dir>/include freizuschalten ist aber FALSCH: dann
+# wird clangs stddef.h gefunden, das size_t als __SIZE_TYPE__ definiert
+# (= unsigned long auf arm64_32), während musl's bits/alltypes.h size_t
+# als unsigned int (über _Addr) definiert. Das sind zwei 32-Bit-Typen
+# mit unterschiedlichen Namen, und die Neudefinition bricht den Build:
+#     bits/alltypes.h:77:24: error: typedef redefinition with
+#     different types ('unsigned int' vs 'unsigned long')
+# Deshalb legen wir nur die ARM-Vektor-Header in ein Shim-Verzeichnis
+# und geben NUR dieses frei. -nostdinc bleibt für alles andere wirksam.
 python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import sys
 
@@ -373,26 +380,11 @@ path = sys.argv[1]
 with open(path) as f:
     text = f.read()
 
-# Idempotenz: schon gepatcht?
-if "_clang_resource_include" in text:
-    print("android_build.py enthält bereits _clang_resource_include – überspringe.")
+if "_clang_builtin_shim" in text:
+    print("android_build.py enthält bereits _clang_builtin_shim – überspringe.")
     sys.exit(0)
 
-# --- 1. Hilfsfunktion hinter _find_ndk() einfügen
-anchor = """    for sdk in (Path.home() / "Android/Sdk", Path("/opt/android-sdk")):
-        if (sdk / "ndk").is_dir():
-            versions = sorted((sdk / "ndk").iterdir())
-            if versions:
-                return versions[-1]
-    return None
-"""
-if anchor not in text:
-    print("FEHLER: _find_ndk-Anker nicht gefunden", file=sys.stderr)
-    sys.exit(1)
-
-helper = anchor + '''
-
-def _clang_resource_include(cc: str) -> List[str]:
+old_fn = '''def _clang_resource_include(cc: str) -> List[str]:
     # Include directory of cc's own built-in headers (arm_neon.h etc.).
     #
     # The guest build compiles with -nostdinc so the host's glibc headers
@@ -415,30 +407,95 @@ def _clang_resource_include(cc: str) -> List[str]:
         print(f"WARNING: {cc} reports a resource directory but {include} "
               f"is missing", file=sys.stderr)
         return []
-    return ["-isystem", str(include)]
-'''
-text = text.replace(anchor, helper, 1)
+    return ["-isystem", str(include)]'''
 
-# --- 2. guest_abi um die Resource-Includes erweitern
-old_abi = (
-    '    guest_abi = " ".join(GUEST_ABI_FLAGS + '
-    '(["-DHALO_RELEASE"] if getattr(sln, "port_release", False) else []))'
-)
-new_abi = (
-    '    guest_abi = " ".join(\n'
-    '        GUEST_ABI_FLAGS\n'
-    '        + _clang_resource_include(guest_cc)\n'
-    '        + (["-DHALO_RELEASE"] if getattr(sln, "port_release", False) else []))'
-)
-if old_abi not in text:
-    print("FEHLER: guest_abi-Berechnung nicht gefunden", file=sys.stderr)
+new_fn = '''def _clang_builtin_shim(cc: str) -> List[str]:
+    # A shim directory with symlinks to the compiler's own built-in
+    # ARM vector headers (arm_neon.h and friends). The guest build
+    # compiles with -nostdinc so the host's glibc headers do not leak
+    # into a foreign target; that also hides clang's built-in headers,
+    # which live under <resource-dir>/include. Putting the whole
+    # <resource-dir>/include on the search path is not an option:
+    # clang's stddef.h would then define size_t as __SIZE_TYPE__
+    # (unsigned long on arm64_32), while musl's bits/alltypes.h defines
+    # it as unsigned int (via _Addr), and the two incompatible typedefs
+    # break the build. Copying just the ARM vector headers into a shim
+    # keeps -nostdinc effective for everything else.
+    try:
+        result = subprocess.run([cc, "-print-resource-dir"],
+                                capture_output=True, text=True, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError) as error:
+        print(f"WARNING: cannot query {cc} for its resource directory "
+              f"({error}); arm_neon.h and other compiler builtins may be "
+              f"missing", file=sys.stderr)
+        return []
+    include = Path(result.stdout.strip()) / "include"
+    if not include.is_dir():
+        print(f"WARNING: {cc} reports a resource directory but {include} "
+              f"is missing", file=sys.stderr)
+        return []
+    shim = BUILD / "guest" / "clang_builtin_shim"
+    shim.mkdir(parents=True, exist_ok=True)
+    for name in ("arm_neon.h", "arm_vector_types.h", "arm_acle.h",
+                 "arm_fp16.h", "arm_bf16.h"):
+        source = include / name
+        if not source.is_file():
+            continue
+        target = shim / name
+        if target.exists() or target.is_symlink():
+            try:
+                target.unlink()
+            except OSError:
+                pass
+        try:
+            target.symlink_to(source)
+        except OSError:
+            shutil.copy2(source, target)
+    return ["-isystem", str(shim)]'''
+
+if old_fn in text:
+    text = text.replace(old_fn, new_fn, 1)
+    text = text.replace("_clang_resource_include(guest_cc)",
+                        "_clang_builtin_shim(guest_cc)")
+elif "_clang_resource_include" in text:
+    print("FEHLER: alte _clang_resource_include-Funktion gefunden, aber "
+          "Text stimmt nicht mit dem erwarteten Muster ueberein. Bitte "
+          "manuell pruefen.", file=sys.stderr)
     sys.exit(1)
-text = text.replace(old_abi, new_abi, 1)
+else:
+    anchor = """    for sdk in (Path.home() / "Android/Sdk", Path("/opt/android-sdk")):
+        if (sdk / "ndk").is_dir():
+            versions = sorted((sdk / "ndk").iterdir())
+            if versions:
+                return versions[-1]
+    return None
+"""
+    if anchor not in text:
+        print("FEHLER: _find_ndk-Anker nicht gefunden", file=sys.stderr)
+        sys.exit(1)
+    text = text.replace(anchor, anchor + "\n\n" + new_fn, 1)
+
+if "_clang_builtin_shim(guest_cc)" not in text:
+    old_abi = (
+        '    guest_abi = " ".join(GUEST_ABI_FLAGS + '
+        '(["-DHALO_RELEASE"] if getattr(sln, "port_release", False) else []))'
+    )
+    new_abi = (
+        '    guest_abi = " ".join(\n'
+        '        GUEST_ABI_FLAGS\n'
+        '        + _clang_builtin_shim(guest_cc)\n'
+        '        + (["-DHALO_RELEASE"] if getattr(sln, "port_release", False) else []))'
+    )
+    if old_abi in text:
+        text = text.replace(old_abi, new_abi, 1)
+    else:
+        print("WARNUNG: guest_abi-Berechnung nicht gefunden, konnte "
+              "Builtin-Shim nicht einhaengen", file=sys.stderr)
 
 with open(path, 'w') as f:
     f.write(text)
 
-print("android_build.py gepatcht: clang-Resource-Include für Guest-Build aktiv")
+print("android_build.py gepatcht: clang-Builtin-Shim für Guest-Build aktiv")
 PYEOF
 
 # ── Fix 3: linux_build.py (Host-Binary) optimieren ──────────────────
@@ -453,7 +510,10 @@ path = sys.argv[1]
 with open(path) as f:
     text = f.read()
 
-# -O3 statt -O2 (OPTIMISATION-Konstante)
+if 'OPTIMISATION = "-O3"' in text:
+    print("linux_build.py enthält bereits -O3 – überspringe.")
+    sys.exit(0)
+
 old_opt = 'OPTIMISATION = "-O2"'
 new_opt = 'OPTIMISATION = "-O3"'
 count_opt = text.count(old_opt)
@@ -462,7 +522,6 @@ if count_opt == 0:
 else:
     text = text.replace(old_opt, new_opt)
 
-# Zusätzliche Flags in LINUX_ABI_FLAGS (ohne fomit-frame-pointer!)
 old_abi = '"-ffp-contract=off",\n    OPTIMISATION,'
 new_abi = '''"-ffp-contract=off",
     "-funroll-loops",
@@ -483,10 +542,14 @@ with open(path, 'w') as f:
 print(f"linux_build.py gepatcht: {count_opt}x O2 -> O3, {count_abi}x zusätzliche Flags")
 PYEOF
 
-# ── Fix 4: Quellcode-Optimierungen (Memory, NEON, Tile-Renderer) ─────
-# Diese drei Patches sind eigenstaendig. Jeder prueft selbst, ob die
-# Ziel-Strings im Quellcode vorhanden sind. Wenn ein Patch nicht passt,
-# wird der Build fortgesetzt (die Patches sind optional).
+# ── Fix 4: Quellcode-Optimierungen (Memory, NEON) ────────────────────
+# Nur noch zwei Patches. patch_tile_renderer.py ist entfallen: der
+# Knulli-Patch (halo-ce-universal-knulli.patch) implementiert einen
+# Framebuffer-Cache mit color_level-Unterstuetzung (fuer Render-Targets
+# in einzelne Mip-Level des Wassers) und einen Render-Target-Cache
+# bereits selbst, und zwar deutlich umfangreicher und korrekt fuer
+# diese Faelle. Ein zusaetzlicher Patch wuerde nur den color_level-
+# Parameter wegoptimieren und das Wasser kaputtmachen.
 #
 # patch_memory_pools.py
 #   - deaktiviert den Debug-Allocator (Dateiname+Zeile pro malloc) in
@@ -498,14 +561,10 @@ PYEOF
 #
 # patch_neon_math.py
 #   - memcmp/memcpy in guest_string.c bekommen 16-/64-Byte-NEON-Pfade.
-#   - dot_product3d wird als out-of-line NEON-Variante bereitgestellt.
-#
-# patch_tile_renderer.py
-#   - host_gl.c bekommt einen Framebuffer-Bind-Cache (bereit zur Nutzung
-#     durch d3d8_gl.c, falls dessen state_framebuffer ihn aufruft).
+#   - matrix4x3_transform_point/vector laufen auf AArch64 über NEON.
 echo ""
-echo "== Fix 4: Quellcode-Optimierungen (optional) ..."
-for patch_script in patch_memory_pools.py patch_neon_math.py patch_tile_renderer.py; do
+echo "== Fix 4: Quellcode-Optimierungen ..."
+for patch_script in patch_memory_pools.py patch_neon_math.py; do
     if [ -f "$HERE/patches/$patch_script" ]; then
         echo "== Wende $patch_script an ..."
         if ! python3 "$HERE/patches/$patch_script" "$SRC"; then
@@ -530,7 +589,7 @@ if [ -f "$SRC/.port-stamp" ] && [ "$(cat "$SRC/.port-stamp")" = "$stamp" ]; then
 fi
 echo "$stamp" > "$SRC/.port-stamp"
 
-# ── Build mit LTO + PGO + allen Optimierungen ────────────────────────
+# ── Build mit LTO, ohne PGO ──────────────────────────────────────────
 export ANDROID_NDK SYSROOT_LIB
 export SDL2_INCLUDE
 export GUEST_CC HOST_CC JOBS
