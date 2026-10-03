@@ -164,7 +164,7 @@ if ! tree_is_patched; then
     git -C "$SRC" apply --summary "$PATCH" | awk '$1 == "create" { print $4 }' | xargs -r git -C "$SRC" add -N --
 fi
 
-# ── PGO-Prüfung ────────────────────────────────────────────────────────
+# ── PGO-Prüfung (OHNE manuellen -fprofile-use-Patch!) ──────────────────
 PGO_PROFILE="$SRC/pgo/halo_linux.profdata"
 if [ ! -f "$PGO_PROFILE" ]; then
     echo "== PGO-Profil fehlt: $PGO_PROFILE"
@@ -176,16 +176,7 @@ else
     PGO_FLAG="--pgo=use"
 fi
 
-# ── Fix 1 (entfernt): Der frühere SetEvent-Aufruf in ReadFileEx/WriteFileEx
-# war falsch. Microsoft dokumentiert, dass diese Funktionen das hEvent-Feld
-# ignorieren. SetEvent(0xa) führte zum Absturz bei Adresse 0xa (signal 11).
-#
-# ── Fix 2: APCs (Completion-Routinen) in WaitForSingleObjectEx/SleepEx
-# liefen nur VOR dem Warten, nicht WÄHREND. Die Engine wartet in
-# WaitForSingleObjectEx auf eine abgeschlossene asynchrone Profil-I/O,
-# die APC lief nie, nach 6 Sekunden Timeout meldete die Engine
-# "checksum failed on persistent storage". Die Warteschleifen werden so
-# erweitert, dass APCs auch während des Wartens ausgeführt werden.
+# ── Fix 2: APCs in WaitForSingleObjectEx/SleepEx ─────────────────────
 python3 - "$SRC/port/linux/src/xbox_kernel.c" <<'PYEOF'
 import sys
 
@@ -292,7 +283,9 @@ with open(path, 'w') as f:
 print("xbox_kernel.c gepatcht: APCs laufen jetzt auch während WaitForSingleObjectEx/SleepEx")
 PYEOF
 
-# ── Fix 3: Cortex-A35 statt Cortex-A53, -O3 statt -O2, PGO-Flags ──────
+# ── Fix 3: Cortex-A35 statt Cortex-A53, -O3 statt -O2 ────────────────
+# KEIN -fprofile-use-Patch! Das Projekt setzt die PGO-Flags selbst über
+# profile_use_flags() mit dem vollständigen Pfad zur Profildatei.
 python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import sys
 
@@ -315,16 +308,6 @@ if count_o2 == 0:
     print("WARNUNG: '-O2' am erwarteten Platz nicht gefunden, -O3 wird nicht gesetzt", file=sys.stderr)
 else:
     text = text.replace(old_o2, new_o2)
-
-# PGO-Flags: nur setzen, wenn das Profil existiert
-# (wird über die Umgebungsvariable PGO_FLAG gesteuert)
-old_flags = '"-fno-unwind-tables",'
-if '"-fprofile-use"' not in text and old_flags in text:
-    new_flags = '"-fno-unwind-tables",\n    "-fprofile-use",\n    "-fprofile-correction",'
-    text = text.replace(old_flags, new_flags, 1)
-    print("android_build.py: PGO-Flags hinzugefügt")
-else:
-    print("android_build.py: PGO-Flags bereits vorhanden oder Marker fehlt")
 
 with open(path, 'w') as f:
     f.write(text)
