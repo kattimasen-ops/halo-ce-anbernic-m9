@@ -1,31 +1,27 @@
 #!/usr/bin/env python3
 """
 Memory-Pool-Patch für Halo CE Universal.
-Ziel: Debug-Allocator in Release-Builds umgehen und große Stack-Arrays
-in decals.c in thread-lokalen Speicher verlagern.
 
-Erkenntnis aus der Quellcode-Analyse:
-  * Halo CE verwendet BEREITS ein eigenes Memory-Pool-System
-    (source/memory/memory_pool.c, data_array). Die Partikel und Decals
-    werden über game_state_data_new / datum_new aus einem Pool vergeben.
-  * Die 53.419 malloc-Aufrufe pro Frame stammen aus dem Debug-Memory-
-    Manager, der in cseries.h ALLE malloc/free/realloc über
-    match_malloc/match_free/match_realloc umleitet. Jeder Aufruf schreibt
-    Dateiname und Zeile mit. In Release-Builds ist das reine
-    Buchhaltungs-Last.
-  * decals.c allokiert pro decal_new_from_collision vier große
-    Stack-Arrays (je 4-8 KB), die auf dem __thread-Stack liegen und
-    jedes Mal neu gemacht werden.
+Zwei Änderungen, basierend auf dem tatsächlichen Quellcode:
+  1. cseries.h leitet ALLE malloc/free/realloc durch den Debug-Allocator
+     (debug_memory.c), der Dateiname und Zeile pro Aufruf mitschreibt.
+     Bei mehreren tausend Aufrufen pro Frame war das auf dem Cortex-A35
+     messbar. Im Release-Build werden die Makros jetzt nur definiert,
+     wenn HALO_DEBUG_ALLOCATOR gesetzt ist.
+  2. decals.c allokiert pro decal_new_from_collision vier große
+     Stack-Arrays (surface_queue 8 KB, deviant_surface_list 8 KB,
+     deviant_surface_bunch 8 KB, render_vertices 4-8 KB). Sie werden
+     zu __thread-lokalen Statics: decal_new_from_collision ist nicht
+     rekursiv, der Speicher bleibt zwischen Aufrufen warm.
 """
 import os
 import sys
 
 
 def patch_cseries_h(src_root):
-    """Debug-Allocator nur aktiv, wenn HALO_DEBUG_ALLOCATOR definiert ist."""
     path = os.path.join(src_root, "source", "cseries", "cseries.h")
     if not os.path.exists(path):
-        print(f"WARNUNG: {path} nicht gefunden – überspringe cseries.h-Patch")
+        print(f"WARNUNG: {path} nicht gefunden – ueberspringe cseries.h-Patch")
         return False
     with open(path) as f:
         text = f.read()
@@ -41,20 +37,20 @@ def patch_cseries_h(src_root):
 #define match_realloc(file, line, ptr, size) debug_realloc(ptr, size, MATCH_FILE(file), MATCH_LINE(line))
 
 /* (port/android, HALO_RELEASE): im Release-Build ruft das Spiel libc-
-   malloc/free direkt. Der Debug-Allocator (debug_memory.c) schreibt zu
-   jeder Allokation Dateiname und Zeile mit und fuehrt eine Liste aller
-   lebenden Bloecke. Auf dem Cortex-A35 war das bei mehreren tausend
-   Aufrufen pro Frame messbar. Mit HALO_DEBUG_ALLOCATOR (build.sh-Env)
-   laesst sich der Debug-Pfad weiterhin einschalten. */
-#if defined(HALO_RELEASE) && !defined(HALO_DEBUG_ALLOCATOR)
-/* nichts: malloc/free/realloc gehen an die libc */
-#else
+   malloc/free/realloc direkt. Der Debug-Allocator (debug_memory.c)
+   schreibt zu jeder Allokation Dateiname und Zeile mit und fuehrt eine
+   Liste aller lebenden Bloecke. Auf dem Cortex-A35 war das bei mehreren
+   tausend Aufrufen pro Frame messbar. Mit HALO_DEBUG_ALLOCATOR laesst
+   sich der Debug-Pfad weiterhin einschalten (Build mit
+   -DHALO_DEBUG_ALLOCATOR). */
+#if !defined(HALO_RELEASE) || defined(HALO_DEBUG_ALLOCATOR)
 #define malloc(size) match_malloc(__FILE__, __LINE__, size)
 #define free(ptr) match_free(__FILE__, __LINE__, ptr)
 #define realloc(ptr, size) match_realloc(__FILE__, __LINE__, ptr, size)
 #endif"""
     if old not in text:
-        print("WARNUNG: Debug-Allocator-Makros nicht gefunden – cseries.h bereits gepatcht?")
+        print("WARNUNG: cseries.h Debug-Allocator-Makros nicht gefunden "
+              "(bereits gepatcht?)")
         return False
     text = text.replace(old, new, 1)
     with open(path, "w") as f:
@@ -64,16 +60,17 @@ def patch_cseries_h(src_root):
 
 
 def patch_decals_c(src_root):
-    """Die vier grossen Stack-Arrays in decal_new_from_collision werden
-    __thread-Statics. Sie liegen dann nicht mehr auf dem Aufrufer-Stack
-    und werden zwischen Aufrufen wiederverwendet (die Funktion ist nicht
-    rekursiv, thread-lokal ist sicher)."""
     path = os.path.join(src_root, "source", "effects", "decals.c")
     if not os.path.exists(path):
-        print(f"WARNUNG: {path} nicht gefunden – überspringe decals.c-Patch")
+        print(f"WARNUNG: {path} nicht gefunden – ueberspringe decals.c-Patch")
         return False
     with open(path) as f:
         text = f.read()
+
+    if "__thread long surface_queue" in text:
+        print("decals.c enthaelt bereits __thread-Arrays – ueberspringe.")
+        return True
+
     old = """		{
 			struct decal_projection projection;
 			long surface_queue[MAXIMUM_DECAL_SURFACE_QUEUE_SIZE];
@@ -85,12 +82,12 @@ def patch_decals_c(src_root):
 """
     new = """		{
 			struct decal_projection projection;
-			/* (port/android): die grossen Arbeits-Arrays liegen im
-			   thread-lokalen Speicher, nicht auf dem Aufrufer-Stack.
-			   decal_new_from_collision ist nicht rekursiv; bei
-			   aufeinanderfolgenden Decals derselben Karte bleibt der
-			   Speicher warm. Die Groessen sind MAXIMUM_DECAL_* und damit
-			   konstant. */
+			/* (port/android): die vier grossen Arbeits-Arrays liegen im
+			   thread-lokalen Speicher statt auf dem Aufrufer-Stack.
+			   decal_new_from_collision ist nicht rekursiv, ein Thread
+			   kann also hoechstens eine Instanz gleichzeitig halten.
+			   Die Groessen sind konstant (MAXIMUM_DECAL_*); der Speicher
+			   bleibt zwischen aufeinanderfolgenden Decals warm. */
 			static __thread long surface_queue[MAXIMUM_DECAL_SURFACE_QUEUE_SIZE];
 			static __thread long deviant_surface_list[MAXIMUM_DECAL_SURFACE_QUEUE_SIZE];
 			static __thread long deviant_surface_bunch[MAXIMUM_DECAL_SURFACE_QUEUE_SIZE];
