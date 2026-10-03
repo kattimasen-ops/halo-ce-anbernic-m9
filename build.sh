@@ -37,6 +37,13 @@ for library in libdecor-0.so.0 libmali.so.0; do
         die "no $library* in SYSROOT_LIB=$SYSROOT_LIB"
 done
 
+# (port: der Commit muss ein voller 40-stelliger SHA-1 sein, sonst gibt
+#  git fetch spaeter einen unklaren Fehler)
+if ! printf '%s' "$UPSTREAM_COMMIT" | grep -Eq '^[0-9a-f]{40}$'; then
+    die "UPSTREAM_COMMIT='$UPSTREAM_COMMIT' ist kein 40-stelliger Hex-Hash"
+fi
+echo "== Upstream: $UPSTREAM_URL @ $UPSTREAM_COMMIT"
+
 WORK=${WORK:-$HERE/work}
 DIST=${DIST:-$HERE/dist}
 mkdir -p "$WORK" "$DIST"
@@ -132,6 +139,7 @@ if [ ! -f "$SYSROOT_LIB/libSDL2-2.0.so.0" ]; then
     echo "== SDL2 kompiliert: $(stat -c%s "$SYSROOT_LIB/libSDL2-2.0.so.0") Bytes"
 else
     echo "== libSDL2-2.0.so.0 bereits vorhanden – überspringe SDL2"
+    : "${SDL2_INSTALL:=$WORK/sdl2-install}"
 fi
 
 export SDL2_INCLUDE="$SDL2_INSTALL/include"
@@ -221,10 +229,11 @@ fi
 # sofort mit SIGILL abstuerzt.
 #
 # Der korrekte Cross-Compile-Weg ist das, was wir bereits verwenden:
-#   -mcpu=cortex-a35+dotprod -mtune=cortex-a35
-# Das aktiviert ARMv8-A, NEON, CRC und die Dot-Product-Instruktion
-# (die die A35 unterstuetzt) und optimiert Scheduling fuer die A35-
-# Pipeline. Im Fix-2-Block unten wird das gesetzt.
+#   -mcpu=cortex-a35 -mtune=cortex-a35
+# Das aktiviert ARMv8-A, NEON und CRC (die Dot-Product-Instruktion
+# wird NICHT aktiviert, weil der arm64_32-Guest-Assembler sie nicht
+# akzeptiert; siehe Fix 2 unten). Der Cortex-A35 profitiert trotzdem
+# von NEON und CRC.
 
 # ── Fix 1: APCs in WaitForSingleObjectEx/SleepEx ─────────────────────
 python3 - "$SRC/port/linux/src/xbox_kernel.c" <<'PYEOF'
@@ -337,13 +346,17 @@ PYEOF
 # Fix 2: android_build.py (Guest-ELF) optimieren
 # ══════════════════════════════════════════════════════════════════════
 #
-# ACHTUNG: cortex-a35+dotprod statt cortex-a35. Die Dot-Product-
-# Instruktion (UDOT/SDOT) ist Teil der ARMv8.2-A-Erweiterung und wird
-# von der Cortex-A35 unterstuetzt. Sie beschleunigt die NEON-Berechnung
-# von Matrix-Produkten (die Halo fuer die Transformationsmatrizen nutzt)
-# erheblich.
+# ACHTUNG: KEIN +dotprod. Der Guest wird mit --target=arm64_32-apple-watchos
+# kompiliert und anschliessend mit --target=aarch64-linux-android assembliert.
+# Der Assembler fuer aarch64-linux-android lehnt udot ab, weil die
+# dotprod-Erweiterung dort nicht aktiviert ist. Ohne +dotprod wird
+# ARMv8-A + NEON + CRC aktiviert (die der Cortex-A35 voll unterstuetzt),
+# ohne dass der Assembler meckert.
 #
-# KEIN -march=native: siehe Kommentarblock oben.
+# -mcpu=cortex-a35 aktiviert: ARMv8-A, NEON, CRC, LSE (Large System Extensions)
+# -mcpu=cortex-a35+dotprod wuerde zusaetzlich UDOT/SDOT aktivieren, was
+# der arm64_32-Guest-Assembler aber nicht akzeptiert (Build-Fehler:
+# "instruction requires: dotprod").
 python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import sys
 
@@ -351,26 +364,27 @@ path = sys.argv[1]
 with open(path) as f:
     text = f.read()
 
-if '"-mcpu=cortex-a35+dotprod"' in text:
-    print("android_build.py enthält bereits cortex-a35+dotprod – überspringe.")
+if '"-mcpu=cortex-a35"' in text and '"+dotprod"' not in text:
+    print("android_build.py enthält bereits cortex-a35 ohne dotprod – überspringe.")
     sys.exit(0)
 
-# Ersetze: "-mcpu=cortex-a53" oder "-mcpu=cortex-a35" -> "+dotprod"
+# Ersetze: "-mcpu=cortex-a53" -> "-mcpu=cortex-a35" (ohne dotprod)
 old_mcpu = '"-mcpu=cortex-a53"'
-new_mcpu = '"-mcpu=cortex-a35+dotprod",\n    "-mtune=cortex-a35"'
+new_mcpu = '"-mcpu=cortex-a35",\n    "-mtune=cortex-a35"'
 count_mcpu = text.count(old_mcpu)
-if count_mcpu == 0:
-    # Vielleicht schon gepatcht auf cortex-a35 ohne dotprod
-    old_mcpu = '"-mcpu=cortex-a35",\n    "-mtune=cortex-a35"'
-    new_mcpu = '"-mcpu=cortex-a35+dotprod",\n    "-mtune=cortex-a35"'
+if count_mcpu > 0:
+    text = text.replace(old_mcpu, new_mcpu)
+else:
+    # Vielleicht schon gepatcht auf cortex-a35 mit dotprod -> entfernen
+    old_mcpu = '"-mcpu=cortex-a35+dotprod",\n    "-mtune=cortex-a35"'
+    new_mcpu = '"-mcpu=cortex-a35",\n    "-mtune=cortex-a35"'
     count_mcpu = text.count(old_mcpu)
     if count_mcpu == 0:
-        print("WARNUNG: keine mcpu-Zeile gefunden, weder cortex-a53 noch cortex-a35+mtune")
-        print("         Setze cortex-a35+dotprod manuell in GUEST_ABI_FLAGS.")
+        print("WARNUNG: keine mcpu-Zeile gefunden, weder cortex-a53 noch cortex-a35+dotprod")
+        print("         Setze cortex-a35 manuell in GUEST_ABI_FLAGS.")
     else:
         text = text.replace(old_mcpu, new_mcpu)
-else:
-    text = text.replace(old_mcpu, new_mcpu)
+        print("android_build.py: +dotprod aus Guest-Flags entfernt (arm64_32 unterstützt es nicht)")
 
 # -O3 statt -O2 und zusätzliche Optimierungen
 old_flags = '"-ffp-contract=off",\n    "-O2",'
@@ -404,7 +418,7 @@ else:
 with open(path, 'w') as f:
     f.write(text)
 
-print(f"android_build.py gepatcht: {count_mcpu}x mcpu -> cortex-a35+dotprod, {count_flags}x O2 -> O3 + extra flags")
+print(f"android_build.py gepatcht: {count_mcpu}x mcpu -> cortex-a35 (ohne dotprod), {count_flags}x O2 -> O3 + extra flags")
 PYEOF
 
 # ── Fix 2b: clang-Builtin-Shim für den Guest-Build ───────────────────
@@ -585,13 +599,40 @@ for patch_script in patch_memory_pools.py patch_neon_math.py; do
     fi
 done
 
+# ── Fix 4b: Verifikation der Python-Patches ──────────────────────────
+echo ""
+echo "== Fix 4b: Verifiziere Patch-Ergebnisse ..."
+verification_failed=0
+check_patch() {
+    local file="$1" pattern="$2" name="$3"
+    if grep -q -- "$pattern" "$SRC/$file"; then
+        echo "   OK: $name"
+    else
+        echo "   FEHLT: $name ($file)"
+        verification_failed=1
+    fi
+}
+check_patch "source/cseries/cseries.h"                    "HALO_DEBUG_ALLOCATOR"               "cseries.h Debug-Allocator"
+check_patch "source/effects/decals.c"                     "static __thread long surface_queue" "decals.c __thread-Arrays"
+check_patch "source/math/matrix_math.c"                   "vfmaq_n_f32"                        "matrix_math.c NEON"
+check_patch "port/android/guest/runtime/guest_string.c"   "vld1q_u8"                           "guest_string.c NEON memcmp"
+check_patch "port/android/guest/runtime/guest_string.c"   "vst1q_u8"                           "guest_string.c NEON memcpy"
+if [ "$verification_failed" -ne 0 ]; then
+    echo "FEHLER: Mindestens eine Optimierung fehlt – Patch-Reihenfolge oder Kontext stimmt nicht."
+    exit 1
+fi
+echo "== Alle vier Optimierungen sauber angewendet."
+
 # ── Port-Verzeichnis kopieren ─────────────────────────────────────────
 rm -rf "$SRC/port/knulli"
 cp -a "$HERE/port/knulli" "$SRC/port/knulli"
 rm -rf "$SRC/port/knulli/__pycache__"
 chmod +x "$SRC/port/knulli/build.sh" 2>/dev/null || true
 
-stamp=$({ cat "$PATCH"
+stamp=$({
+    cat "$PATCH"
+    cat "$HERE/patches/patch_memory_pools.py" 2>/dev/null || true
+    cat "$HERE/patches/patch_neon_math.py"    2>/dev/null || true
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 if [ -f "$SRC/.port-stamp" ] && [ "$(cat "$SRC/.port-stamp")" = "$stamp" ]; then
