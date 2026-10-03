@@ -1,4 +1,3 @@
-
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -356,6 +355,90 @@ with open(path, 'w') as f:
     f.write(text)
 
 print(f"android_build.py gepatcht: {count_mcpu}x cortex-a53 -> cortex-a35+mtune, {count_flags}x O2 -> O3 + extra flags")
+PYEOF
+
+# ── Fix 2b: clang-Builtin-Include für den Guest-Build ────────────────
+# Der Guest-Build verwendet -nostdinc, damit keine glibc-Header des Hosts
+# in ein fremdes Target lecken. Das verbirgt aber auch clangs eigene
+# Builtin-Header (arm_neon.h, immintrin.h, stddef.h, ...), die unter
+# <resource-dir>/include liegen. Der Fehler
+#     source/math/matrix_math.c:93:10: fatal error: 'arm_neon.h' file not found
+# ist genau das. Wir fragen clang nach seinem Resource-Verzeichnis und
+# hängen nur dieses Include-Verzeichnis per -isystem an, damit -nostdinc
+# überall sonst weiter wirkt.
+python3 - "$SRC/tools/android_build.py" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+with open(path) as f:
+    text = f.read()
+
+# Idempotenz: schon gepatcht?
+if "_clang_resource_include" in text:
+    print("android_build.py enthält bereits _clang_resource_include – überspringe.")
+    sys.exit(0)
+
+# --- 1. Hilfsfunktion hinter _find_ndk() einfügen
+anchor = """    for sdk in (Path.home() / "Android/Sdk", Path("/opt/android-sdk")):
+        if (sdk / "ndk").is_dir():
+            versions = sorted((sdk / "ndk").iterdir())
+            if versions:
+                return versions[-1]
+    return None
+"""
+if anchor not in text:
+    print("FEHLER: _find_ndk-Anker nicht gefunden", file=sys.stderr)
+    sys.exit(1)
+
+helper = anchor + '''
+
+def _clang_resource_include(cc: str) -> List[str]:
+    # Include directory of cc's own built-in headers (arm_neon.h etc.).
+    #
+    # The guest build compiles with -nostdinc so the host's glibc headers
+    # do not leak into a foreign target. That flag also hides clang's
+    # built-in headers, which live under <resource-dir>/include rather
+    # than a system path (arm_neon.h, immintrin.h, stddef.h ...). Query
+    # the compiler for its resource directory and re-add only that
+    # subfolder as a system include, so -nostdinc keeps doing its job
+    # everywhere else.
+    try:
+        result = subprocess.run([cc, "-print-resource-dir"],
+                                capture_output=True, text=True, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError) as error:
+        print(f"WARNING: cannot query {cc} for its resource directory "
+              f"({error}); arm_neon.h and other compiler builtins may be "
+              f"missing", file=sys.stderr)
+        return []
+    include = Path(result.stdout.strip()) / "include"
+    if not include.is_dir():
+        print(f"WARNING: {cc} reports a resource directory but {include} "
+              f"is missing", file=sys.stderr)
+        return []
+    return ["-isystem", str(include)]
+'''
+text = text.replace(anchor, helper, 1)
+
+# --- 2. guest_abi um die Resource-Includes erweitern
+old_abi = (
+    '    guest_abi = " ".join(GUEST_ABI_FLAGS + '
+    '(["-DHALO_RELEASE"] if getattr(sln, "port_release", False) else []))'
+)
+new_abi = (
+    '    guest_abi = " ".join(\n'
+    '        GUEST_ABI_FLAGS\n'
+    '        + _clang_resource_include(guest_cc)\n'
+    '        + (["-DHALO_RELEASE"] if getattr(sln, "port_release", False) else []))'
+)
+if old_abi not in text:
+    print("FEHLER: guest_abi-Berechnung nicht gefunden", file=sys.stderr)
+    sys.exit(1)
+text = text.replace(old_abi, new_abi, 1)
+
+with open(path, 'w') as f:
+    f.write(text)
+
+print("android_build.py gepatcht: clang-Resource-Include für Guest-Build aktiv")
 PYEOF
 
 # ── Fix 3: linux_build.py (Host-Binary) optimieren ──────────────────
