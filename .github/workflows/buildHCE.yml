@@ -196,6 +196,33 @@ jobs:
           done
           echo "Hinweis: libSDL2 und libSDL3 werden von build.sh aus dem Quellcode kompiliert."
 
+      - name: Make build scripts executable
+        run: |
+          chmod +x build.sh
+          if [ -f apply_all.sh ]; then chmod +x apply_all.sh; fi
+          echo "== Repo-Wurzel:"
+          ls -la build.sh apply_all.sh UPSTREAM_COMMIT 2>/dev/null || true
+          echo "== patches/:"
+          ls -la patches/ 2>/dev/null || true
+          echo "== Fehlende Dateien pruefen:"
+          missing=0
+          for f in build.sh UPSTREAM_COMMIT \
+                   patches/halo-ce-universal-knulli.patch \
+                   patches/patch_memory_pools.py \
+                   patches/patch_neon_math.py; do
+            if [ ! -f "$f" ]; then
+              echo "FEHLT: $f"
+              missing=1
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo "FEHLER: benoetigte Patch-Dateien fehlen im Repo."
+            exit 1
+          fi
+          echo "OK: alle Patch-Dateien vorhanden."
+          echo "== UPSTREAM_COMMIT:"
+          cat UPSTREAM_COMMIT
+
       - name: Build
         run: |
           export SYSROOT_LIB=$PWD/sysroot
