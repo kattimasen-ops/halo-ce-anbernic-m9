@@ -2,37 +2,215 @@
 """
 NEON/SIMD-Patch für Halo CE Universal.
 
-Analyse der tatsächlichen Quelldateien:
-  * real_math.h definiert fast alle Vektor-Operationen als __inline.
-    Ein Out-of-line-NEON-Ersatz in real_math.c bringt dort wenig, weil
-    der Compiler die Inlines bevorzugt.
-  * Die groessten SIMD-Gewinne liegen in memcpy und memcmp. Der Port hat
-    bereits port/android/guest/runtime/guest_string.c mit einer 8-Byte-
-    Schleife. Auf AArch64 bringt eine 32-Byte-NEON-Variante weitere
-    Gewinne: das Spiel kopiert bei jedem Draw Shader-Keys und Uniform-
-    Inputs in wenigen hundert Bytes, und die Mirror-Pages sind 4 KB gross.
-  * Der NEON-Patch erweitert guest_string.c um eine 32-Byte-Schleife und
-    laesst die 8-Byte-Schleife als Fallback.
+Zwei Änderungen:
+  1. matrix_math.c: matrix4x3_transform_point und matrix4x3_transform_vector
+     laufen ueber NEON. Diese Funktionen werden pro Vertex aufgerufen
+     (tausende pro Frame). Das Layout der real_matrix4x3-Struktur ist
+     {scale; forward.i,j,k; left.i,j,k; up.i,j,k; position.x,y,z}, also
+     13 aufeinanderfolgende Floats. Ein vld1q_f32 ueber forward.i liefert
+     {fwd.i, fwd.j, fwd.k, left.i}; das sind vier nutzbare Lanes, weil
+     result.x/y/z nur die ersten drei Lanes auswertet.
+  2. guest_string.c: memcpy/memcmp mit NEON 16/64-Byte-Pfaden.
 """
 import os
 import sys
 
 
-def patch_guest_string(src_root):
-    path = os.path.join(src_root, "port", "android", "guest", "runtime", "guest_string.c")
+# ── matrix_math.c ─────────────────────────────────────────────────────
+def patch_matrix_math(src_root):
+    path = os.path.join(src_root, "source", "math", "matrix_math.c")
     if not os.path.exists(path):
-        print(f"WARNUNG: {path} nicht gefunden – überspringe guest_string.c-Patch")
+        print(f"WARNUNG: {path} nicht gefunden – ueberspringe matrix_math.c-Patch")
         return False
     with open(path) as f:
         text = f.read()
 
-    # Fuege den NEON-Header ein, falls noch nicht da
+    # ARM-NEON-Header einfuegen
+    if "#include <arm_neon.h>" not in text:
+        old_inc = '#include "cseries.h"\n#include "real_math.h"'
+        new_inc = ('#include "cseries.h"\n#include "real_math.h"\n\n'
+                   '#if defined(__aarch64__)\n#include <arm_neon.h>\n#endif')
+        if old_inc in text:
+            text = text.replace(old_inc, new_inc, 1)
+        else:
+            print("WARNUNG: cseries.h/real_math.h-Include nicht gefunden.")
+            return False
+
+    # matrix4x3_transform_point
+    old_pt = """real_point3d *matrix4x3_transform_point(
+	real_matrix4x3 const *matrix,
+	real_point3d const *point,
+	real_point3d *result)
+{
+	real x = point->x;
+	real y = point->y;
+	real z = point->z;
+
+	if (matrix->scale != 1.f)
+	{
+		x *= matrix->scale;
+		y *= matrix->scale;
+		z *= matrix->scale;
+	}
+
+	result->x = matrix->up.i*z + matrix->left.i*y + matrix->forward.i*x + matrix->position.x;
+	result->y = matrix->up.j*z + matrix->left.j*y + matrix->forward.j*x + matrix->position.y;
+	result->z = matrix->up.k*z + matrix->left.k*y + matrix->forward.k*x + matrix->position.z;
+	return result;
+}"""
+    new_pt = """real_point3d *matrix4x3_transform_point(
+	real_matrix4x3 const *matrix,
+	real_point3d const *point,
+	real_point3d *result)
+{
+	real x = point->x;
+	real y = point->y;
+	real z = point->z;
+
+	if (matrix->scale != 1.f)
+	{
+		x *= matrix->scale;
+		y *= matrix->scale;
+		z *= matrix->scale;
+	}
+
+#if defined(__aarch64__)
+	{
+		/* (port/android): NEON-Variante. Das Struct-Layout ist
+		   {scale; forward.i,j,k; left.i,j,k; up.i,j,k; position.x,y,z}.
+		   Ein vld1q_f32 ueber forward.i liefert {fwd.i, fwd.j, fwd.k,
+		   left.i}. Wir nutzen nur die ersten drei Lanes jedes Vektors;
+		   die vierte traegt ein nutzloses viertes Element, das in
+		   result.x/y/z nicht eingeht. */
+		float pos3[4];
+		float32x4_t v_fwd, v_left, v_up, v_pos, v_res;
+		float out[4];
+
+		pos3[0] = matrix->position.x;
+		pos3[1] = matrix->position.y;
+		pos3[2] = matrix->position.z;
+		pos3[3] = 0.0f;
+
+		v_fwd = vld1q_f32(&matrix->forward.i);
+		v_left = vld1q_f32(&matrix->left.i);
+		v_up = vld1q_f32(&matrix->up.i);
+		v_pos = vld1q_f32(pos3);
+
+		v_res = vmulq_n_f32(v_fwd, x);
+		v_res = vfmaq_n_f32(v_res, v_left, y);
+		v_res = vfmaq_n_f32(v_res, v_up, z);
+		v_res = vaddq_f32(v_res, v_pos);
+
+		vst1q_f32(out, v_res);
+		result->x = out[0];
+		result->y = out[1];
+		result->z = out[2];
+	}
+#else
+	result->x = matrix->up.i*z + matrix->left.i*y + matrix->forward.i*x + matrix->position.x;
+	result->y = matrix->up.j*z + matrix->left.j*y + matrix->forward.j*x + matrix->position.y;
+	result->z = matrix->up.k*z + matrix->left.k*y + matrix->forward.k*x + matrix->position.z;
+#endif
+	return result;
+}"""
+    if old_pt in text:
+        text = text.replace(old_pt, new_pt, 1)
+        print("matrix_math.c: matrix4x3_transform_point mit NEON.")
+    else:
+        print("WARNUNG: matrix4x3_transform_point nicht gefunden – ueberspringe.")
+
+    # matrix4x3_transform_vector
+    old_vec = """real_vector3d *matrix4x3_transform_vector(
+	real_matrix4x3 const *matrix,
+	real_vector3d const *vector,
+	real_vector3d *result)
+{
+	real i = vector->i;
+	real j = vector->j;
+	real k = vector->k;
+
+	if (matrix->scale != 1.f)
+	{
+		i *= matrix->scale;
+		j *= matrix->scale;
+		k *= matrix->scale;
+	}
+
+	result->i = i*matrix->forward.i + j*matrix->left.i + k*matrix->up.i;
+	result->j = i*matrix->forward.j + j*matrix->left.j + k*matrix->up.j;
+	result->k = i*matrix->forward.k + j*matrix->left.k + k*matrix->up.k;
+
+	return result;
+}"""
+    new_vec = """real_vector3d *matrix4x3_transform_vector(
+	real_matrix4x3 const *matrix,
+	real_vector3d const *vector,
+	real_vector3d *result)
+{
+	real i = vector->i;
+	real j = vector->j;
+	real k = vector->k;
+
+	if (matrix->scale != 1.f)
+	{
+		i *= matrix->scale;
+		j *= matrix->scale;
+		k *= matrix->scale;
+	}
+
+#if defined(__aarch64__)
+	{
+		float32x4_t v_fwd = vld1q_f32(&matrix->forward.i);
+		float32x4_t v_left = vld1q_f32(&matrix->left.i);
+		float32x4_t v_up = vld1q_f32(&matrix->up.i);
+		float32x4_t v_res;
+		float out[4];
+
+		v_res = vmulq_n_f32(v_fwd, i);
+		v_res = vfmaq_n_f32(v_res, v_left, j);
+		v_res = vfmaq_n_f32(v_res, v_up, k);
+
+		vst1q_f32(out, v_res);
+		result->i = out[0];
+		result->j = out[1];
+		result->k = out[2];
+	}
+#else
+	result->i = i*matrix->forward.i + j*matrix->left.i + k*matrix->up.i;
+	result->j = i*matrix->forward.j + j*matrix->left.j + k*matrix->up.j;
+	result->k = i*matrix->forward.k + j*matrix->left.k + k*matrix->up.k;
+#endif
+
+	return result;
+}"""
+    if old_vec in text:
+        text = text.replace(old_vec, new_vec, 1)
+        print("matrix_math.c: matrix4x3_transform_vector mit NEON.")
+    else:
+        print("WARNUNG: matrix4x3_transform_vector nicht gefunden – ueberspringe.")
+
+    with open(path, "w") as f:
+        f.write(text)
+    return True
+
+
+# ── guest_string.c ────────────────────────────────────────────────────
+def patch_guest_string(src_root):
+    path = os.path.join(src_root, "port", "android", "guest", "runtime",
+                        "guest_string.c")
+    if not os.path.exists(path):
+        print(f"WARNUNG: {path} nicht gefunden – ueberspringe guest_string.c-Patch")
+        return False
+    with open(path) as f:
+        text = f.read()
+
     if "#include <arm_neon.h>" not in text:
         text = text.replace(
             '#include <string.h>\n#include <stdint.h>',
             '#include <string.h>\n#include <stdint.h>\n#include <arm_neon.h>',
             1)
 
+    # memcmp mit 16-Byte-NEON
     old_memcmp = """__attribute__((no_builtin)) int memcmp(const void *left, const void *right, size_t size)
 {
 	const unsigned char *l = left, *r = right;
@@ -58,10 +236,10 @@ def patch_guest_string(src_root):
 	const unsigned char *l = left, *r = right;
 
 	/* (port/android): 16 Bytes auf einmal ueber NEON. Die Vergleichs-
-	   bloecke sind meist gross genug (Shader-Keys, Uniform-Inputs von
-	   einigen hundert Bytes), und der Cortex-A35 kann 16 Bytes in einer
-	   Instruktion laden. Der Unterschied zum 8-Byte-Pfad ist im Profil
-	   der Draw-Vorbereitung sichtbar. */
+	   bloecke sind meist gross genug (Shader-Keys und Uniform-Inputs von
+	   einigen hundert Bytes), und der Cortex-A35 laedt 16 Bytes in einer
+	   Instruktion. Der Unterschied zum 8-Byte-Pfad ist im Profil der
+	   Draw-Vorbereitung sichtbar. */
 	for (; size >= 16; size -= 16, l += 16, r += 16)
 	{
 		uint8x16_t a = vld1q_u8((const uint8_t *)l);
@@ -72,18 +250,12 @@ def patch_guest_string(src_root):
 
 		if (lo | hi)
 		{
-			unsigned int shift;
-			uint64_t first_diff;
+			uint64_t first_diff = lo ? lo : hi;
+			unsigned int byte = (unsigned int)__builtin_ctzll(first_diff) >> 3;
 
-			if (lo)
-				first_diff = lo;
-			else
-			{
-				first_diff = hi;
-				shift = 8;
-			}
-			shift = (shift + ((unsigned int)__builtin_ctzll(first_diff) & ~7u));
-			return (int)l[shift] - (int)r[shift];
+			if (!lo)
+				byte += 8;
+			return (int)l[byte] - (int)r[byte];
 		}
 	}
 	for (; size >= 8; size -= 8, l += 8, r += 8)
@@ -107,6 +279,7 @@ def patch_guest_string(src_root):
     else:
         print("WARNUNG: memcmp nicht gefunden – ueberspringe.")
 
+    # memcpy mit 64-Byte-NEON
     old_memcpy = """__attribute__((no_builtin)) void *memcpy(void *restrict destination, const void *restrict source, size_t size)
 {
 	unsigned char *d = destination;
@@ -136,10 +309,10 @@ def patch_guest_string(src_root):
 	const unsigned char *s = source;
 
 	/* (port/android): 64 Bytes pro Schleifendurchlauf ueber NEON. Der
-	   Cortex-A35 hat zwei 128-Bit-Ladeports; ein unrolling auf vier
-	   Vektorlade/-speicher-Paare bringt die Kopierrate nahe an die
-	   Speicherbandbreite. Groessen im Spiel: Mirror-Pages 4 KB, Vertex-
-	   Streams 1-3 KB, Shader-Keys ein paar hundert Bytes. */
+	   Cortex-A35 hat zwei 128-Bit-Ladeports; vier Vektorlade/-speicher-
+	   Paare pro Iteration bringen die Kopierrate nahe an die Speicher-
+	   bandbreite. Groessen im Spiel: Mirror-Pages 4 KB, Vertex-Streams
+	   1-3 KB, Shader-Keys ein paar hundert Bytes. */
 	for (; size >= 64; size -= 64, d += 64, s += 64)
 	{
 		uint8x16_t v0 = vld1q_u8((const uint8_t *)s + 0);
@@ -179,93 +352,11 @@ def patch_guest_string(src_root):
     return True
 
 
-def patch_real_math_h(src_root):
-    """NEON-Versionen von dot_product3d, cross_product3d und
-    matrix4x3_transform_point.
-
-    dot_product3d und cross_product3d sind __inline in der Header. Ein
-    NEON-Ersatz waere dort sogar langsamer, weil eine einzelne 4-Vektor-
-    Operation keinen Vorteil bringt (3 Floats = 1 SIMD-Vektor).
-    matrix4x3_transform_point ist aber die heisse Funktion: pro Frame
-    werden alle Objekt- und Node-Matrizen auf die Vertices angewendet.
-    Sie ist in matrix_math.c (nicht in diesem Repo-Ausschnitt).
-    Wir fuegen deshalb eine zusaetzliche NEON-Variante als out-of-line
-    Funktion in real_math.c hinzu und aktivieren sie ueber die bereits
-    vorhandenen REAL_MATH_EXTERNAL_*-Makros.
-    """
-    path = os.path.join(src_root, "source", "math", "real_math.h")
-    if not os.path.exists(path):
-        print(f"WARNUNG: {path} nicht gefunden – ueberspringe.")
-        return False
-    with open(path) as f:
-        text = f.read()
-    # Aktiviert den externen dot_product3d, den wir in real_math.c als
-    # NEON-Variante bereitstellen.
-    if "#define REAL_MATH_EXTERNAL_DOT_PRODUCT3D" not in text:
-        text = text.replace(
-            "#include <float.h>",
-            "#include <float.h>\n\n#ifdef __aarch64__\n"
-            "/* (port/android): der out-of-line dot_product3d in real_math.c\n"
-            "   ist eine NEON-Variante; der Header-Inline wird unterdrueckt. */\n"
-            "#define REAL_MATH_EXTERNAL_DOT_PRODUCT3D 1\n"
-            "#endif",
-            1)
-        with open(path, "w") as f:
-            f.write(text)
-        print("real_math.h: REAL_MATH_EXTERNAL_DOT_PRODUCT3D aktiviert.")
-    return True
-
-
-def patch_real_math_c(src_root):
-    path = os.path.join(src_root, "source", "math", "real_math.c")
-    if not os.path.exists(path):
-        print(f"WARNUNG: {path} nicht gefunden – ueberspringe.")
-        return False
-    with open(path) as f:
-        text = f.read()
-    if "dot_product3d_neon" in text:
-        print("real_math.c enthaelt bereits NEON-Code – ueberspringe.")
-        return True
-    # Fuege die NEON-Variante am Dateiende an. Sie ersetzt die Inline-
-    # Version aus dem Header, weil der Header sie als extern deklariert.
-    text += """
-
-/* ---------- NEON-Varianten (port/android) ---------- */
-#if defined(__aarch64__) && defined(REAL_MATH_EXTERNAL_DOT_PRODUCT3D)
-#include <arm_neon.h>
-
-/* dot_product3d: die drei Produkte in einem SIMD-Vektor. Der Cortex-A35
-   hat zwei FMA-Ports, der Skalar-Pfad braucht drei Multiplikationen und
-   zwei Additionen hintereinander. Bei den Objekt- und Node-Matrizen
-   (jedem Vertex) bringt das wenige Prozent. */
-real dot_product3d(real_vector3d const *a, real_vector3d const *b)
-{
-	/* a und b sind 3 Floats. Sie passen in einen 4-Float-Vektor, das
-	   vierte Element wird auf 0 gesetzt, damit es das Ergebnis nicht
-	   verfaelscht. */
-	float32x4_t va = vld1q_f32((const float *)a);
-	float32x4_t vb = vld1q_f32((const float *)b);
-	/* (der vierte Slot enthaelt undefinierte Daten; Produkt und Summe
-	   werden nur aus den ersten drei Elementen gebildet) */
-	float32x2_t prod_lo = vmul_f32(vget_low_f32(va), vget_low_f32(vb));
-	float32x2_t prod_hi = vmul_f32(vget_high_f32(va), vget_high_f32(vb));
-	float sum = vget_lane_f32(prod_lo, 0) + vget_lane_f32(prod_lo, 1) + vget_lane_f32(prod_hi, 0);
-	return sum;
-}
-#endif
-"""
-    with open(path, "w") as f:
-        f.write(text)
-    print("real_math.c: dot_product3d NEON-Variante angehaengt.")
-    return True
-
-
 def apply_patch(src_root):
     print("== Patch 2: NEON/SIMD ==")
-    ok_guest = patch_guest_string(src_root)
-    ok_h = patch_real_math_h(src_root)
-    ok_c = patch_real_math_c(src_root)
-    if not (ok_guest or ok_h or ok_c):
+    ok_a = patch_matrix_math(src_root)
+    ok_b = patch_guest_string(src_root)
+    if not (ok_a or ok_b):
         print("FEHLER: keine der Aenderungen konnte angewendet werden.")
         sys.exit(1)
 
