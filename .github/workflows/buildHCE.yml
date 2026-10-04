@@ -166,7 +166,7 @@ jobs:
           chmod +x build.sh
           [ -f apply_all.sh ] && chmod +x apply_all.sh || true
           for f in build.sh UPSTREAM_COMMIT \
-                   patches/halo-ce-universal-knnuli.patch \
+                   patches/halo-ce-universal-knulli.patch \
                    patches/patch_memory_pools.py \
                    patches/patch_neon_math.py \
                    patches/patch_vita_optimizations.py \
