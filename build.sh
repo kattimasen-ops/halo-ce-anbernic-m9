@@ -23,7 +23,7 @@ PGO_MODE=${PGO_MODE:-use}
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 UPSTREAM_URL=${UPSTREAM_URL:-https://github.com/cybersecurity/halo-ce-universal.git}
 UPSTREAM_COMMIT=$(tr -d '[:space:]' < "$HERE/UPSTREAM_COMMIT")
-PATCH=$HERE/patches/halo-ce-universal-knnuli.patch
+PATCH=$HERE/patches/halo-ce-universal-knulli.patch
 SDL3_TAG=release-3.2.10
 SDL2_TAG=release-2.30.10
 SDL2_ARCHIVE=https://github.com/libsdl-org/SDL/archive/refs/tags/$SDL2_TAG.tar.gz
@@ -423,7 +423,6 @@ else:
 
 # 3) Option A: -fno-omit-frame-pointer aus GUEST_CODE_FLAGS entfernen,
 #    damit -fomit-frame-pointer aus GUEST_ABI_FLAGS wirkt.
-#    Ohne diese Zeile wuerde der spaetere Flag den frueheren ueberschreiben.
 if '"-fno-omit-frame-pointer"' in text:
     text = text.replace('    "-fno-omit-frame-pointer",\n', '')
     print("Guest-Code-Flags: -fno-omit-frame-pointer entfernt (Option A)")
