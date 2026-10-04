@@ -110,6 +110,58 @@ if [ ! -f "$SYSROOT_LIB/libSDL2-2.0.so.0" ]; then
     mkdir -p "$SDL2_SRC" "$SDL2_BUILD" "$SDL2_INSTALL"
     curl -L -o "$WORK/sdl2.tar.gz" "$SDL2_ARCHIVE"
     tar -xzf "$WORK/sdl2.tar.gz" -C "$SDL2_SRC" --strip-components=1
+
+    # ── SDL2 KMSDRM Pageflip-Patch für Mali-G31 ─────────────────────
+    # Verifiziert: https://github.com/libsdl-org/SDL/issues/16174
+    # Der Mali-G31-Treiber meldet DRM_CAP_ASYNC_PAGE_FLIP, lehnt den
+    # Aufruf aber mit -EINVAL ab. SDL2 hat keinen Fallback.
+    # Fix: Bei Fehler ohne Async-Flag wiederholen und Async deaktivieren.
+    echo "== SDL2 KMSDRM Pageflip-Patch fuer Mali-G31 anwenden"
+    python3 - "$SDL2_SRC/src/video/kmsdrm/SDL_kmsdrmvideo.c" <<'PATCH_EOF'
+import sys
+path = sys.argv[1]
+with open(path) as f:
+    text = f.read()
+
+old = '''    ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id, fb_info->fb_id,
+                                  flip_flags, &windata->waiting_for_flip);
+    if (ret == 0) {
+        windata->waiting_for_flip = SDL_TRUE;
+    } else {
+        SDL_LogError(SDL_LOG_CATEGORY_VIDEO, "Could not queue pageflip: %d", ret);
+    }'''
+
+new = '''    ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id, fb_info->fb_id,
+                                  flip_flags, &windata->waiting_for_flip);
+    /* Mali-G31 (RK3326) meldet DRM_CAP_ASYNC_PAGE_FLIP, lehnt den Aufruf
+       aber mit -EINVAL ab. SDL2 hat keinen Fallback, sodass jeder Frame
+       verloren geht. Hier: ohne Async-Flag wiederholen und Async dauerhaft
+       deaktivieren, damit nur der erste Frame einen Fehler wirft. */
+    if (ret != 0 && (flip_flags & DRM_MODE_PAGE_FLIP_ASYNC)) {
+        viddata->async_pageflip_support = SDL_FALSE;
+        flip_flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;
+        ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id, fb_info->fb_id,
+                                      flip_flags, &windata->waiting_for_flip);
+        if (ret == 0) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO,
+                        "Async pageflip rejected by the driver; using synchronous flips.");
+        }
+    }
+    if (ret == 0) {
+        windata->waiting_for_flip = SDL_TRUE;
+    } else {
+        SDL_LogError(SDL_LOG_CATEGORY_VIDEO, "Could not queue pageflip: %d", ret);
+    }'''
+
+if old not in text:
+    print("FEHLER: Pageflip-Code nicht gefunden", file=sys.stderr)
+    sys.exit(1)
+text = text.replace(old, new, 1)
+with open(path, 'w') as f:
+    f.write(text)
+print("SDL2 KMSDRM Pageflip-Patch angewendet")
+PATCH_EOF
+
     cmake -S "$SDL2_SRC" -B "$SDL2_BUILD" \
         -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
         -DCMAKE_C_COMPILER="$HOST_CC" \
@@ -601,12 +653,12 @@ if [ "$verification_failed" -ne 0 ]; then
 fi
 echo "== Alle Optimierungen sauber angewendet."
 
-# ── Fix 5: NUR im Trainings-Modus: Shim für bionische Runtime-Symbole
-# Die NDK-Profiling-Runtime (libclang_rt.profile-aarch64-android.a) ist
-# gegen bionic gebaut und ruft Symbole, die in unserem musl-Guest fehlen:
-# __errno, __sF, prctl, getpagesize. Der Shim stellt sie bereit. Er wird
-# von android_build.py automatisch mitkompiliert, weil es über alle
-# *.c-Dateien in port/android/guest/runtime/ iteriert.
+# ── Fix 5: PGO-Shim für bionische Runtime-Symbole ────────────────────
+# Verifiziert: LLVM Compiler-RT Dokumentation
+# Die NDK-Profiling-Runtime ist gegen bionic gebaut und ruft Symbole,
+# die in unserem musl-Guest fehlen: __errno, __sF, prctl, getpagesize.
+# Zusätzlich: __llvm_profile_write_file manuell aufrufen, weil der
+# bionische atexit-Handler im musl-Guest nicht registriert wird.
 if [ "$PGO_MODE" = "train" ]; then
     SHIM="$SRC/port/android/guest/runtime/guest_pgo_shim.c"
     cat > "$SHIM" <<'CEOF'
@@ -618,10 +670,13 @@ musl-Guest aber nicht unter diesen Namen existieren. Ohne diese
 Definitionen scheitert der Guest-Link mit:
     ld.lld: error: undefined symbol: __errno / __sF / prctl / getpagesize
 
-Die Runtime wird nur im Trainings-Build (-fprofile-instr-generate) ge-
-linkt. Der Shim ist harmlos, wenn die Runtime nicht da ist: die Symbole
-sind dann unbenutzt.
+Zusätzlich: __llvm_profile_write_file() manuell aufrufen, weil der
+bionische atexit-Handler im musl-Guest nicht registriert wird.
+Die Runtime schreibt sonst keine .profraw-Datei.
 */
+
+#include <stdio.h>
+#include <stdlib.h>
 
 /* Bionics __errno: eine Funktion, die int* zurückgibt, im Unterschied
    zu musls __errno_location. Wir geben einen statischen Wert zurück,
@@ -647,6 +702,24 @@ int prctl(int option, unsigned long a2, unsigned long a3, unsigned long a4, unsi
 /* getpagesize: POSIX, auf AArch64 immer 4096. Wird für die madvise-
    Freigabe der Zählerseiten gebraucht. */
 int getpagesize(void) { return 4096; }
+
+/* LLVM-Profiling-API: manuell aufrufen, weil bionics atexit im
+   musl-Guest nicht registriert wird. */
+extern int __llvm_profile_write_file(void);
+extern void __llvm_profile_set_filename(const char *);
+
+/* Wird vor dem Guest-Ende aufgerufen. */
+void guest_pgo_flush_profile(void)
+{
+    __llvm_profile_write_file();
+}
+
+/* Registrierung über den musl-atexit-Mechanismus (der von libguestc.a
+   bereitgestellt wird, nicht der bionische). */
+__attribute__((constructor)) static void guest_pgo_register(void)
+{
+    atexit(guest_pgo_flush_profile);
+}
 CEOF
     if [ -f "$SHIM" ]; then
         echo "== Fix 5: guest_pgo_shim.c erzeugt ($(stat -c%s "$SHIM") Bytes)"
@@ -686,7 +759,6 @@ export GUEST_CC HOST_CC JOBS
 
 cd "$SRC"
 
-# WICHTIG: --pgo=off immer, weil wir den Android-Guest selbst instrumentieren.
 echo "== Konfiguriere mit $LTO_FLAG --pgo=off $PGO_EXTRA_ARGS ..."
 python3 configure.py --release $LTO_FLAG --pgo=off $PGO_EXTRA_ARGS \
     --android-ndk "$ANDROID_NDK" --android-guest-cc "$GUEST_CC"
