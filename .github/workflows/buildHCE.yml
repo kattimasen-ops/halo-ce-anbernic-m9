@@ -170,7 +170,8 @@ jobs:
                    patches/patch_memory_pools.py \
                    patches/patch_neon_math.py \
                    patches/patch_vita_optimizations.py \
-                   patches/patch_button_remap.py; do
+                   patches/patch_button_remap.py \
+                   patches/patch_index_extent_neon.py; do
             [ -f "$f" ] || { echo "FEHLT: $f"; exit 1; }
           done
           echo "== PGO_MODE: $PGO_MODE"
