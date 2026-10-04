@@ -27,6 +27,10 @@ cd "$GAMEDIR" || exit 1
 
 # ── LOGGING (nur Launcher-Minimum) ───────────────────────────────────
 LOG="$GAMEDIR/log.txt"
+# Log-Rotation: wenn > 2 MB, nach log.txt.1 verschieben (ein Generation)
+if [ -f "$LOG" ] && [ "$(stat -c%s "$LOG" 2>/dev/null || echo 0)" -gt 2097152 ]; then
+    mv -f "$LOG" "$LOG.1" 2>/dev/null || true
+fi
 if ! touch "$LOG" 2>/dev/null; then
     LOG="/tmp/halo-log.txt"
     touch "$LOG" 2>/dev/null || LOG="/dev/null"
@@ -231,8 +235,12 @@ if [ -f "$SYSTEM_MALI" ]; then
     for name in libmali.so.0 libmali.so.1 libmali.so libgbm.so.1 libgbm.so.1.0.0 libgbm.so; do
         ln -sf "$SYSTEM_MALI" "/tmp/halo-mali/$name"
     done
+    export LD_LIBRARY_PATH="/tmp/halo-mali:$GAMEDIR/libs.aarch64:$GAMEDIR"
+else
+    # Fallback: System-libmali direkt nutzen
+    log "WARNUNG: $SYSTEM_MALI nicht gefunden – nutze System-Libraries."
+    export LD_LIBRARY_PATH="$GAMEDIR/libs.aarch64:$GAMEDIR"
 fi
-export LD_LIBRARY_PATH="/tmp/halo-mali:$GAMEDIR/libs.aarch64:$GAMEDIR"
 
 # ── ALSA (RK817) ─────────────────────────────────────────────────────
 if command -v amixer >/dev/null 2>&1; then
