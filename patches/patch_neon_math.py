@@ -11,6 +11,12 @@ Zwei Änderungen:
      {fwd.i, fwd.j, fwd.k, left.i}; das sind vier nutzbare Lanes, weil
      result.x/y/z nur die ersten drei Lanes auswertet.
   2. guest_string.c: memcpy/memcmp mit NEON 16/64-Byte-Pfaden.
+
+WICHTIG: KEINE FMA-Instruktionen (vfmaq_n_f32). Der Guest wird mit
+-ffp-contract=off gebaut, weil die Xbox-Spielearithmetik keine fusionierten
+Mul+Add-Rundungen erwartet (Debug-Asserts fuer Farben 0..1 und
+Einheitsvektoren wuerden sonst anschlagen). Explizite NEON-FMAs wuerden
+diese Regel umgehen, deshalb hier vmulq_n_f32 + vaddq_f32.
 """
 import os
 import sys
@@ -81,7 +87,9 @@ def patch_matrix_math(src_root):
 		   Ein vld1q_f32 ueber forward.i liefert {fwd.i, fwd.j, fwd.k,
 		   left.i}. Wir nutzen nur die ersten drei Lanes jedes Vektors;
 		   die vierte traegt ein nutzloses viertes Element, das in
-		   result.x/y/z nicht eingeht. */
+		   result.x/y/z nicht eingeht.
+		   Bewusst KEIN vfmaq_n_f32: der Guest wird mit -ffp-contract=off
+		   gebaut, um die Xbox-Mul+Add-Rundung zu erhalten. */
 		float pos3[4];
 		float32x4_t v_fwd, v_left, v_up, v_pos, v_res;
 		float out[4];
@@ -97,8 +105,8 @@ def patch_matrix_math(src_root):
 		v_pos = vld1q_f32(pos3);
 
 		v_res = vmulq_n_f32(v_fwd, x);
-		v_res = vfmaq_n_f32(v_res, v_left, y);
-		v_res = vfmaq_n_f32(v_res, v_up, z);
+		v_res = vaddq_f32(v_res, vmulq_n_f32(v_left, y));
+		v_res = vaddq_f32(v_res, vmulq_n_f32(v_up, z));
 		v_res = vaddq_f32(v_res, v_pos);
 
 		vst1q_f32(out, v_res);
@@ -160,6 +168,8 @@ def patch_matrix_math(src_root):
 
 #if defined(__aarch64__)
 	{
+		/* Wie oben: vmulq_n_f32 + vaddq_f32, kein vfmaq_n_f32, damit die
+		   Xbox-Mul+Add-Rundung erhalten bleibt (-ffp-contract=off). */
 		float32x4_t v_fwd = vld1q_f32(&matrix->forward.i);
 		float32x4_t v_left = vld1q_f32(&matrix->left.i);
 		float32x4_t v_up = vld1q_f32(&matrix->up.i);
@@ -167,8 +177,8 @@ def patch_matrix_math(src_root):
 		float out[4];
 
 		v_res = vmulq_n_f32(v_fwd, i);
-		v_res = vfmaq_n_f32(v_res, v_left, j);
-		v_res = vfmaq_n_f32(v_res, v_up, k);
+		v_res = vaddq_f32(v_res, vmulq_n_f32(v_left, j));
+		v_res = vaddq_f32(v_res, vmulq_n_f32(v_up, k));
 
 		vst1q_f32(out, v_res);
 		result->i = out[0];
