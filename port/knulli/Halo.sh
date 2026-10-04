@@ -285,6 +285,8 @@ export HALO_INTERPOLATION="${HALO_INTERPOLATION:-1}"
 # WICHTIG: HALO_NO_VSYNC NICHT setzen. Der Port nutzt _environment_set_is_false:
 # jeder Wert (auch 0) schaltet VSync ab. Unset = config.toml (vsync = true) greift.
 unset HALO_NO_VSYNC
+# Zusätzlicher Schutz: Swap-Interval hart auf 1 (VSync an)
+export HALO_SWAP_INTERVAL=1
 export HALO_FRAME_PACING="${HALO_FRAME_PACING:-1}"
 
 # --- HUD und Text: aus (RAM-Ersparnis auf 1 GB) ---
@@ -298,15 +300,16 @@ export HALO_BATCH_QUADS="${HALO_BATCH_QUADS:-1}"
 export HALO_ALPHA_TEST_ELISION="${HALO_ALPHA_TEST_ELISION:-1}"
 export HALO_STABLE_STREAMS="${HALO_STABLE_STREAMS:-1}"
 
-# --- Threading (async textures/shaders) ---
+# --- Threading (async textures/shaders/programs) ---
+export HALO_GL_THREAD="${HALO_GL_THREAD:-1}"
+export HALO_GL_THREAD_FRAMES="${HALO_GL_THREAD_FRAMES:-1}"
 export HALO_ASYNC_TEXTURES="${HALO_ASYNC_TEXTURES:-1}"
 export HALO_ASYNC_SHADERS="${HALO_ASYNC_SHADERS:-1}"
+export HALO_ASYNC_PROGRAMS="${HALO_ASYNC_PROGRAMS:-1}"
 
 # ══════════════════════════════════════════════════════════════════════
 # KEINE DEBUG- ODER STATISTIK-AUSGABEN IM RELEASE
 # ══════════════════════════════════════════════════════════════════════
-# Der Port liest diese als _environment_value; sind sie gesetzt, werden
-# sie geloggt oder aktivieren Tracing. Für maximale Performance: unset.
 unset HALO_DEBUG_LOGS 2>/dev/null || true
 unset HALO_GPU_STATS 2>/dev/null || true
 unset HALO_GL_TIMING 2>/dev/null || true
@@ -318,11 +321,17 @@ unset HALO_SAMPLE 2>/dev/null || true
 unset HALO_DEBUG_DRAW_CALLERS 2>/dev/null || true
 unset HALO_DEBUG_FREEZE 2>/dev/null || true
 unset HALO_DEBUG_LOD_BIAS 2>/dev/null || true
+unset HALO_GL_FRAME_LOG 2>/dev/null || true
+unset HALO_PACING_LOG 2>/dev/null || true
+unset HALO_GPU_PASS_TIMING 2>/dev/null || true
+unset HALO_GPU_TRACE_PASSES_AT 2>/dev/null || true
+unset HALO_GPU_TRACE_PASSES_FRAMES 2>/dev/null || true
+unset HALO_DEBUG_SKIP_GL 2>/dev/null || true
 
 log "render_scale=$HALO_RENDER_SCALE, model_detail=$HALO_MODEL_DETAIL"
 log "dynamic_resolution=$HALO_DYNAMIC_RESOLUTION (min $HALO_DYNAMIC_RESOLUTION_MIN)"
 log "fast_shaders=$HALO_FAST_SHADERS, fast_textures=$HALO_FAST_TEXTURES"
-log "interpolation=$HALO_INTERPOLATION, frame_pacing=$HALO_FRAME_PACING"
+log "interpolation=$HALO_INTERPOLATION, swap_interval=$HALO_SWAP_INTERVAL, frame_pacing=$HALO_FRAME_PACING"
 log "high_res_hud=$HALO_HIGH_RES_HUD, high_res_text=$HALO_HIGH_RES_TEXT"
 log "Release: keine Debug- und Statistik-Ausgaben."
 
