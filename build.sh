@@ -8,7 +8,7 @@ set -euo pipefail
 #   use    → Release-Build mit pgo/halo_android.profdata und LTO
 #   off    → ohne PGO, LTO an
 #
-# WICHTIG: Für 'train' wird configure.py mit --pgo=off aufgerufen.
+# WICHTIG: Für 'train' wird configure.py IMMER mit --pgo=off aufgerufen.
 # Der Android-Guest wird stattdessen über einen Patch an
 # tools/android_build.py mit -fprofile-instr-generate instrumentiert.
 # Der Upstream-eigene --pgo=train-Modus ist für Linux-Desktop-Training
@@ -172,10 +172,6 @@ fi
 # ══════════════════════════════════════════════════════════════════════
 # PGO-Konfiguration
 # ══════════════════════════════════════════════════════════════════════
-# Wir rufen configure.py IMMER mit --pgo=off auf und instrumentieren den
-# Android-Guest selbst. Der Upstream-eigene --pgo=train-Modus ist für
-# Linux-Desktop-Training (baut und führt i686-Linux aus) und scheitert
-# in CI.
 PGO_FLAG="--pgo=off"
 PGO_EXTRA_ARGS=""
 LTO_FLAG="--lto=full"
@@ -302,7 +298,7 @@ with open(path, 'w') as f:
 print("xbox_kernel.c gepatcht")
 PYEOF
 
-# ── Fix 2: android_build.py ──────────────────────────────────────────
+# ── Fix 2: android_build.py (mcpu, O3) ───────────────────────────────
 python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import sys
 path = sys.argv[1]
@@ -454,9 +450,6 @@ print("clang-Builtin-Shim aktiv")
 PYEOF
 
 # ── Fix 2c: NUR im Trainings-Modus: PGO-Instrumentierung ─────────────
-# Fügt -fprofile-instr-generate zu den Guest-CFLAGS hinzu. Der Runtime-
-# Link (libclang_rt.profile) wird vom Linker-Treiber automatisch gemacht,
-# wenn clang die Linkstufe fährt.
 if [ "$PGO_MODE" = "train" ]; then
     python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import sys
@@ -466,7 +459,6 @@ with open(path) as f:
 if "-fprofile-instr-generate" in text:
     print("android_build.py hat bereits -fprofile-instr-generate")
     sys.exit(0)
-# Nach dem O3-Flag einfügen
 for old in ('"-O3",', '"-O3"'):
     if old in text:
         new = old.replace('"-O3"', '"-O3",\n    "-fprofile-instr-generate"')
@@ -477,6 +469,75 @@ for old in ('"-O3",', '"-O3"'):
         sys.exit(0)
 print("FEHLER: O3-Flag in android_build.py nicht gefunden", file=sys.stderr)
 sys.exit(1)
+PYEOF
+fi
+
+# ── Fix 2d: NUR im Trainings-Modus: Profiling-Runtime zum Link ───────
+# -fprofile-instr-generate fügt in jedes Objekt einen Verweis auf
+# __llvm_profile_runtime ein. Die Bibliothek libclang_rt.profile-*.a
+# stellt ihn bereit. Da der Guest-Link ld.lld direkt aufruft (nicht den
+# clang-Treiber), muss die Bibliothek explizit auf die Linker-Zeile.
+if [ "$PGO_MODE" = "train" ]; then
+    python3 - "$SRC/tools/android_build.py" <<'PYEOF'
+import sys
+path = sys.argv[1]
+with open(path) as f:
+    text = f.read()
+if "guest_profile_runtime" in text:
+    print("android_build.py hat bereits guest_profile_runtime")
+    sys.exit(0)
+
+old = '''    n.rule(
+        name="android_guest_link",
+        command=(f"$android_ndk_bin/ld.lld -m aarch64linux -static -nostdlib -T {linker_script} "
+                 f"-Map $out.map -o $out @$out.rsp {libguestc} "
+                 "$$($android_host_cc -print-libgcc-file-name)"),
+        description="ANDROID LINK $out",
+        rspfile="$out.rsp",
+        rspfile_content="$in_newline",
+    )'''
+
+new = '''    # PGO-Training: die Profiling-Runtime an den Guest-Link anhaengen.
+    # Sie definiert __llvm_profile_runtime, das jedes mit
+    # -fprofile-instr-generate instrumentierte Objekt referenziert.
+    guest_profile_runtime = ""
+    for _cc_candidate in (guest_cc, str(ndk_bin / "clang")):
+        if not _cc_candidate:
+            continue
+        try:
+            _rd = subprocess.run([_cc_candidate, "-print-resource-dir"],
+                                 capture_output=True, text=True, check=True).stdout.strip()
+        except Exception as _e:
+            print(f"WARNING: cannot query {_cc_candidate}: {_e}", file=sys.stderr)
+            continue
+        for _name in ("libclang_rt.profile-aarch64-android.a",
+                      "libclang_rt.profile-aarch64.a"):
+            _candidate = Path(_rd) / "lib" / "linux" / _name
+            if _candidate.is_file():
+                guest_profile_runtime = str(_candidate)
+                print(f"== using profile runtime from {_cc_candidate}: {guest_profile_runtime}")
+                break
+        if guest_profile_runtime:
+            break
+    if not guest_profile_runtime:
+        print("WARNING: no profile runtime found; link may fail", file=sys.stderr)
+    n.rule(
+        name="android_guest_link",
+        command=(f"$android_ndk_bin/ld.lld -m aarch64linux -static -nostdlib -T {linker_script} "
+                 f"-Map $out.map -o $out @$out.rsp {libguestc} {guest_profile_runtime} "
+                 "$$($android_host_cc -print-libgcc-file-name)"),
+        description="ANDROID LINK $out",
+        rspfile="$out.rsp",
+        rspfile_content="$in_newline",
+    )'''
+
+if old not in text:
+    print("FEHLER: android_guest_link rule nicht gefunden", file=sys.stderr)
+    sys.exit(1)
+text = text.replace(old, new, 1)
+with open(path, 'w') as f:
+    f.write(text)
+print("android_build.py: Profiling-Runtime zum Link hinzugefuegt")
 PYEOF
 fi
 
@@ -548,6 +609,7 @@ check_patch "port/android/guest/runtime/guest_string.c"   "vld1q_u8"            
 check_patch "port/android/guest/runtime/guest_string.c"   "vst1q_u8"                           "guest_string.c NEON memcpy"
 if [ "$PGO_MODE" = "train" ]; then
     check_patch "tools/android_build.py" "-fprofile-instr-generate" "android_build.py PGO-Instrumentierung"
+    check_patch "tools/android_build.py" "guest_profile_runtime"    "android_build.py Profiling-Runtime"
 fi
 if [ "$verification_failed" -ne 0 ]; then
     echo "FEHLER: Optimierungen fehlen"
