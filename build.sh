@@ -113,26 +113,33 @@ if [ ! -f "$SYSROOT_LIB/libSDL2-2.0.so.0" ]; then
 
     # ── SDL2 KMSDRM Pageflip-Patch für Mali-G31 ─────────────────────
     # Verifiziert: https://github.com/libsdl-org/SDL/issues/16174
-    # Der Mali-G31-Treiber meldet DRM_CAP_ASYNC_PAGE_FLIP, lehnt den
-    # Aufruf aber mit -EINVAL ab. SDL2 hat keinen Fallback.
-    # Fix: Bei Fehler ohne Async-Flag wiederholen und Async deaktivieren.
+    # Der Pageflip-Aufruf liegt in SDL_kmsdrmopengles.c (KMSDRM_GLES_SwapWindow),
+    # NICHT in SDL_kmsdrmvideo.c. Der Mali-G31-Treiber meldet
+    # DRM_CAP_ASYNC_PAGE_FLIP, lehnt den Aufruf aber mit -EINVAL ab.
     echo "== SDL2 KMSDRM Pageflip-Patch fuer Mali-G31 anwenden"
-    python3 - "$SDL2_SRC/src/video/kmsdrm/SDL_kmsdrmvideo.c" <<'PATCH_EOF'
+    python3 - "$SDL2_SRC/src/video/kmsdrm/SDL_kmsdrmopengles.c" <<'PATCH_EOF'
 import sys
 path = sys.argv[1]
 with open(path) as f:
     text = f.read()
 
-old = '''    ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id, fb_info->fb_id,
-                                  flip_flags, &windata->waiting_for_flip);
+# Der exakte Code in SDL 2.30.10 (verifiziert gegen Issue #16174):
+old = '''    if (_this->egl_data->egl_swapinterval == 0 && viddata->async_pageflip_support) {
+        flip_flags |= DRM_MODE_PAGE_FLIP_ASYNC;
+    }
+    ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id,
+                                  fb_info->fb_id, flip_flags, &windata->waiting_for_flip);
     if (ret == 0) {
         windata->waiting_for_flip = SDL_TRUE;
     } else {
         SDL_LogError(SDL_LOG_CATEGORY_VIDEO, "Could not queue pageflip: %d", ret);
     }'''
 
-new = '''    ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id, fb_info->fb_id,
-                                  flip_flags, &windata->waiting_for_flip);
+new = '''    if (_this->egl_data->egl_swapinterval == 0 && viddata->async_pageflip_support) {
+        flip_flags |= DRM_MODE_PAGE_FLIP_ASYNC;
+    }
+    ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id,
+                                  fb_info->fb_id, flip_flags, &windata->waiting_for_flip);
     /* Mali-G31 (RK3326) meldet DRM_CAP_ASYNC_PAGE_FLIP, lehnt den Aufruf
        aber mit -EINVAL ab. SDL2 hat keinen Fallback, sodass jeder Frame
        verloren geht. Hier: ohne Async-Flag wiederholen und Async dauerhaft
@@ -140,8 +147,8 @@ new = '''    ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_
     if (ret != 0 && (flip_flags & DRM_MODE_PAGE_FLIP_ASYNC)) {
         viddata->async_pageflip_support = SDL_FALSE;
         flip_flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;
-        ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id, fb_info->fb_id,
-                                      flip_flags, &windata->waiting_for_flip);
+        ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id,
+                                      fb_info->fb_id, flip_flags, &windata->waiting_for_flip);
         if (ret == 0) {
             SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO,
                         "Async pageflip rejected by the driver; using synchronous flips.");
@@ -154,12 +161,29 @@ new = '''    ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_
     }'''
 
 if old not in text:
-    print("FEHLER: Pageflip-Code nicht gefunden", file=sys.stderr)
-    sys.exit(1)
-text = text.replace(old, new, 1)
+    # Fallback: Falls die Einrückung abweicht, nach dem Kern suchen
+    import re
+    pattern = re.compile(
+        r'(ret = KMSDRM_drmModePageFlip\(viddata->drm_fd, dispdata->crtc->crtc_id,\s*\n'
+        r'\s*fb_info->fb_id, flip_flags, &windata->waiting_for_flip\);\s*\n'
+        r'\s*if \(ret == 0\) \{\s*\n'
+        r'\s*windata->waiting_for_flip = SDL_TRUE;\s*\n'
+        r'\s*\} else \{\s*\n'
+        r'\s*SDL_LogError\(SDL_LOG_CATEGORY_VIDEO, "Could not queue pageflip: %d", ret\);\s*\n'
+        r'\s*\})')
+    match = pattern.search(text)
+    if not match:
+        print("FEHLER: Pageflip-Code nicht gefunden", file=sys.stderr)
+        print("Bitte pruefen: SDL_kmsdrmopengles.c KMSDRM_GLES_SwapWindow", file=sys.stderr)
+        sys.exit(1)
+    # Den gefundenen Block durch den neuen ersetzen
+    text = text[:match.start()] + new + text[match.end():]
+else:
+    text = text.replace(old, new, 1)
+
 with open(path, 'w') as f:
     f.write(text)
-print("SDL2 KMSDRM Pageflip-Patch angewendet")
+print("SDL2 KMSDRM Pageflip-Patch angewendet (SDL_kmsdrmopengles.c)")
 PATCH_EOF
 
     cmake -S "$SDL2_SRC" -B "$SDL2_BUILD" \
@@ -654,11 +678,6 @@ fi
 echo "== Alle Optimierungen sauber angewendet."
 
 # ── Fix 5: PGO-Shim für bionische Runtime-Symbole ────────────────────
-# Verifiziert: LLVM Compiler-RT Dokumentation
-# Die NDK-Profiling-Runtime ist gegen bionic gebaut und ruft Symbole,
-# die in unserem musl-Guest fehlen: __errno, __sF, prctl, getpagesize.
-# Zusätzlich: __llvm_profile_write_file manuell aufrufen, weil der
-# bionische atexit-Handler im musl-Guest nicht registriert wird.
 if [ "$PGO_MODE" = "train" ]; then
     SHIM="$SRC/port/android/guest/runtime/guest_pgo_shim.c"
     cat > "$SHIM" <<'CEOF'
@@ -706,7 +725,6 @@ int getpagesize(void) { return 4096; }
 /* LLVM-Profiling-API: manuell aufrufen, weil bionics atexit im
    musl-Guest nicht registriert wird. */
 extern int __llvm_profile_write_file(void);
-extern void __llvm_profile_set_filename(const char *);
 
 /* Wird vor dem Guest-Ende aufgerufen. */
 void guest_pgo_flush_profile(void)
