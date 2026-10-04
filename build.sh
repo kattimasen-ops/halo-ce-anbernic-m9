@@ -756,13 +756,13 @@ CEOF
 fi
 
 # ── Port-Verzeichnis kopieren ────────────────────────────────────────
-if [ ! -d "$HERE/port/knnuli" ]; then
-    die "port/knnuli/ existiert nicht im Repo"
+if [ ! -d "$HERE/port/knulli" ]; then
+    die "port/knulli/ existiert nicht im Repo"
 fi
-rm -rf "$SRC/port/knnuli"
-cp -a "$HERE/port/knnuli" "$SRC/port/knnuli"
-rm -rf "$SRC/port/knnuli/__pycache__"
-chmod +x "$SRC/port/knnuli/build.sh" 2>/dev/null || true
+rm -rf "$SRC/port/knulli"
+cp -a "$HERE/port/knulli" "$SRC/port/knulli"
+rm -rf "$SRC/port/knulli/__pycache__"
+chmod +x "$SRC/port/knulli/build.sh" 2>/dev/null || true
 
 stamp=$({
     cat "$PATCH"
@@ -778,10 +778,10 @@ stamp=$({
     fi
     echo "pgo-mode=$PGO_MODE"
     echo "frame-pointer=option-a"
-    (cd "$HERE/port/knnuli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
+    (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 if [ -f "$SRC/.port-stamp" ] && [ "$(cat "$SRC/.port-stamp")" = "$stamp" ]; then
-    rm -rf "$SRC/build/knnuli"
+    rm -rf "$SRC/build/knulli"
 fi
 echo "$stamp" > "$SRC/.port-stamp"
 
@@ -799,22 +799,22 @@ python3 configure.py --release "$LTO_FLAG" "$PGO_FLAG" $PGO_EXTRA_ARGS \
 echo "== Baue Guest-ELF (halo_guest.elf) ..."
 ninja -j "$JOBS" build/android/halo_guest.elf
 
-echo "== Baue Host-Binary (halo) ueber port/knnuli/build.sh ..."
-bash "$SRC/port/knnuli/build.sh"
+echo "== Baue Host-Binary (halo) ueber port/knulli/build.sh ..."
+bash "$SRC/port/knulli/build.sh"
 
 # ── Distribution zusammenstellen ─────────────────────────────────────
 echo "== copying the build into $DIST"
 rm -rf "$DIST"
 mkdir -p "$DIST"
-cp "$SRC/build/knnuli/halo" "$DIST/halo"
-cp "$SRC/build/knnuli/halo_guest.elf" "$DIST/halo_guest.elf"
-cp "$SRC/port/knnuli/Halo.sh" "$DIST/Halo.sh"
-cp "$SRC/port/knnuli/halo_extract.py" "$DIST/halo_extract.py" 2>/dev/null || true
-cp "$SRC/port/knnuli/halo_screen.py" "$DIST/halo_screen.py" 2>/dev/null || true
-cp "$SRC/port/knnuli/sdl_mapping.py" "$DIST/sdl_mapping.py" 2>/dev/null || true
-if [ -d "$SRC/build/knnuli/libs.aarch64" ]; then
+cp "$SRC/build/knulli/halo" "$DIST/halo"
+cp "$SRC/build/knulli/halo_guest.elf" "$DIST/halo_guest.elf"
+cp "$SRC/port/knulli/Halo.sh" "$DIST/Halo.sh"
+cp "$SRC/port/knulli/halo_extract.py" "$DIST/halo_extract.py" 2>/dev/null || true
+cp "$SRC/port/knulli/halo_screen.py" "$DIST/halo_screen.py" 2>/dev/null || true
+cp "$SRC/port/knulli/sdl_mapping.py" "$DIST/sdl_mapping.py" 2>/dev/null || true
+if [ -d "$SRC/build/knulli/libs.aarch64" ]; then
     mkdir -p "$DIST/libs.aarch64"
-    cp -a "$SRC/build/knnuli/libs.aarch64/." "$DIST/libs.aarch64/"
+    cp -a "$SRC/build/knulli/libs.aarch64/." "$DIST/libs.aarch64/"
 fi
 chmod +x "$DIST/Halo.sh" 2>/dev/null || true
 
