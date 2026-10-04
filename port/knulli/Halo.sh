@@ -3,6 +3,12 @@
 #
 # RELEASE-BUILD: PGO (use) + LTO, alle Port-Optimierungen aktiv.
 # Kein Training, kein Auto-Exit, keine Debug-Logs.
+#
+# Tastenbelegung (ueber HALO_BUTTON_REMAP=1 in xinput_sdl.c):
+#   A <-> B       Springen auf B, Nahkampf auf A
+#   X <-> Y       Nachladen auf Y, Waffenwechsel auf X
+#   LB (L1) <-> LT (L2)   Granate auf L1, Taschenlampe auf L2
+#   RB (R1) <-> RT (R2)   Feuern auf R1, Granatenwechsel auf R2
 
 XDG_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
 
@@ -19,7 +25,7 @@ if [ ! -d "$GAMEDIR" ]; then
 fi
 cd "$GAMEDIR" || exit 1
 
-# ── LOGGING ──────────────────────────────────────────────────────────
+# ── LOGGING (nur Launcher-Minimum) ───────────────────────────────────
 LOG="$GAMEDIR/log.txt"
 if ! touch "$LOG" 2>/dev/null; then
     LOG="/tmp/halo-log.txt"
@@ -87,6 +93,7 @@ fi
 # ── SYSTEMOPTIMIERUNG ────────────────────────────────────────────────
 log_section "SYSTEMOPTIMIERUNG"
 
+# CPU-Governor auf performance
 cpu_governor_path=""
 for candidate in \
     /sys/devices/system/cpu/cpufreq/policy0/scaling_governor \
@@ -107,6 +114,7 @@ for cpu in /sys/devices/system/cpu/cpu[0-9]*; do
         echo performance > "$cpu/cpufreq/scaling_governor" 2>/dev/null || true
 done
 
+# GPU-Governor auf performance + min_freq = max_freq
 gpu_devfreq_path=""
 for candidate in /sys/class/devfreq/ff400000.gpu /sys/class/devfreq/gpu; do
     if [ -d "$candidate" ]; then
@@ -127,6 +135,7 @@ if [ -n "$gpu_devfreq_path" ]; then
     fi
 fi
 
+# ZRAM
 if swapon --show 2>/dev/null | grep -q zram; then
     log "ZRAM bereits aktiv."
 else
@@ -139,6 +148,7 @@ else
     fi
 fi
 
+# tailscaled stoppen
 HALO_SERVICE_STATE="/tmp/halo-ce-services.$$"
 HALO_SERVICES_RESTORED=0
 
@@ -168,6 +178,7 @@ restore_services() {
 : > "$HALO_SERVICE_STATE" 2>/dev/null || true
 stop_service_if_active tailscaled.service
 
+# Restore-Handler
 saved=/tmp/halo-clocks
 printf '%s|%s|%s\n' "$cpu_saved" "$gpu_governor_saved" "$gpu_min_saved" > "$saved" 2>/dev/null || true
 
@@ -194,6 +205,7 @@ trap restore EXIT
 mkdir -p /var/run/battery-saver 2>/dev/null && \
     touch /var/run/battery-saver/halo.pause 2>/dev/null || true
 
+# ── SAVE-VERZEICHNISSE ───────────────────────────────────────────────
 mkdir -p "$GAMEDIR/save" \
          "$GAMEDIR/save/z" \
          "$GAMEDIR/save/saved" \
@@ -204,12 +216,14 @@ mkdir -p "$GAMEDIR/save" \
          "$GAMEDIR/save/saved/recordings" \
          "$GAMEDIR/save/saved/recordings/last_recording" 2>/dev/null || true
 
+# ── DRI-RECHTE ───────────────────────────────────────────────────────
 for node in /dev/dri/card0 /dev/dri/renderD128 /dev/fb0; do
     if [ -e "$node" ] && { [ ! -r "$node" ] || [ ! -w "$node" ]; }; then
         sudo -n chmod 666 "$node" 2>/dev/null || true
     fi
 done
 
+# ── MALI-SYMLINKS ────────────────────────────────────────────────────
 SYSTEM_MALI="/usr/local/lib/aarch64-linux-gnu/libmali-bifrost-g31-rxp0-gbm.so"
 if [ -f "$SYSTEM_MALI" ]; then
     rm -rf /tmp/halo-mali
@@ -220,6 +234,7 @@ if [ -f "$SYSTEM_MALI" ]; then
 fi
 export LD_LIBRARY_PATH="/tmp/halo-mali:$GAMEDIR/libs.aarch64:$GAMEDIR"
 
+# ── ALSA (RK817) ─────────────────────────────────────────────────────
 if command -v amixer >/dev/null 2>&1; then
     for ctrl in Playback Master PCM Speaker Headphone DAC; do
         amixer -c 0 sset "$ctrl" 100% unmute >/dev/null 2>&1 || true
@@ -234,20 +249,24 @@ ctl.!default { type hw; card 0 }
 ASOUNDEOF
 fi
 
+# ── SDL-UMGEBUNG ─────────────────────────────────────────────────────
 export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-kmsdrm}"
 unset SDL_AUDIODRIVER
 unset AUDIODEV
 
+# ── HALO-PFADE ───────────────────────────────────────────────────────
 log_section "HALO-PFADE"
 export HALO_DATA_ROOT="$GAMEDIR"
 export HALO_SAVE_ROOT="$GAMEDIR/save"
 log "HALO_DATA_ROOT=$HALO_DATA_ROOT"
 log "HALO_SAVE_ROOT=$HALO_SAVE_ROOT"
 
+# ── HALO-EINSTELLUNGEN (Release) ─────────────────────────────────────
 log_section "HALO-EINSTELLUNGEN"
 
 # --- Bild ---
 export HALO_RENDER_SCALE="${HALO_RENDER_SCALE:-1.0}"
+# Dynamische Auflösung aus, damit render_scale garantiert konstant bleibt.
 export HALO_DYNAMIC_RESOLUTION="${HALO_DYNAMIC_RESOLUTION:-0}"
 export HALO_DYNAMIC_RESOLUTION_MIN="${HALO_DYNAMIC_RESOLUTION_MIN:-1.0}"
 export HALO_MODEL_DETAIL="${HALO_MODEL_DETAIL:-0.35}"
@@ -258,7 +277,9 @@ export HALO_FAST_TEXTURES="${HALO_FAST_TEXTURES:-1}"
 
 # --- Pacing und VSync ---
 export HALO_INTERPOLATION="${HALO_INTERPOLATION:-1}"
+# HALO_NO_VSYNC darf NICHT gesetzt werden (jeder Wert schaltet VSync ab).
 unset HALO_NO_VSYNC
+# Zusätzlicher Schutz: Swap-Interval hart auf 1 (VSync an)
 export HALO_SWAP_INTERVAL=1
 export HALO_FRAME_PACING="${HALO_FRAME_PACING:-1}"
 
@@ -280,11 +301,15 @@ export HALO_ASYNC_TEXTURES="${HALO_ASYNC_TEXTURES:-1}"
 export HALO_ASYNC_SHADERS="${HALO_ASYNC_SHADERS:-1}"
 export HALO_ASYNC_PROGRAMS="${HALO_ASYNC_PROGRAMS:-1}"
 
-# --- Tastenbelegung: A<->B, X<->Y, R1 feuert, L1 Granate, L3+R3 Panel ---
+# --- Tastenbelegung (in port/linux/src/xinput_sdl.c ausgewertet) ---
+# A <-> B (Springen auf B, Nahkampf auf A)
+# X <-> Y (Nachladen auf Y, Waffenwechsel auf X)
+# LB (L1) <-> LT (L2) (Granate auf L1, Taschenlampe auf L2)
+# RB (R1) <-> RT (R2) (Feuern auf R1, Granatenwechsel auf R2)
 export HALO_BUTTON_REMAP=1
 
 # --- PS Vita Port-Optimierungen ---
-# Sound-Occlusion nur jeden 3. Tick berechnen (spart CPU auf dem A35)
+# Sound-Occlusion nur jeden 3. Tick berechnen
 export HALO_SOUND_OBSTRUCTION_TICKS=3
 # Objekte unter 8 Pixeln Durchmesser überspringen
 export HALO_MIN_OBJECT_PIXELS=8
@@ -318,15 +343,18 @@ log "dynamic_resolution=$HALO_DYNAMIC_RESOLUTION (min $HALO_DYNAMIC_RESOLUTION_M
 log "fast_shaders=$HALO_FAST_SHADERS, fast_textures=$HALO_FAST_TEXTURES"
 log "interpolation=$HALO_INTERPOLATION, swap_interval=$HALO_SWAP_INTERVAL, frame_pacing=$HALO_FRAME_PACING"
 log "high_res_hud=$HALO_HIGH_RES_HUD, high_res_text=$HALO_HIGH_RES_TEXT"
+log "button_remap=$HALO_BUTTON_REMAP (A<->B, X<->Y, LB<->LT, RB<->RT)"
 log "sound_occlusion_ticks=$HALO_SOUND_OBSTRUCTION_TICKS, lighting_refresh_divisor=$HALO_LIGHTING_REFRESH_DIVISOR"
 log "Release: keine Debug- und Statistik-Ausgaben."
 
+# ── MAPS-CHECK ───────────────────────────────────────────────────────
 if [ ! -s "$GAMEDIR/maps/ui.map" ]; then
     log "FEHLER: $GAMEDIR/maps/ui.map fehlt."
     echo "FEHLER: maps/ui.map fehlt." >&2
     exit 1
 fi
 
+# ── SPIELSTART ───────────────────────────────────────────────────────
 log_section "SPIELSTART"
 
 if [ ! -x ./halo ]; then
@@ -345,6 +373,7 @@ HALO_STDERR="$GAMEDIR/halo-stderr.txt"
 : > "$HALO_STDOUT"
 : > "$HALO_STDERR"
 
+# gptokeyb falls verfügbar
 GPTOKEYB_PID=""
 if [ -n "$PM_CONTROLFOLDER" ] && command -v gptokeyb >/dev/null 2>&1; then
     gptokeyb "./halo" >/dev/null 2>&1 &
