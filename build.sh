@@ -648,11 +648,12 @@ with open(path, 'w') as f:
 print(f"linux_build.py: {count_opt}x O2->O3, {count_abi}x zusaetzliche Flags")
 PYEOF
 
-# ── Fix 4: Python-Patches (memory, neon, vita, button) ───────────────
+# ── Fix 4: Python-Patches (memory, neon, vita, button, index_extent) ─
 echo ""
 echo "== Fix 4: Quellcode-Optimierungen ..."
 for patch_script in patch_memory_pools.py patch_neon_math.py \
-                    patch_vita_optimizations.py patch_button_remap.py; do
+                    patch_vita_optimizations.py patch_button_remap.py \
+                    patch_index_extent_neon.py; do
     if [ -f "$HERE/patches/$patch_script" ]; then
         echo "== Wende $patch_script an ..."
         if ! python3 "$HERE/patches/$patch_script" "$SRC"; then
@@ -688,6 +689,7 @@ check_patch "port/linux/src/port_config.c"                "HALO_SOUND_OBSTRUCTIO
 check_patch "port/linux/src/port_config.c"                "HALO_MIN_OBJECT_PIXELS"             "port_config.c display.distant_objects"
 check_patch "port/linux/src/port_config.c"                "HALO_LIGHTING_REFRESH_DIVISOR"      "port_config.c debug.lighting_refresh_divisor"
 check_patch "port/linux/src/xinput_sdl.c"                 "button_remap"                       "xinput_sdl.c Button-Remap"
+check_patch "port/linux/src/d3d8_gl.c"                    "vminvq_u16"                         "d3d8_gl.c index_extent NEON"
 if [ "$PGO_MODE" = "train" ]; then
     check_patch "tools/android_build.py" "-fprofile-instr-generate" "android_build.py PGO-Instrumentierung"
     check_patch "tools/android_build.py" "guest_profile_runtime"    "android_build.py Profiling-Runtime"
@@ -770,6 +772,7 @@ stamp=$({
     cat "$HERE/patches/patch_neon_math.py"    2>/dev/null || true
     cat "$HERE/patches/patch_vita_optimizations.py" 2>/dev/null || true
     cat "$HERE/patches/patch_button_remap.py" 2>/dev/null || true
+    cat "$HERE/patches/patch_index_extent_neon.py" 2>/dev/null || true
     if [ -f "$HERE/pgo/halo_linux.profdata" ]; then
         sha256sum "$HERE/pgo/halo_linux.profdata" | cut -d' ' -f1
     fi
@@ -778,6 +781,7 @@ stamp=$({
     fi
     echo "pgo-mode=$PGO_MODE"
     echo "frame-pointer=option-a"
+    echo "index-extent=neon"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 if [ -f "$SRC/.port-stamp" ] && [ "$(cat "$SRC/.port-stamp")" = "$stamp" ]; then
