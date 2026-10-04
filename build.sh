@@ -4,9 +4,16 @@ set -euo pipefail
 # ══════════════════════════════════════════════════════════════════════
 # PGO-MODUS
 # ══════════════════════════════════════════════════════════════════════
-#   train  → instrumentierter Build; erzeugt beim Ausführen .profraw
+#   train  → instrumentierter Android-Guest (nur!), erzeugt .profraw
 #   use    → Release-Build mit pgo/halo_android.profdata und LTO
 #   off    → ohne PGO, LTO an
+#
+# WICHTIG: Für 'train' wird configure.py mit --pgo=off aufgerufen.
+# Der Android-Guest wird stattdessen über einen Patch an
+# tools/android_build.py mit -fprofile-instr-generate instrumentiert.
+# Der Upstream-eigene --pgo=train-Modus ist für Linux-Desktop-Training
+# gedacht (baut und führt einen i686-Linux-Binary aus) und funktioniert
+# in CI nicht.
 PGO_MODE=${PGO_MODE:-train}
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -165,45 +172,40 @@ fi
 # ══════════════════════════════════════════════════════════════════════
 # PGO-Konfiguration
 # ══════════════════════════════════════════════════════════════════════
-PGO_FLAG=""
+# Wir rufen configure.py IMMER mit --pgo=off auf und instrumentieren den
+# Android-Guest selbst. Der Upstream-eigene --pgo=train-Modus ist für
+# Linux-Desktop-Training (baut und führt i686-Linux aus) und scheitert
+# in CI.
+PGO_FLAG="--pgo=off"
 PGO_EXTRA_ARGS=""
 LTO_FLAG="--lto=full"
 
-mkdir -p "$SRC/pgo"
-
-case "$PGO_MODE" in
-    train)
-        PGO_FLAG="--pgo=train"
-        LTO_FLAG="--lto=off"
-        echo "== PGO: Trainings-Build (instrumentiert, kein LTO)"
-        ;;
-    use)
-        LOCAL_PGO="$HERE/pgo/halo_android.profdata"
-        PGO_ANDROID_URL="https://raw.githubusercontent.com/Andiweli/HaloCE-Android-AAOS/main/pgo/halo_linux.profdata"
-        PGO_LINUX_URL="https://raw.githubusercontent.com/cybersecurity/halo-ce-universal/main/pgo/halo_linux.profdata"
-        if [ -f "$LOCAL_PGO" ]; then
-            cp "$LOCAL_PGO" "$SRC/pgo/halo_android.profdata"
-            PGO_FLAG="--pgo=use"
-            PGO_EXTRA_ARGS="--pgo-profile $SRC/pgo/halo_android.profdata"
-            echo "== Lokales Profil verwendet: $(stat -c%s "$SRC/pgo/halo_android.profdata") Bytes"
-        elif curl -fsSL -o "$SRC/pgo/halo_android.profdata" "$PGO_ANDROID_URL" 2>/dev/null; then
-            PGO_FLAG="--pgo=use"
-            PGO_EXTRA_ARGS="--pgo-profile $SRC/pgo/halo_android.profdata"
-            echo "== Profil aus dem Netz geladen"
-        elif curl -fsSL -o "$SRC/pgo/halo_linux.profdata" "$PGO_LINUX_URL" 2>/dev/null; then
-            PGO_FLAG="--pgo=use"
-            PGO_EXTRA_ARGS="--pgo-profile $SRC/pgo/halo_linux.profdata"
-            echo "== Linux-Profil geladen"
-        else
-            echo "== Kein PGO-Profil verfuegbar"
-            PGO_FLAG="--pgo=off"
-        fi
-        ;;
-    off)
+if [ "$PGO_MODE" = "use" ]; then
+    LOCAL_PGO="$HERE/pgo/halo_android.profdata"
+    PGO_ANDROID_URL="https://raw.githubusercontent.com/Andiweli/HaloCE-Android-AAOS/main/pgo/halo_linux.profdata"
+    PGO_LINUX_URL="https://raw.githubusercontent.com/cybersecurity/halo-ce-universal/main/pgo/halo_linux.profdata"
+    if [ -f "$LOCAL_PGO" ]; then
+        echo "== PGO: use (lokales Profil)"
+        PGO_FLAG="--pgo=use"
+        PGO_EXTRA_ARGS="--pgo-profile $LOCAL_PGO"
+    elif curl -fsSL -o "$WORK/halo_android.profdata" "$PGO_ANDROID_URL" 2>/dev/null; then
+        echo "== PGO: use (Profil aus dem Netz)"
+        PGO_FLAG="--pgo=use"
+        PGO_EXTRA_ARGS="--pgo-profile $WORK/halo_android.profdata"
+    elif curl -fsSL -o "$WORK/halo_linux.profdata" "$PGO_LINUX_URL" 2>/dev/null; then
+        echo "== PGO: use (Linux-Profil)"
+        PGO_FLAG="--pgo=use"
+        PGO_EXTRA_ARGS="--pgo-profile $WORK/halo_linux.profdata"
+    else
+        echo "== PGO: kein Profil gefunden, baue ohne PGO"
         PGO_FLAG="--pgo=off"
-        echo "== PGO: aus"
-        ;;
-esac
+    fi
+elif [ "$PGO_MODE" = "off" ]; then
+    echo "== PGO: aus"
+elif [ "$PGO_MODE" = "train" ]; then
+    echo "== PGO: Trainings-Build (Android-Guest wird manuell instrumentiert, kein LTO)"
+    LTO_FLAG="--lto=off"
+fi
 
 # ── Fix 1: APCs ─────────────────────────────────────────────────────
 python3 - "$SRC/port/linux/src/xbox_kernel.c" <<'PYEOF'
@@ -451,6 +453,33 @@ with open(path, 'w') as f:
 print("clang-Builtin-Shim aktiv")
 PYEOF
 
+# ── Fix 2c: NUR im Trainings-Modus: PGO-Instrumentierung ─────────────
+# Fügt -fprofile-instr-generate zu den Guest-CFLAGS hinzu. Der Runtime-
+# Link (libclang_rt.profile) wird vom Linker-Treiber automatisch gemacht,
+# wenn clang die Linkstufe fährt.
+if [ "$PGO_MODE" = "train" ]; then
+    python3 - "$SRC/tools/android_build.py" <<'PYEOF'
+import sys
+path = sys.argv[1]
+with open(path) as f:
+    text = f.read()
+if "-fprofile-instr-generate" in text:
+    print("android_build.py hat bereits -fprofile-instr-generate")
+    sys.exit(0)
+# Nach dem O3-Flag einfügen
+for old in ('"-O3",', '"-O3"'):
+    if old in text:
+        new = old.replace('"-O3"', '"-O3",\n    "-fprofile-instr-generate"')
+        text = text.replace(old, new, 1)
+        with open(path, 'w') as f:
+            f.write(text)
+        print("android_build.py: -fprofile-instr-generate hinzugefuegt (Trainings-Modus)")
+        sys.exit(0)
+print("FEHLER: O3-Flag in android_build.py nicht gefunden", file=sys.stderr)
+sys.exit(1)
+PYEOF
+fi
+
 # ── Fix 3: linux_build.py ────────────────────────────────────────────
 python3 - "$SRC/tools/linux_build.py" <<'PYEOF'
 import sys
@@ -517,11 +546,14 @@ check_patch "source/effects/decals.c"                     "static __thread long 
 check_patch "source/math/matrix_math.c"                   "vfmaq_n_f32"                        "matrix_math.c NEON"
 check_patch "port/android/guest/runtime/guest_string.c"   "vld1q_u8"                           "guest_string.c NEON memcmp"
 check_patch "port/android/guest/runtime/guest_string.c"   "vst1q_u8"                           "guest_string.c NEON memcpy"
+if [ "$PGO_MODE" = "train" ]; then
+    check_patch "tools/android_build.py" "-fprofile-instr-generate" "android_build.py PGO-Instrumentierung"
+fi
 if [ "$verification_failed" -ne 0 ]; then
     echo "FEHLER: Optimierungen fehlen"
     exit 1
 fi
-echo "== Alle vier Optimierungen sauber angewendet."
+echo "== Alle Optimierungen sauber angewendet."
 
 # ── Port-Verzeichnis kopieren ────────────────────────────────────────
 if [ ! -d "$HERE/port/knulli" ]; then
@@ -554,8 +586,9 @@ export GUEST_CC HOST_CC JOBS
 
 cd "$SRC"
 
-echo "== Konfiguriere mit $LTO_FLAG $PGO_FLAG $PGO_EXTRA_ARGS ..."
-python3 configure.py --release $LTO_FLAG $PGO_FLAG $PGO_EXTRA_ARGS \
+# WICHTIG: --pgo=off immer, weil wir den Android-Guest selbst instrumentieren.
+echo "== Konfiguriere mit $LTO_FLAG --pgo=off $PGO_EXTRA_ARGS ..."
+python3 configure.py --release $LTO_FLAG --pgo=off $PGO_EXTRA_ARGS \
     --android-ndk "$ANDROID_NDK" --android-guest-cc "$GUEST_CC"
 
 echo "== Baue Guest-ELF (halo_guest.elf) ..."
@@ -586,7 +619,7 @@ echo "== halo_guest.elf: $GUEST_SIZE Bytes (~${GUEST_SIZE_MB} MB)"
 
 if [ "$PGO_MODE" = "train" ]; then
     if [ "$GUEST_SIZE" -lt 11500000 ]; then
-        die "Trainings-Build ist nur ${GUEST_SIZE_MB} MB – PGO_MODE=train wurde nicht wirksam."
+        die "Trainings-Build ist nur ${GUEST_SIZE_MB} MB – Instrumentierung hat nicht gegriffen."
     fi
     cat <<'TRAINING'
 
@@ -596,9 +629,9 @@ TRAININGS-BUILD FERTIG
 
 Naechste Schritte auf dem M9 Pro:
 
-1. dist/Halo.sh      nach /roms/ports/Halo.sh
-2. dist/halo_guest.elf nach /roms/ports/halo-ce/halo_guest.elf
-3. dist/halo         nach /roms/ports/halo-ce/halo
+1. dist/Halo.sh           nach /roms/ports/Halo.sh
+2. dist/halo_guest.elf    nach /roms/ports/halo-ce/halo_guest.elf
+3. dist/halo              nach /roms/ports/halo-ce/halo
 
 4. Spiel starten. Beendet sich nach 10 Minuten selbst (SIGTERM).
 5. .profraw-Dateien vom Geraet holen.
