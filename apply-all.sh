@@ -6,9 +6,14 @@
 #   ./apply_all.sh <source-root>
 #
 # Reihenfolge:
-#   1. git apply patches/halo-ce-universal-knulli.patch   (Upstream + Knulli)
-#   2. python3 patches/patch_memory_pools.py <src>        (Allocator + decals)
-#   3. python3 patches/patch_neon_math.py    <src>        (NEON matrix + strings)
+#   1. git apply patches/halo-ce-universal-knnuli.patch   (Upstream + Knulli)
+#   2. python3 patches/patch_memory_pools.py      <src>   (Allocator + decals)
+#   3. python3 patches/patch_neon_math.py         <src>   (NEON matrix + strings)
+#   4. python3 patches/patch_vita_optimizations.py <src>  (Sound-Occlusion,
+#                                                          Distant-Object,
+#                                                          Lighting-Divisor)
+#   5. python3 patches/patch_button_remap.py      <src>   (A<->B, X<->Y,
+#                                                          LB<->LT, RB<->RT)
 #
 # Idempotent: die Python-Skripte überspringen bereits angewendete Änderungen.
 #
@@ -21,7 +26,7 @@ SRC=${1:?usage: apply_all.sh <source-root>}
 SRC=$(cd "$SRC" && pwd)
 
 PATCHES=$HERE/patches
-MAIN_PATCH=$PATCHES/halo-ce-universal-knulli.patch
+MAIN_PATCH=$PATCHES/halo-ce-universal-knnuli.patch
 
 # ── 1) Der große Git-Patch (Upstream + alle Knulli-Optimierungen) ─────
 if [ ! -f "$MAIN_PATCH" ]; then
@@ -43,8 +48,11 @@ else
     git apply --whitespace=nowarn --directory="$SRC" "$MAIN_PATCH"
 fi
 
-# ── 2) Die beiden Python-Patches ──────────────────────────────────────
-for script in patch_memory_pools.py patch_neon_math.py; do
+# ── 2) Die Python-Patches (alle vier) ─────────────────────────────────
+# Reihenfolge: memory/neon zuerst, dann vita, dann button.
+# Die Skripte sind idempotent und überspringen sich selbst.
+for script in patch_memory_pools.py patch_neon_math.py \
+              patch_vita_optimizations.py patch_button_remap.py; do
     if [ ! -f "$PATCHES/$script" ]; then
         echo "== $script nicht vorhanden – überspringe"
         continue
@@ -60,5 +68,12 @@ echo
 echo "== fertig: $SRC enthält den vollständigen M9 Pro Patch-Satz"
 echo "   cseries.h Debug-Allocator:   $(grep -c HALO_DEBUG_ALLOCATOR "$SRC/source/cseries/cseries.h" || true)"
 echo "   decals.c __thread-Arrays:    $(grep -c 'static __thread long surface_queue' "$SRC/source/effects/decals.c" || true)"
-echo "   matrix_math.c NEON:          $(grep -c vfmaq_n_f32 "$SRC/source/math/matrix_math.c" || true)"
+echo "   matrix_math.c NEON:          $(grep -c vmulq_n_f32 "$SRC/source/math/matrix_math.c" || true)"
 echo "   guest_string.c NEON:         $(grep -c 'vld1q_u8' "$SRC/port/android/guest/runtime/guest_string.c" || true)"
+echo "   game_sound.c Obstruction:    $(grep -c obstruction_interval_value "$SRC/source/sound/game_sound.c" || true)"
+echo "   render_objects.c Distant:    $(grep -c HALO_MIN_OBJECT_PIXELS "$SRC/source/render/render_objects.c" || true)"
+echo "   render_objects.c Lighting:   $(grep -c HALO_LIGHTING_REFRESH_DIVISOR "$SRC/source/render/render_objects.c" || true)"
+echo "   port_config.c Obstruction:   $(grep -c HALO_SOUND_OBSTRUCTION_TICKS "$SRC/port/linux/src/port_config.c" || true)"
+echo "   port_config.c Distant:       $(grep -c HALO_MIN_OBJECT_PIXELS "$SRC/port/linux/src/port_config.c" || true)"
+echo "   port_config.c Lighting:      $(grep -c HALO_LIGHTING_REFRESH_DIVISOR "$SRC/port/linux/src/port_config.c" || true)"
+echo "   xinput_sdl.c Button-Remap:   $(grep -c button_remap "$SRC/port/linux/src/xinput_sdl.c" || true)"
