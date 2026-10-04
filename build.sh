@@ -113,9 +113,11 @@ if [ ! -f "$SYSROOT_LIB/libSDL2-2.0.so.0" ]; then
 
     # ── SDL2 KMSDRM Pageflip-Patch für Mali-G31 ─────────────────────
     # Verifiziert: https://github.com/libsdl-org/SDL/issues/16174
-    # Der Pageflip-Aufruf liegt in SDL_kmsdrmopengles.c (KMSDRM_GLES_SwapWindow),
-    # NICHT in SDL_kmsdrmvideo.c. Der Mali-G31-Treiber meldet
-    # DRM_CAP_ASYNC_PAGE_FLIP, lehnt den Aufruf aber mit -EINVAL ab.
+    # Der Pageflip-Aufruf liegt in SDL_kmsdrmopengles.c
+    # (KMSDRM_GLES_SwapWindow), NICHT in SDL_kmsdrmvideo.c. Der
+    # Mali-G31-Treiber auf dem RK3326 meldet DRM_CAP_ASYNC_PAGE_FLIP,
+    # lehnt den Aufruf aber mit -EINVAL ab. SDL2 2.30.10 hat keinen
+    # Fallback, sodass jeder Frame verloren geht.
     echo "== SDL2 KMSDRM Pageflip-Patch fuer Mali-G31 anwenden"
     python3 - "$SDL2_SRC/src/video/kmsdrm/SDL_kmsdrmopengles.c" <<'PATCH_EOF'
 import sys
@@ -123,11 +125,7 @@ path = sys.argv[1]
 with open(path) as f:
     text = f.read()
 
-# Der exakte Code in SDL 2.30.10 (verifiziert gegen Issue #16174):
-old = '''    if (_this->egl_data->egl_swapinterval == 0 && viddata->async_pageflip_support) {
-        flip_flags |= DRM_MODE_PAGE_FLIP_ASYNC;
-    }
-    ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id,
+old = '''    ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id,
                                   fb_info->fb_id, flip_flags, &windata->waiting_for_flip);
     if (ret == 0) {
         windata->waiting_for_flip = SDL_TRUE;
@@ -135,10 +133,7 @@ old = '''    if (_this->egl_data->egl_swapinterval == 0 && viddata->async_pagefl
         SDL_LogError(SDL_LOG_CATEGORY_VIDEO, "Could not queue pageflip: %d", ret);
     }'''
 
-new = '''    if (_this->egl_data->egl_swapinterval == 0 && viddata->async_pageflip_support) {
-        flip_flags |= DRM_MODE_PAGE_FLIP_ASYNC;
-    }
-    ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id,
+new = '''    ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id,
                                   fb_info->fb_id, flip_flags, &windata->waiting_for_flip);
     /* Mali-G31 (RK3326) meldet DRM_CAP_ASYNC_PAGE_FLIP, lehnt den Aufruf
        aber mit -EINVAL ab. SDL2 hat keinen Fallback, sodass jeder Frame
@@ -161,7 +156,6 @@ new = '''    if (_this->egl_data->egl_swapinterval == 0 && viddata->async_pagefl
     }'''
 
 if old not in text:
-    # Fallback: Falls die Einrückung abweicht, nach dem Kern suchen
     import re
     pattern = re.compile(
         r'(ret = KMSDRM_drmModePageFlip\(viddata->drm_fd, dispdata->crtc->crtc_id,\s*\n'
@@ -176,7 +170,6 @@ if old not in text:
         print("FEHLER: Pageflip-Code nicht gefunden", file=sys.stderr)
         print("Bitte pruefen: SDL_kmsdrmopengles.c KMSDRM_GLES_SwapWindow", file=sys.stderr)
         sys.exit(1)
-    # Den gefundenen Block durch den neuen ersetzen
     text = text[:match.start()] + new + text[match.end():]
 else:
     text = text.replace(old, new, 1)
@@ -678,6 +671,14 @@ fi
 echo "== Alle Optimierungen sauber angewendet."
 
 # ── Fix 5: PGO-Shim für bionische Runtime-Symbole ────────────────────
+# Die NDK-Profiling-Runtime ist gegen bionic gebaut und ruft Symbole,
+# die in unserem musl-Guest fehlen: __errno, __sF, prctl, getpagesize.
+#
+# KRITISCH: `atexit` allein genügt NICHT, weil der Trainingslauf mit
+# `timeout --signal=TERM` beendet wird und der Kernel bei SIGTERM direkt
+# terminiert, ohne die atexit-Kette auszuführen. Der Shim installiert
+# deshalb SIGTERM/SIGINT/SIGHUP-Handler, die __llvm_profile_write_file()
+# aufrufen, bevor der Prozess stirbt.
 if [ "$PGO_MODE" = "train" ]; then
     SHIM="$SRC/port/android/guest/runtime/guest_pgo_shim.c"
     cat > "$SHIM" <<'CEOF'
@@ -689,54 +690,62 @@ musl-Guest aber nicht unter diesen Namen existieren. Ohne diese
 Definitionen scheitert der Guest-Link mit:
     ld.lld: error: undefined symbol: __errno / __sF / prctl / getpagesize
 
-Zusätzlich: __llvm_profile_write_file() manuell aufrufen, weil der
-bionische atexit-Handler im musl-Guest nicht registriert wird.
-Die Runtime schreibt sonst keine .profraw-Datei.
+Zusätzlich: SIGTERM/SIGINT/SIGHUP-Handler, der das Profil vor dem
+Prozessende schreibt. `atexit` allein genügt NICHT, weil der Kernel bei
+SIGTERM (das timeout im Trainingslauf schickt) direkt terminiert und die
+atexit-Kette überspringt — der Profiling-Handler würde nie ausgeführt,
+und es entstünde keine .profraw-Datei.
 */
 
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 /* Bionics __errno: eine Funktion, die int* zurückgibt, im Unterschied
-   zu musls __errno_location. Wir geben einen statischen Wert zurück,
-   weil die Runtime nur den Fehlercode von flock() auswertet und wir
-   kein flock() im SIGKILL-Schutz-Pfad nutzen. */
+   zu musls __errno_location. */
 static int pgo_errno_value;
 int *__errno(void) { return &pgo_errno_value; }
 
 /* Bionics __sF: ein Array von FILE-Objekten. Nur referenziert von
-   fprintf(stderr, ...) für LLVM_PROFILE_VERBOSE, das im Normalbetrieb
-   nicht aufgerufen wird. Wir stellen nur Platzhalter-Speicher bereit. */
+   fprintf(stderr, ...) für LLVM_PROFILE_VERBOSE. */
 char __sF[3 * 256];
 
-/* prctl: nur für den SIGKILL-Schutz der Runtime. Wir beenden den
-   Trainingslauf ohnehin mit SIGTERM, der SIGKILL-Zweig wird nicht
-   erreicht. Ein No-op genügt. */
+/* prctl: nur für den SIGKILL-Schutz der Runtime. No-op genügt. */
 int prctl(int option, unsigned long a2, unsigned long a3, unsigned long a4, unsigned long a5)
 {
     (void)option; (void)a2; (void)a3; (void)a4; (void)a5;
     return 0;
 }
 
-/* getpagesize: POSIX, auf AArch64 immer 4096. Wird für die madvise-
-   Freigabe der Zählerseiten gebraucht. */
+/* getpagesize: POSIX, auf AArch64 immer 4096. */
 int getpagesize(void) { return 4096; }
 
-/* LLVM-Profiling-API: manuell aufrufen, weil bionics atexit im
-   musl-Guest nicht registriert wird. */
+/* LLVM-Profiling-API. */
 extern int __llvm_profile_write_file(void);
 
-/* Wird vor dem Guest-Ende aufgerufen. */
-void guest_pgo_flush_profile(void)
+/* Signal-Handler: Profil schreiben, dann mit dem Signal sterben, damit
+   der Exit-Code korrekt bleibt. */
+static void pgo_write_and_die(int sig)
 {
     __llvm_profile_write_file();
+    signal(sig, SIG_DFL);
+    raise(sig);
 }
 
-/* Registrierung über den musl-atexit-Mechanismus (der von libguestc.a
-   bereitgestellt wird, nicht der bionische). */
-__attribute__((constructor)) static void guest_pgo_register(void)
+__attribute__((constructor)) static void pgo_install_handlers(void)
 {
-    atexit(guest_pgo_flush_profile);
+    struct sigaction sa;
+
+    sa.sa_handler = pgo_write_and_die;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGINT,  &sa, NULL);
+    sigaction(SIGHUP,  &sa, NULL);
+
+    /* Fallback für den normalen Exit (Hotkey, exit()). */
+    atexit((void (*)(void))__llvm_profile_write_file);
 }
 CEOF
     if [ -f "$SHIM" ]; then
