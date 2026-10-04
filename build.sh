@@ -4,10 +4,11 @@ set -euo pipefail
 # ══════════════════════════════════════════════════════════════════════
 # PGO-MODUS
 # ══════════════════════════════════════════════════════════════════════
-#   train  → instrumentierter Android-Guest (nur!), erzeugt .profraw
-#   use    → Release-Build mit pgo/halo_android.profdata und LTO
+#   use    → Release-Build mit PGO (Linux-Profil) und LTO  [DEFAULT]
 #   off    → ohne PGO, LTO an
-PGO_MODE=${PGO_MODE:-train}
+#   train  → instrumentierter Android-Guest, erzeugt .profraw
+#            (nur zur Neuerzeugung eines Profils noetig)
+PGO_MODE=${PGO_MODE:-use}
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 UPSTREAM_URL=${UPSTREAM_URL:-https://github.com/cybersecurity/halo-ce-universal.git}
@@ -50,8 +51,8 @@ if ! printf '%s' "$UPSTREAM_COMMIT" | grep -Eq '^[0-9a-f]{40}$'; then
 fi
 
 case "$PGO_MODE" in
-    train|use|off) ;;
-    *) die "PGO_MODE='$PGO_MODE' ungueltig; erlaubt: train, use, off" ;;
+    use|off|train) ;;
+    *) die "PGO_MODE='$PGO_MODE' ungueltig; erlaubt: use, off, train" ;;
 esac
 
 echo "== Upstream: $UPSTREAM_URL @ $UPSTREAM_COMMIT"
@@ -111,13 +112,6 @@ if [ ! -f "$SYSROOT_LIB/libSDL2-2.0.so.0" ]; then
     curl -L -o "$WORK/sdl2.tar.gz" "$SDL2_ARCHIVE"
     tar -xzf "$WORK/sdl2.tar.gz" -C "$SDL2_SRC" --strip-components=1
 
-    # ── SDL2 KMSDRM Pageflip-Patch für Mali-G31 ─────────────────────
-    # Verifiziert: https://github.com/libsdl-org/SDL/issues/16174
-    # Der Pageflip-Aufruf liegt in SDL_kmsdrmopengles.c
-    # (KMSDRM_GLES_SwapWindow), NICHT in SDL_kmsdrmvideo.c. Der
-    # Mali-G31-Treiber auf dem RK3326 meldet DRM_CAP_ASYNC_PAGE_FLIP,
-    # lehnt den Aufruf aber mit -EINVAL ab. SDL2 2.30.10 hat keinen
-    # Fallback, sodass jeder Frame verloren geht.
     echo "== SDL2 KMSDRM Pageflip-Patch fuer Mali-G31 anwenden"
     python3 - "$SDL2_SRC/src/video/kmsdrm/SDL_kmsdrmopengles.c" <<'PATCH_EOF'
 import sys
@@ -239,23 +233,30 @@ PGO_EXTRA_ARGS=""
 LTO_FLAG="--lto=full"
 
 if [ "$PGO_MODE" = "use" ]; then
-    LOCAL_PGO="$HERE/pgo/halo_android.profdata"
-    PGO_ANDROID_URL="https://raw.githubusercontent.com/Andiweli/HaloCE-Android-AAOS/main/pgo/halo_linux.profdata"
+    # Linux-Profil bevorzugt: lokal, dann Upstream (cybersecurity), dann Fallback.
+    LOCAL_PGO="$HERE/pgo/halo_linux.profdata"
+    LOCAL_PGO_ANDROID="$HERE/pgo/halo_android.profdata"
     PGO_LINUX_URL="https://raw.githubusercontent.com/cybersecurity/halo-ce-universal/main/pgo/halo_linux.profdata"
+    PGO_FALLBACK_URL="https://raw.githubusercontent.com/Andiweli/HaloCE-Android-AAOS/main/pgo/halo_linux.profdata"
+
     if [ -f "$LOCAL_PGO" ]; then
-        echo "== PGO: use (lokales Profil)"
+        echo "== PGO: use (lokales Linux-Profil: pgo/halo_linux.profdata)"
         PGO_FLAG="--pgo=use"
         PGO_EXTRA_ARGS="--pgo-profile $LOCAL_PGO"
-    elif curl -fsSL -o "$WORK/halo_android.profdata" "$PGO_ANDROID_URL" 2>/dev/null; then
-        echo "== PGO: use (Profil aus dem Netz)"
-        PGO_FLAG="--pgo=use"
-        PGO_EXTRA_ARGS="--pgo-profile $WORK/halo_android.profdata"
-    elif curl -fsSL -o "$WORK/halo_linux.profdata" "$PGO_LINUX_URL" 2>/dev/null; then
-        echo "== PGO: use (Linux-Profil)"
+    elif curl -fsSL --retry 2 --connect-timeout 30 -o "$WORK/halo_linux.profdata" "$PGO_LINUX_URL" 2>/dev/null; then
+        echo "== PGO: use (Linux-Profil vom Upstream-Repo)"
         PGO_FLAG="--pgo=use"
         PGO_EXTRA_ARGS="--pgo-profile $WORK/halo_linux.profdata"
+    elif curl -fsSL --retry 2 --connect-timeout 30 -o "$WORK/halo_linux.profdata" "$PGO_FALLBACK_URL" 2>/dev/null; then
+        echo "== PGO: use (Linux-Profil aus Fallback-Repo)"
+        PGO_FLAG="--pgo=use"
+        PGO_EXTRA_ARGS="--pgo-profile $WORK/halo_linux.profdata"
+    elif [ -f "$LOCAL_PGO_ANDROID" ]; then
+        echo "== PGO: use (Notfall: lokales Android-Profil)"
+        PGO_FLAG="--pgo=use"
+        PGO_EXTRA_ARGS="--pgo-profile $LOCAL_PGO_ANDROID"
     else
-        echo "== PGO: kein Profil gefunden, baue ohne PGO"
+        echo "== PGO: kein Linux-Profil gefunden, baue ohne PGO (--pgo=off)"
         PGO_FLAG="--pgo=off"
     fi
 elif [ "$PGO_MODE" = "off" ]; then
@@ -670,31 +671,13 @@ if [ "$verification_failed" -ne 0 ]; then
 fi
 echo "== Alle Optimierungen sauber angewendet."
 
-# ── Fix 5: PGO-Shim für bionische Runtime-Symbole ────────────────────
-# Die NDK-Profiling-Runtime ist gegen bionic gebaut und ruft Symbole,
-# die in unserem musl-Guest fehlen: __errno, __sF, prctl, getpagesize.
-#
-# KRITISCH: `atexit` allein genügt NICHT, weil der Trainingslauf mit
-# `timeout --signal=TERM` beendet wird und der Kernel bei SIGTERM direkt
-# terminiert, ohne die atexit-Kette auszuführen. Der Shim installiert
-# deshalb SIGTERM/SIGINT/SIGHUP-Handler, die __llvm_profile_write_file()
-# aufrufen, bevor der Prozess stirbt.
+# ── Fix 5: PGO-Shim (NUR Trainings-Modus) ────────────────────────────
 if [ "$PGO_MODE" = "train" ]; then
     SHIM="$SRC/port/android/guest/runtime/guest_pgo_shim.c"
     cat > "$SHIM" <<'CEOF'
 /*
-GUEST_PGO_SHIM.C
-
-Bionic-Symbole, die die NDK-LLVM-Profiling-Runtime referenziert, im
-musl-Guest aber nicht unter diesen Namen existieren. Ohne diese
-Definitionen scheitert der Guest-Link mit:
-    ld.lld: error: undefined symbol: __errno / __sF / prctl / getpagesize
-
-Zusätzlich: SIGTERM/SIGINT/SIGHUP-Handler, der das Profil vor dem
-Prozessende schreibt. `atexit` allein genügt NICHT, weil der Kernel bei
-SIGTERM (das timeout im Trainingslauf schickt) direkt terminiert und die
-atexit-Kette überspringt — der Profiling-Handler würde nie ausgeführt,
-und es entstünde keine .profraw-Datei.
+GUEST_PGO_SHIM.C — Bionic-Symbole und SIGTERM-Handler für die
+LLVM-Profiling-Runtime im musl-Guest.
 */
 
 #include <signal.h>
@@ -702,30 +685,21 @@ und es entstünde keine .profraw-Datei.
 #include <stdlib.h>
 #include <unistd.h>
 
-/* Bionics __errno: eine Funktion, die int* zurückgibt, im Unterschied
-   zu musls __errno_location. */
 static int pgo_errno_value;
 int *__errno(void) { return &pgo_errno_value; }
 
-/* Bionics __sF: ein Array von FILE-Objekten. Nur referenziert von
-   fprintf(stderr, ...) für LLVM_PROFILE_VERBOSE. */
 char __sF[3 * 256];
 
-/* prctl: nur für den SIGKILL-Schutz der Runtime. No-op genügt. */
 int prctl(int option, unsigned long a2, unsigned long a3, unsigned long a4, unsigned long a5)
 {
     (void)option; (void)a2; (void)a3; (void)a4; (void)a5;
     return 0;
 }
 
-/* getpagesize: POSIX, auf AArch64 immer 4096. */
 int getpagesize(void) { return 4096; }
 
-/* LLVM-Profiling-API. */
 extern int __llvm_profile_write_file(void);
 
-/* Signal-Handler: Profil schreiben, dann mit dem Signal sterben, damit
-   der Exit-Code korrekt bleibt. */
 static void pgo_write_and_die(int sig)
 {
     __llvm_profile_write_file();
@@ -744,7 +718,6 @@ __attribute__((constructor)) static void pgo_install_handlers(void)
     sigaction(SIGINT,  &sa, NULL);
     sigaction(SIGHUP,  &sa, NULL);
 
-    /* Fallback für den normalen Exit (Hotkey, exit()). */
     atexit((void (*)(void))__llvm_profile_write_file);
 }
 CEOF
@@ -768,6 +741,9 @@ stamp=$({
     cat "$PATCH"
     cat "$HERE/patches/patch_memory_pools.py" 2>/dev/null || true
     cat "$HERE/patches/patch_neon_math.py"    2>/dev/null || true
+    if [ -f "$HERE/pgo/halo_linux.profdata" ]; then
+        sha256sum "$HERE/pgo/halo_linux.profdata" | cut -d' ' -f1
+    fi
     if [ -f "$HERE/pgo/halo_android.profdata" ]; then
         sha256sum "$HERE/pgo/halo_android.profdata" | cut -d' ' -f1
     fi
@@ -786,8 +762,8 @@ export GUEST_CC HOST_CC JOBS
 
 cd "$SRC"
 
-echo "== Konfiguriere mit $LTO_FLAG --pgo=off $PGO_EXTRA_ARGS ..."
-python3 configure.py --release $LTO_FLAG --pgo=off $PGO_EXTRA_ARGS \
+echo "== Konfiguriere mit $LTO_FLAG $PGO_FLAG $PGO_EXTRA_ARGS ..."
+python3 configure.py --release "$LTO_FLAG" "$PGO_FLAG" $PGO_EXTRA_ARGS \
     --android-ndk "$ANDROID_NDK" --android-guest-cc "$GUEST_CC"
 
 echo "== Baue Guest-ELF (halo_guest.elf) ..."
@@ -840,4 +816,23 @@ Naechste Schritte auf dem M9 Pro:
 FERTIG.
 ────────────────────────────────────────────────────────────────────────
 TRAINING
+else
+    cat <<'RELEASE'
+
+────────────────────────────────────────────────────────────────────────
+RELEASE-BUILD FERTIG (PGO use, LTO full)
+────────────────────────────────────────────────────────────────────────
+
+Zu installieren auf dem M9 Pro:
+
+1. dist/Halo.sh           nach /roms/ports/Halo.sh
+2. dist/halo_guest.elf    nach /roms/ports/halo-ce/halo_guest.elf
+3. dist/halo              nach /roms/ports/halo-ce/halo
+4. dist/libs.aarch64/     nach /roms/ports/halo-ce/libs.aarch64/  (falls vorhanden)
+
+Spiel direkt starten – kein Auto-Exit, keine Profil-Dateien.
+
+FERTIG.
+────────────────────────────────────────────────────────────────────────
+RELEASE
 fi
