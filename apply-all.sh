@@ -6,14 +6,14 @@
 #   ./apply_all.sh <source-root>
 #
 # Reihenfolge:
-#   1. git apply patches/halo-ce-universal-knnuli.patch   (Upstream + Knulli)
-#   2. python3 patches/patch_memory_pools.py      <src>   (Allocator + decals)
-#   3. python3 patches/patch_neon_math.py         <src>   (NEON matrix + strings)
-#   4. python3 patches/patch_vita_optimizations.py <src>  (Sound-Occlusion,
-#                                                          Distant-Object,
-#                                                          Lighting-Divisor)
-#   5. python3 patches/patch_button_remap.py      <src>   (A<->B, X<->Y,
-#                                                          LB<->LT, RB<->RT)
+#   1. git apply patches/halo-ce-universal-knulli.patch    (Upstream + Knulli)
+#   2. python3 patches/patch_memory_pools.py       <src>   (Allocator + decals)
+#   3. python3 patches/patch_neon_math.py          <src>   (NEON matrix + strings)
+#   4. python3 patches/patch_vita_optimizations.py <src>   (Sound-Occlusion,
+#                                                           Distant-Object,
+#                                                           Lighting-Divisor)
+#   5. python3 patches/patch_button_remap.py       <src>   (A<->B, X<->Y,
+#                                                           LB<->LT, RB<->RT)
 #
 # Idempotent: die Python-Skripte überspringen bereits angewendete Änderungen.
 #
@@ -26,7 +26,7 @@ SRC=${1:?usage: apply_all.sh <source-root>}
 SRC=$(cd "$SRC" && pwd)
 
 PATCHES=$HERE/patches
-MAIN_PATCH=$PATCHES/halo-ce-universal-knnuli.patch
+MAIN_PATCH=$PATCHES/halo-ce-universal-knulli.patch
 
 # ── 1) Der große Git-Patch (Upstream + alle Knulli-Optimierungen) ─────
 if [ ! -f "$MAIN_PATCH" ]; then
