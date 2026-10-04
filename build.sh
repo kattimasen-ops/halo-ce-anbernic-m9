@@ -7,13 +7,6 @@ set -euo pipefail
 #   train  → instrumentierter Android-Guest (nur!), erzeugt .profraw
 #   use    → Release-Build mit pgo/halo_android.profdata und LTO
 #   off    → ohne PGO, LTO an
-#
-# WICHTIG: Für 'train' wird configure.py IMMER mit --pgo=off aufgerufen.
-# Der Android-Guest wird stattdessen über einen Patch an
-# tools/android_build.py mit -fprofile-instr-generate instrumentiert.
-# Der Upstream-eigene --pgo=train-Modus ist für Linux-Desktop-Training
-# gedacht (baut und führt einen i686-Linux-Binary aus) und funktioniert
-# in CI nicht.
 PGO_MODE=${PGO_MODE:-train}
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -465,18 +458,14 @@ for old in ('"-O3",', '"-O3"'):
         text = text.replace(old, new, 1)
         with open(path, 'w') as f:
             f.write(text)
-        print("android_build.py: -fprofile-instr-generate hinzugefuegt (Trainings-Modus)")
+        print("android_build.py: -fprofile-instr-generate hinzugefuegt")
         sys.exit(0)
-print("FEHLER: O3-Flag in android_build.py nicht gefunden", file=sys.stderr)
+print("FEHLER: O3-Flag nicht gefunden", file=sys.stderr)
 sys.exit(1)
 PYEOF
 fi
 
 # ── Fix 2d: NUR im Trainings-Modus: Profiling-Runtime zum Link ───────
-# -fprofile-instr-generate fügt in jedes Objekt einen Verweis auf
-# __llvm_profile_runtime ein. Die Bibliothek libclang_rt.profile-*.a
-# stellt ihn bereit. Da der Guest-Link ld.lld direkt aufruft (nicht den
-# clang-Treiber), muss die Bibliothek explizit auf die Linker-Zeile.
 if [ "$PGO_MODE" = "train" ]; then
     python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import sys
@@ -486,7 +475,6 @@ with open(path) as f:
 if "guest_profile_runtime" in text:
     print("android_build.py hat bereits guest_profile_runtime")
     sys.exit(0)
-
 old = '''    n.rule(
         name="android_guest_link",
         command=(f"$android_ndk_bin/ld.lld -m aarch64linux -static -nostdlib -T {linker_script} "
@@ -496,10 +484,7 @@ old = '''    n.rule(
         rspfile="$out.rsp",
         rspfile_content="$in_newline",
     )'''
-
 new = '''    # PGO-Training: die Profiling-Runtime an den Guest-Link anhaengen.
-    # Sie definiert __llvm_profile_runtime, das jedes mit
-    # -fprofile-instr-generate instrumentierte Objekt referenziert.
     guest_profile_runtime = ""
     for _cc_candidate in (guest_cc, str(ndk_bin / "clang")):
         if not _cc_candidate:
@@ -530,7 +515,6 @@ new = '''    # PGO-Training: die Profiling-Runtime an den Guest-Link anhaengen.
         rspfile="$out.rsp",
         rspfile_content="$in_newline",
     )'''
-
 if old not in text:
     print("FEHLER: android_guest_link rule nicht gefunden", file=sys.stderr)
     sys.exit(1)
@@ -589,7 +573,7 @@ for patch_script in patch_memory_pools.py patch_neon_math.py; do
     fi
 done
 
-# ── Fix 4b: Verifikation ─────────────────────────────────────────────
+# ── Fix 4b: Verifikation der Patches ─────────────────────────────────
 echo ""
 echo "== Fix 4b: Verifiziere Patch-Ergebnisse ..."
 verification_failed=0
@@ -616,6 +600,60 @@ if [ "$verification_failed" -ne 0 ]; then
     exit 1
 fi
 echo "== Alle Optimierungen sauber angewendet."
+
+# ── Fix 5: NUR im Trainings-Modus: Shim für bionische Runtime-Symbole
+# Die NDK-Profiling-Runtime (libclang_rt.profile-aarch64-android.a) ist
+# gegen bionic gebaut und ruft Symbole, die in unserem musl-Guest fehlen:
+# __errno, __sF, prctl, getpagesize. Der Shim stellt sie bereit. Er wird
+# von android_build.py automatisch mitkompiliert, weil es über alle
+# *.c-Dateien in port/android/guest/runtime/ iteriert.
+if [ "$PGO_MODE" = "train" ]; then
+    SHIM="$SRC/port/android/guest/runtime/guest_pgo_shim.c"
+    cat > "$SHIM" <<'CEOF'
+/*
+GUEST_PGO_SHIM.C
+
+Bionic-Symbole, die die NDK-LLVM-Profiling-Runtime referenziert, im
+musl-Guest aber nicht unter diesen Namen existieren. Ohne diese
+Definitionen scheitert der Guest-Link mit:
+    ld.lld: error: undefined symbol: __errno / __sF / prctl / getpagesize
+
+Die Runtime wird nur im Trainings-Build (-fprofile-instr-generate) ge-
+linkt. Der Shim ist harmlos, wenn die Runtime nicht da ist: die Symbole
+sind dann unbenutzt.
+*/
+
+/* Bionics __errno: eine Funktion, die int* zurückgibt, im Unterschied
+   zu musls __errno_location. Wir geben einen statischen Wert zurück,
+   weil die Runtime nur den Fehlercode von flock() auswertet und wir
+   kein flock() im SIGKILL-Schutz-Pfad nutzen. */
+static int pgo_errno_value;
+int *__errno(void) { return &pgo_errno_value; }
+
+/* Bionics __sF: ein Array von FILE-Objekten. Nur referenziert von
+   fprintf(stderr, ...) für LLVM_PROFILE_VERBOSE, das im Normalbetrieb
+   nicht aufgerufen wird. Wir stellen nur Platzhalter-Speicher bereit. */
+char __sF[3 * 256];
+
+/* prctl: nur für den SIGKILL-Schutz der Runtime. Wir beenden den
+   Trainingslauf ohnehin mit SIGTERM, der SIGKILL-Zweig wird nicht
+   erreicht. Ein No-op genügt. */
+int prctl(int option, unsigned long a2, unsigned long a3, unsigned long a4, unsigned long a5)
+{
+    (void)option; (void)a2; (void)a3; (void)a4; (void)a5;
+    return 0;
+}
+
+/* getpagesize: POSIX, auf AArch64 immer 4096. Wird für die madvise-
+   Freigabe der Zählerseiten gebraucht. */
+int getpagesize(void) { return 4096; }
+CEOF
+    if [ -f "$SHIM" ]; then
+        echo "== Fix 5: guest_pgo_shim.c erzeugt ($(stat -c%s "$SHIM") Bytes)"
+    else
+        die "Fix 5: guest_pgo_shim.c konnte nicht erzeugt werden"
+    fi
+fi
 
 # ── Port-Verzeichnis kopieren ────────────────────────────────────────
 if [ ! -d "$HERE/port/knulli" ]; then
