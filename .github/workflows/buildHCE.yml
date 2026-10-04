@@ -19,7 +19,6 @@ jobs:
 
     env:
       DEBIAN_FRONTEND: noninteractive
-      # Release-Build mit PGO (Linux-Profil) und LTO
       PGO_MODE: use
 
     steps:
