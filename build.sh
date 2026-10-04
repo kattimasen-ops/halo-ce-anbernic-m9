@@ -233,7 +233,6 @@ PGO_EXTRA_ARGS=""
 LTO_FLAG="--lto=full"
 
 if [ "$PGO_MODE" = "use" ]; then
-    # Linux-Profil bevorzugt: lokal, dann Upstream (cybersecurity), dann Fallback.
     LOCAL_PGO="$HERE/pgo/halo_linux.profdata"
     LOCAL_PGO_ANDROID="$HERE/pgo/halo_android.profdata"
     PGO_LINUX_URL="https://raw.githubusercontent.com/cybersecurity/halo-ce-universal/main/pgo/halo_linux.profdata"
