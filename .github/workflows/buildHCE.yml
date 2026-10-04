@@ -19,6 +19,7 @@ jobs:
 
     env:
       DEBIAN_FRONTEND: noninteractive
+      # Release-Build mit PGO (Linux-Profil) und LTO
       PGO_MODE: use
 
     steps:
@@ -184,6 +185,20 @@ jobs:
           export PKG_CONFIG_SYSROOT_DIR=/
           ./build.sh
         timeout-minutes: 120
+
+      - name: Upload patched sources for analysis
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: patched-sources
+          path: |
+            work/halo-ce-universal/source/sound/game_sound.c
+            work/halo-ce-universal/source/render/render_objects.c
+            work/halo-ce-universal/source/models/models.c
+            work/halo-ce-universal/port/linux/src/port_config.c
+            work/halo-ce-universal/port/linux/src/d3d8_gl.c
+          if-no-files-found: warn
+          retention-days: 7
 
       - name: Verify release build
         run: |
