@@ -166,9 +166,11 @@ jobs:
           chmod +x build.sh
           [ -f apply_all.sh ] && chmod +x apply_all.sh || true
           for f in build.sh UPSTREAM_COMMIT \
-                   patches/halo-ce-universal-knulli.patch \
+                   patches/halo-ce-universal-knnuli.patch \
                    patches/patch_memory_pools.py \
-                   patches/patch_neon_math.py; do
+                   patches/patch_neon_math.py \
+                   patches/patch_vita_optimizations.py \
+                   patches/patch_button_remap.py; do
             [ -f "$f" ] || { echo "FEHLT: $f"; exit 1; }
           done
           echo "== PGO_MODE: $PGO_MODE"
@@ -195,8 +197,13 @@ jobs:
             work/halo-ce-universal/source/sound/game_sound.c
             work/halo-ce-universal/source/render/render_objects.c
             work/halo-ce-universal/source/models/models.c
+            work/halo-ce-universal/source/effects/decals.c
+            work/halo-ce-universal/source/math/matrix_math.c
+            work/halo-ce-universal/source/cseries/cseries.h
             work/halo-ce-universal/port/linux/src/port_config.c
+            work/halo-ce-universal/port/linux/src/xinput_sdl.c
             work/halo-ce-universal/port/linux/src/d3d8_gl.c
+            work/halo-ce-universal/port/android/guest/runtime/guest_string.c
           if-no-files-found: warn
           retention-days: 7
 
