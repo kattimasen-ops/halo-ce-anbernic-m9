@@ -2,6 +2,16 @@
 set -euo pipefail
 
 # ══════════════════════════════════════════════════════════════════════
+# Halo CE Universal — M9 Pro (RK3326 / Cortex-A35 + Mali-G31 MP2)
+# Build-Skript: Host (aarch64) + Guest (arm64_32 ILP32 AArch64)
+#
+# Option A: -fno-omit-frame-pointer wird aus GUEST_CODE_FLAGS entfernt,
+#           damit -fomit-frame-pointer aus GUEST_ABI_FLAGS wirkt. Das
+#           spart auf dem Cortex-A35 etwas Codegroesse und ein paar
+#           Instruktionen pro Funktionsprolog. Backtraces ueber
+#           Frame-Pointer sind dafuer nicht mehr zuverlaessig; im
+#           Release werden Log-Marker und host_fatal verwendet.
+# ══════════════════════════════════════════════════════════════════════
 # PGO-MODUS
 # ══════════════════════════════════════════════════════════════════════
 #   use    → Release-Build mit PGO (Linux-Profil) und LTO  [DEFAULT]
@@ -13,7 +23,7 @@ PGO_MODE=${PGO_MODE:-use}
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 UPSTREAM_URL=${UPSTREAM_URL:-https://github.com/cybersecurity/halo-ce-universal.git}
 UPSTREAM_COMMIT=$(tr -d '[:space:]' < "$HERE/UPSTREAM_COMMIT")
-PATCH=$HERE/patches/halo-ce-universal-knulli.patch
+PATCH=$HERE/patches/halo-ce-universal-knnuli.patch
 SDL3_TAG=release-3.2.10
 SDL2_TAG=release-2.30.10
 SDL2_ARCHIVE=https://github.com/libsdl-org/SDL/archive/refs/tags/$SDL2_TAG.tar.gz
@@ -360,15 +370,14 @@ with open(path, 'w') as f:
 print("xbox_kernel.c gepatcht")
 PYEOF
 
-# ── Fix 2: android_build.py (mcpu, O3) ───────────────────────────────
+# ── Fix 2: android_build.py (mcpu, O3, Frame-Pointer) ────────────────
 python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import sys
 path = sys.argv[1]
 with open(path) as f:
     text = f.read()
-if '"-mcpu=cortex-a35"' in text and '"+dotprod"' not in text:
-    print("android_build.py hat bereits cortex-a35 ohne dotprod")
-    sys.exit(0)
+
+# 1) -mcpu=cortex-a35 (kein a53, kein dotprod)
 old_mcpu = '"-mcpu=cortex-a53"'
 new_mcpu = '"-mcpu=cortex-a35",\n    "-mtune=cortex-a35"'
 count_mcpu = text.count(old_mcpu)
@@ -379,9 +388,11 @@ else:
     new_mcpu = '"-mcpu=cortex-a35",\n    "-mtune=cortex-a35"'
     count_mcpu = text.count(old_mcpu)
     if count_mcpu == 0:
-        print("WARNUNG: keine mcpu-Zeile")
+        print("WARNUNG: keine mcpu-Zeile gefunden")
     else:
         text = text.replace(old_mcpu, new_mcpu)
+
+# 2) -O2 -> -O3 in GUEST_ABI_FLAGS, plus Optimierungsflags
 old_flags = '"-ffp-contract=off",\n    "-O2",'
 new_flags = '''"-ffp-contract=off",
     "-O3",
@@ -409,9 +420,19 @@ if count_flags == 0:
         text = text.replace(old_flags, new_flags, 1)
 else:
     text = text.replace(old_flags, new_flags, 1)
+
+# 3) Option A: -fno-omit-frame-pointer aus GUEST_CODE_FLAGS entfernen,
+#    damit -fomit-frame-pointer aus GUEST_ABI_FLAGS wirkt.
+#    Ohne diese Zeile wuerde der spaetere Flag den frueheren ueberschreiben.
+if '"-fno-omit-frame-pointer"' in text:
+    text = text.replace('    "-fno-omit-frame-pointer",\n', '')
+    print("Guest-Code-Flags: -fno-omit-frame-pointer entfernt (Option A)")
+else:
+    print("Guest-Code-Flags: -fno-omit-frame-pointer war nicht vorhanden")
+
 with open(path, 'w') as f:
     f.write(text)
-print(f"android_build.py gepatcht: {count_mcpu}x mcpu, {count_flags}x O2->O3")
+print(f"android_build.py gepatcht: {count_mcpu}x mcpu, {count_flags}x O-Flags")
 PYEOF
 
 # ── Fix 2b: clang-Builtin-Shim ───────────────────────────────────────
@@ -594,7 +615,7 @@ print("android_build.py: Profiling-Runtime zum Link hinzugefuegt")
 PYEOF
 fi
 
-# ── Fix 3: linux_build.py ────────────────────────────────────────────
+# ── Fix 3: linux_build.py (Host-Optimierung) ─────────────────────────
 python3 - "$SRC/tools/linux_build.py" <<'PYEOF'
 import sys
 path = sys.argv[1]
@@ -628,10 +649,11 @@ with open(path, 'w') as f:
 print(f"linux_build.py: {count_opt}x O2->O3, {count_abi}x zusaetzliche Flags")
 PYEOF
 
-# ── Fix 4: Python-Patches ────────────────────────────────────────────
+# ── Fix 4: Python-Patches (memory, neon, vita, button) ───────────────
 echo ""
 echo "== Fix 4: Quellcode-Optimierungen ..."
-for patch_script in patch_memory_pools.py patch_neon_math.py patch_vita_optimizations.py patch_button_remap.py; do
+for patch_script in patch_memory_pools.py patch_neon_math.py \
+                    patch_vita_optimizations.py patch_button_remap.py; do
     if [ -f "$HERE/patches/$patch_script" ]; then
         echo "== Wende $patch_script an ..."
         if ! python3 "$HERE/patches/$patch_script" "$SRC"; then
@@ -657,7 +679,7 @@ check_patch() {
 }
 check_patch "source/cseries/cseries.h"                    "HALO_DEBUG_ALLOCATOR"               "cseries.h Debug-Allocator"
 check_patch "source/effects/decals.c"                     "static __thread long surface_queue" "decals.c __thread-Arrays"
-check_patch "source/math/matrix_math.c"                   "vfmaq_n_f32"                        "matrix_math.c NEON"
+check_patch "source/math/matrix_math.c"                   "vmulq_n_f32"                        "matrix_math.c NEON (mul+add)"
 check_patch "port/android/guest/runtime/guest_string.c"   "vld1q_u8"                           "guest_string.c NEON memcmp"
 check_patch "port/android/guest/runtime/guest_string.c"   "vst1q_u8"                           "guest_string.c NEON memcpy"
 check_patch "source/sound/game_sound.c"                   "obstruction_interval_value"         "game_sound.c Sound-Occlusion-Intervall"
@@ -735,13 +757,13 @@ CEOF
 fi
 
 # ── Port-Verzeichnis kopieren ────────────────────────────────────────
-if [ ! -d "$HERE/port/knulli" ]; then
-    die "port/knulli/ existiert nicht im Repo"
+if [ ! -d "$HERE/port/knnuli" ]; then
+    die "port/knnuli/ existiert nicht im Repo"
 fi
-rm -rf "$SRC/port/knulli"
-cp -a "$HERE/port/knulli" "$SRC/port/knulli"
-rm -rf "$SRC/port/knulli/__pycache__"
-chmod +x "$SRC/port/knulli/build.sh" 2>/dev/null || true
+rm -rf "$SRC/port/knnuli"
+cp -a "$HERE/port/knnuli" "$SRC/port/knnuli"
+rm -rf "$SRC/port/knnuli/__pycache__"
+chmod +x "$SRC/port/knnuli/build.sh" 2>/dev/null || true
 
 stamp=$({
     cat "$PATCH"
@@ -756,10 +778,11 @@ stamp=$({
         sha256sum "$HERE/pgo/halo_android.profdata" | cut -d' ' -f1
     fi
     echo "pgo-mode=$PGO_MODE"
-    (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
+    echo "frame-pointer=option-a"
+    (cd "$HERE/port/knnuli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 if [ -f "$SRC/.port-stamp" ] && [ "$(cat "$SRC/.port-stamp")" = "$stamp" ]; then
-    rm -rf "$SRC/build/knulli"
+    rm -rf "$SRC/build/knnuli"
 fi
 echo "$stamp" > "$SRC/.port-stamp"
 
@@ -777,22 +800,22 @@ python3 configure.py --release "$LTO_FLAG" "$PGO_FLAG" $PGO_EXTRA_ARGS \
 echo "== Baue Guest-ELF (halo_guest.elf) ..."
 ninja -j "$JOBS" build/android/halo_guest.elf
 
-echo "== Baue Host-Binary (halo) ueber port/knulli/build.sh ..."
-bash "$SRC/port/knulli/build.sh"
+echo "== Baue Host-Binary (halo) ueber port/knnuli/build.sh ..."
+bash "$SRC/port/knnuli/build.sh"
 
 # ── Distribution zusammenstellen ─────────────────────────────────────
 echo "== copying the build into $DIST"
 rm -rf "$DIST"
 mkdir -p "$DIST"
-cp "$SRC/build/knulli/halo" "$DIST/halo"
-cp "$SRC/build/knulli/halo_guest.elf" "$DIST/halo_guest.elf"
-cp "$SRC/port/knulli/Halo.sh" "$DIST/Halo.sh"
-cp "$SRC/port/knulli/halo_extract.py" "$DIST/halo_extract.py" 2>/dev/null || true
-cp "$SRC/port/knulli/halo_screen.py" "$DIST/halo_screen.py" 2>/dev/null || true
-cp "$SRC/port/knulli/sdl_mapping.py" "$DIST/sdl_mapping.py" 2>/dev/null || true
-if [ -d "$SRC/build/knulli/libs.aarch64" ]; then
+cp "$SRC/build/knnuli/halo" "$DIST/halo"
+cp "$SRC/build/knnuli/halo_guest.elf" "$DIST/halo_guest.elf"
+cp "$SRC/port/knnuli/Halo.sh" "$DIST/Halo.sh"
+cp "$SRC/port/knnuli/halo_extract.py" "$DIST/halo_extract.py" 2>/dev/null || true
+cp "$SRC/port/knnuli/halo_screen.py" "$DIST/halo_screen.py" 2>/dev/null || true
+cp "$SRC/port/knnuli/sdl_mapping.py" "$DIST/sdl_mapping.py" 2>/dev/null || true
+if [ -d "$SRC/build/knnuli/libs.aarch64" ]; then
     mkdir -p "$DIST/libs.aarch64"
-    cp -a "$SRC/build/knulli/libs.aarch64/." "$DIST/libs.aarch64/"
+    cp -a "$SRC/build/knnuli/libs.aarch64/." "$DIST/libs.aarch64/"
 fi
 chmod +x "$DIST/Halo.sh" 2>/dev/null || true
 
@@ -828,7 +851,7 @@ else
     cat <<'RELEASE'
 
 ────────────────────────────────────────────────────────────────────────
-RELEASE-BUILD FERTIG (PGO use, LTO full)
+RELEASE-BUILD FERTIG (PGO use, LTO full, Frame-Pointer Option A)
 ────────────────────────────────────────────────────────────────────────
 
 Zu installieren auf dem M9 Pro:
@@ -839,6 +862,12 @@ Zu installieren auf dem M9 Pro:
 4. dist/libs.aarch64/     nach /roms/ports/halo-ce/libs.aarch64/  (falls vorhanden)
 
 Spiel direkt starten – kein Auto-Exit, keine Profil-Dateien.
+
+Hinweis: Der Guest wird ohne Frame-Pointer gebaut (-fomit-frame-pointer).
+Bei einem Absturz stehen im Log die Marker und host_fatal-Meldungen zur
+Verfuegung, aber keine Stack-Backtraces ueber den Frame-Pointer. Fuer
+Debug-Builds kann in tools/android_build.py "-fno-omit-frame-pointer"
+wieder in GUEST_CODE_FLAGS aufgenommen werden.
 
 FERTIG.
 ────────────────────────────────────────────────────────────────────────
