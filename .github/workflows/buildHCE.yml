@@ -19,8 +19,8 @@ jobs:
 
     env:
       DEBIAN_FRONTEND: noninteractive
-      # Trainings-Build: instrumentierter Guest, der .profraw-Dateien erzeugt
-      PGO_MODE: train
+      # Release-Build mit PGO (Linux-Profil) und LTO
+      PGO_MODE: use
 
     steps:
       - name: Install base tools in container
@@ -173,34 +173,32 @@ jobs:
           done
           echo "== PGO_MODE: $PGO_MODE"
 
-      - name: Build
+      - name: Build (PGO use, LTO full)
         run: |
           export SYSROOT_LIB=$PWD/sysroot
           export JOBS=$(nproc)
           export HOST_CC=aarch64-linux-gnu-gcc
           export GUEST_CC=clang-22
-          export PGO_MODE=train
+          export PGO_MODE=use
           export PKG_CONFIG_LIBDIR=/usr/aarch64-linux-gnu/lib/pkgconfig
           export PKG_CONFIG_PATH=/usr/aarch64-linux-gnu/lib/pkgconfig
           export PKG_CONFIG_SYSROOT_DIR=/
           ./build.sh
         timeout-minutes: 120
 
-      - name: Verify training build (guest_elf must be larger than release)
+      - name: Verify release build
         run: |
           SIZE=$(stat -c%s dist/halo_guest.elf)
           SIZE_MB=$((SIZE / 1048576))
           echo "== halo_guest.elf: $SIZE Bytes (~${SIZE_MB} MB)"
-          if [ "$SIZE" -lt 11500000 ]; then
-            echo "FEHLER: halo_guest.elf ist nur ${SIZE_MB} MB."
-            echo "Der Trainings-Build muss 12-15 MB sein. Ist PGO_MODE=train wirksam?"
-            exit 1
+          if [ "$SIZE" -lt 4000000 ]; then
+            echo "WARNUNG: halo_guest.elf ungewoehnlich klein (${SIZE_MB} MB) – PGO/LTO pruefen"
           fi
-          echo "OK: Guest ist instrumentiert (>= 11.5 MB)"
+          ls -la dist/
 
-      - name: Upload training build artifacts
+      - name: Upload release artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: halo-m9-pro-rk3326-training
+          name: halo-m9-pro-rk3326-release
           path: dist/
           retention-days: 30
