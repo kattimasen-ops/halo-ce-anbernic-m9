@@ -19,6 +19,8 @@ jobs:
 
     env:
       DEBIAN_FRONTEND: noninteractive
+      # Trainings-Build: instrumentierter Guest, der .profraw-Dateien erzeugt
+      PGO_MODE: train
 
     steps:
       - name: Install base tools in container
@@ -35,7 +37,6 @@ jobs:
       - name: Add arm64 architecture and install cross-deps
         run: |
           dpkg --add-architecture arm64
-
           printf '%s\n' \
             'deb [arch=amd64] http://archive.ubuntu.com/ubuntu focal main restricted universe multiverse' \
             'deb [arch=amd64] http://archive.ubuntu.com/ubuntu focal-updates main restricted universe multiverse' \
@@ -44,9 +45,7 @@ jobs:
             'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-updates main restricted universe multiverse' \
             'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-security main restricted universe multiverse' \
             > /etc/apt/sources.list
-
           apt-get update
-
           apt-get install -y --no-install-recommends \
             libdrm-dev:arm64 \
             libgbm-dev:arm64 \
@@ -59,7 +58,6 @@ jobs:
           mkdir -p /usr/aarch64-linux-gnu/include
           mkdir -p /usr/aarch64-linux-gnu/lib
           mkdir -p /usr/aarch64-linux-gnu/lib/pkgconfig
-
           cp -a /usr/include/libdrm /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
           cp -a /usr/include/gbm.h /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
           cp -a /usr/include/alsa /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
@@ -67,11 +65,9 @@ jobs:
           cp -a /usr/include/GLES2 /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
           cp -a /usr/include/GLES3 /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
           cp -a /usr/include/KHR /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
-
           for lib in libdrm libgbm libasound libEGL libGLESv2; do
             cp -a /usr/lib/aarch64-linux-gnu/${lib}.so* /usr/aarch64-linux-gnu/lib/ 2>/dev/null || true
           done
-
           for pc in libdrm gbm alsa egl glesv2; do
             src=""
             for candidate in \
@@ -88,19 +84,8 @@ jobs:
                   -e 's|^libdir=.*|libdir=${prefix}/lib|' \
                   -e 's|^includedir=.*|includedir=${prefix}/include|' \
                   "$src" > "/usr/aarch64-linux-gnu/lib/pkgconfig/${pc}.pc"
-              echo "== ${pc}.pc aus $src erstellt"
             fi
           done
-
-          echo "== Verifikation:"
-          ls -la /usr/aarch64-linux-gnu/include/EGL/ 2>/dev/null || echo "  EGL-Header fehlen"
-          ls -la /usr/aarch64-linux-gnu/lib/libEGL.so* 2>/dev/null || echo "  libEGL fehlt"
-          ls -la /usr/aarch64-linux-gnu/lib/libGLESv2.so* 2>/dev/null || echo "  libGLESv2 fehlt"
-          echo "== egl.pc Inhalt:"
-          cat /usr/aarch64-linux-gnu/lib/pkgconfig/egl.pc 2>/dev/null || echo "  egl.pc fehlt"
-          echo "== pkg-config Test:"
-          PKG_CONFIG_LIBDIR=/usr/aarch64-linux-gnu/lib/pkgconfig \
-            pkg-config --exists 'libdrm gbm egl' && echo "  OK: libdrm gbm egl gefunden" || echo "  FEHLER: pkg-config findet das Trio nicht"
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -124,7 +109,7 @@ jobs:
           mkdir -p sysroot
           rm -f sysroot/libSDL2* sysroot/libSDL3* sysroot/libdecor* sysroot/libmali*
 
-      - name: Download and extract libdecor (Focal, GLIBC 2.31 compatible)
+      - name: Download and extract libdecor
         run: |
           URLS=(
             "https://mirror.eu.ossplanet.net/ubuntu-ports/pool/main/libd/libdecor-0/libdecor-0-0_0.1.0-3build1_arm64.deb"
@@ -139,10 +124,7 @@ jobs:
               fi
             fi
           done
-          if [ -z "$DECOR_DEB" ]; then
-            echo "FEHLER: libdecor konnte von keiner Quelle geladen werden."
-            exit 1
-          fi
+          [ -n "$DECOR_DEB" ] || { echo "FEHLER: libdecor"; exit 1; }
           dpkg-deb -x "$DECOR_DEB" /tmp/libdecor-extract
           DECOR_LIB=$(find /tmp/libdecor-extract -name "libdecor-0.so.0*" -type f | head -n 1)
           cp "$DECOR_LIB" sysroot/libdecor-0.so.0
@@ -150,10 +132,6 @@ jobs:
 
       - name: Download and extract libmali
         run: |
-          if [ -f sysroot/libmali.so.0 ] && [ ! -L sysroot/libmali.so.0 ] && [ "$(stat -c%s sysroot/libmali.so.0 2>/dev/null || echo 0)" -gt 5000000 ]; then
-            echo "OK: sysroot/libmali.so.0 existiert bereits (echtes Binary)."
-            exit 0
-          fi
           URLS=(
             "https://oph.mdrjr.net/meveric/pool/go2/libm/libmali-rk/libmali-rk-bifrost-g31-rxp0-gbm_1.7-2+deb10_arm64.deb"
             "https://cdn.opensuse.org/repositories/home:/amazingfate:/libmali-rockchip/Debian_Testing/arm64/libmali-bifrost-g31-g2p0-gbm_1.9-1+debian1_arm64.deb"
@@ -163,65 +141,37 @@ jobs:
             if curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 30 -o /tmp/libmali.deb "$url"; then
               SIZE=$(stat -c%s /tmp/libmali.deb 2>/dev/null || echo 0)
               if [ "$SIZE" -gt 5000000 ] && dpkg-deb --info /tmp/libmali.deb > /dev/null 2>&1; then
-                MALI_DEB="/tmp/libmali.deb"
+                MALI_DEB=/tmp/libmali.deb
                 break
               fi
             fi
           done
-          if [ -z "$MALI_DEB" ]; then
-            echo "FEHLER: libmali konnte nicht heruntergeladen werden."
-            exit 1
-          fi
+          [ -n "$MALI_DEB" ] || { echo "FEHLER: libmali"; exit 1; }
           dpkg-deb -x "$MALI_DEB" /tmp/libmali-extract
           MALI_LIB=$(find /tmp/libmali-extract -name "libmali*" -type f -size +5M | head -n 1)
           cp "$MALI_LIB" sysroot/libmali.so.0
-          echo "libmali.so.0: $(stat -c%s sysroot/libmali.so.0) Bytes"
           SONAME=$(aarch64-linux-gnu-readelf -d sysroot/libmali.so.0 2>/dev/null | grep SONAME | sed 's/.*\[\(.*\)\].*/\1/' || echo "")
-          echo "SONAME: $SONAME"
           if [ -n "$SONAME" ] && [ "$SONAME" != "libmali.so.0" ]; then
             patchelf --set-soname libmali.so.0 sysroot/libmali.so.0
           fi
 
       - name: Verify sysroot libraries
         run: |
-          echo "== Inhalt von sysroot/:"
-          ls -la sysroot/
           for f in sysroot/libdecor-0.so.0 sysroot/libmali.so.0; do
-            if [ -f "$f" ] && [ ! -L "$f" ] && [ "$(stat -c%s "$f" 2>/dev/null || echo 0)" -gt 10240 ]; then
-              echo "OK: $f ($(stat -c%s "$f") Bytes)"
-            else
-              echo "FEHLER: $f fehlt oder ist zu klein."
-              exit 1
-            fi
+            [ -f "$f" ] && [ "$(stat -c%s "$f")" -gt 10240 ] || { echo "FEHLER: $f"; exit 1; }
           done
-          echo "Hinweis: libSDL2 und libSDL3 werden von build.sh aus dem Quellcode kompiliert."
 
       - name: Make build scripts executable
         run: |
           chmod +x build.sh
-          if [ -f apply_all.sh ]; then chmod +x apply_all.sh; fi
-          echo "== Repo-Wurzel:"
-          ls -la build.sh apply_all.sh UPSTREAM_COMMIT 2>/dev/null || true
-          echo "== patches/:"
-          ls -la patches/ 2>/dev/null || true
-          echo "== Fehlende Dateien pruefen:"
-          missing=0
+          [ -f apply_all.sh ] && chmod +x apply_all.sh || true
           for f in build.sh UPSTREAM_COMMIT \
                    patches/halo-ce-universal-knulli.patch \
                    patches/patch_memory_pools.py \
                    patches/patch_neon_math.py; do
-            if [ ! -f "$f" ]; then
-              echo "FEHLT: $f"
-              missing=1
-            fi
+            [ -f "$f" ] || { echo "FEHLT: $f"; exit 1; }
           done
-          if [ "$missing" -ne 0 ]; then
-            echo "FEHLER: benoetigte Patch-Dateien fehlen im Repo."
-            exit 1
-          fi
-          echo "OK: alle Patch-Dateien vorhanden."
-          echo "== UPSTREAM_COMMIT:"
-          cat UPSTREAM_COMMIT
+          echo "== PGO_MODE: $PGO_MODE"
 
       - name: Build
         run: |
@@ -229,51 +179,28 @@ jobs:
           export JOBS=$(nproc)
           export HOST_CC=aarch64-linux-gnu-gcc
           export GUEST_CC=clang-22
+          export PGO_MODE=train
           export PKG_CONFIG_LIBDIR=/usr/aarch64-linux-gnu/lib/pkgconfig
           export PKG_CONFIG_PATH=/usr/aarch64-linux-gnu/lib/pkgconfig
           export PKG_CONFIG_SYSROOT_DIR=/
           ./build.sh
         timeout-minutes: 120
 
-      - name: Resolve crash addresses in halo_guest.elf
+      - name: Verify training build (guest_elf must be larger than release)
         run: |
-          if [ ! -f dist/halo_guest.elf ]; then
-            echo "dist/halo_guest.elf fehlt — der Build hat sie nicht erzeugt."
-            exit 0
+          SIZE=$(stat -c%s dist/halo_guest.elf)
+          SIZE_MB=$((SIZE / 1048576))
+          echo "== halo_guest.elf: $SIZE Bytes (~${SIZE_MB} MB)"
+          if [ "$SIZE" -lt 11500000 ]; then
+            echo "FEHLER: halo_guest.elf ist nur ${SIZE_MB} MB."
+            echo "Der Trainings-Build muss 12-15 MB sein. Ist PGO_MODE=train wirksam?"
+            exit 1
           fi
-          echo "== Datei:"
-          ls -l dist/halo_guest.elf
+          echo "OK: Guest ist instrumentiert (>= 11.5 MB)"
 
-          echo ""
-          echo "== addr2line für die Adressen aus dem letzten Geräte-Log =="
-          for ADDR in 0x8800e13c 0x881232fc 0x8811c47c 0x8811ba4c 0x8800e758 0x881a99c4; do
-            echo "--- $ADDR ---"
-            aarch64-linux-gnu-addr2line -f -C -e dist/halo_guest.elf "$ADDR" || true
-          done
-
-          echo ""
-          echo "== Nächstgelegene Symbole um 0x8800e000..0x88010000 (Absturz-PC) =="
-          aarch64-linux-gnu-nm -n dist/halo_guest.elf 2>/dev/null \
-            | awk '$1 >= "000000008800e000" && $1 <= "0000000088010000"' | head -60 || true
-
-          echo ""
-          echo "== Nächstgelegene Symbole um 0x88120000..0x88124000 (LR / Frame 0) =="
-          aarch64-linux-gnu-nm -n dist/halo_guest.elf 2>/dev/null \
-            | awk '$1 >= "0000000088120000" && $1 <= "0000000088124000"' | head -60 || true
-
-          echo ""
-          echo "== Nächstgelegene Symbole um 0x88118000..0x8811c000 (Frame 1/2) =="
-          aarch64-linux-gnu-nm -n dist/halo_guest.elf 2>/dev/null \
-            | awk '$1 >= "0000000088118000" && $1 <= "000000008811c000"' | head -60 || true
-
-          echo ""
-          echo "== Nächstgelegene Symbole um 0x881a8000..0x881ac000 (Frame 4) =="
-          aarch64-linux-gnu-nm -n dist/halo_guest.elf 2>/dev/null \
-            | awk '$1 >= "00000000881a8000" && $1 <= "00000000881ac000"' | head -60 || true
-
-      - name: Upload build artifacts
+      - name: Upload training build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: halo-m9-pro-rk3326
+          name: halo-m9-pro-rk3326-training
           path: dist/
           retention-days: 30
