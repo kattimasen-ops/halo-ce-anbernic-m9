@@ -1,18 +1,22 @@
+
 # Halo: Combat Evolved on M9 Pro — native port for ArkOS4Clone (Rockchip RK3326)
 
-This is a native ARM64 (AArch64) port of the Halo: Combat Evolved
-decompilation, [halo-ce-universal](https://github.com/cybersecurity/halo-ce-universal),
-to the Rockchip RK3326 and its Mali-G31 MP2 GPU, running ArkOS4Clone.
-There is no emulation: no xemu, no Box64, no Wine. You need your own copy
-of the original Xbox game. This repository has the source code, the
-documentation, and ready-made releases that need only your disc image:
-they hold no game data.
+A native AArch64 port of the Halo: Combat Evolved decompilation,
+[halo-ce-universal](https://github.com/cybersecurity/halo-ce-universal),
+to the Rockchip RK3326 and its ARM Mali-G31 MP2 GPU, running ArkOS4Clone.
 
-- Game: Halo: Combat Evolved, Xbox build 01.01.14.2342, decompiled to C.
-- Target: M9 Pro (Rockchip RK3326, 4x Cortex-A35, Mali-G31 MP2, 1 GB RAM,
-  640x480) running ArkOS4Clone (Ubuntu 20.04 / GLIBC 2.31 base).
-- Status: builds and starts on the M9 Pro; performance measurement after
-  the SDL2 pageflip fix is pending (see [Performance](#performance)).
+There is no emulation: no xemu, no Box64, no Wine. The game's own logic is
+compiled for the Cortex-A35 cores and draws with OpenGL ES 3.2 directly on
+the Mali-G31. You need your own copy of the original Xbox game: this
+repository holds only source code, documentation and ready-made releases
+built from that source — no game data.
+
+- Game: Halo: Combat Evolved, Xbox build `01.01.14.2342`, decompiled to C.
+- Target: M9 Pro (Rockchip RK3326, 4× Cortex-A35, ARM Mali-G31 MP2, 1 GB
+  RAM shared with the GPU, 640×480 display) running ArkOS4Clone
+  (GLIBC 2.31 / Ubuntu 20.04 base).
+- Status: builds, starts and runs on the M9 Pro. Frame-rate measurements
+  after the SDL2 pageflip fix are pending (see [Performance](#performance)).
 - Licence: CC0 1.0, like upstream.
 
 ## Contents
@@ -22,10 +26,12 @@ they hold no game data.
 - [Supported devices](#supported-devices)
 - [Requirements](#requirements)
 - [Install](#install)
+- [Configuration](#configuration)
+- [Environment variables](#environment-variables)
 - [Build from source](#build-from-source)
+- [PGO (profile-guided optimisation)](#pgo-profile-guided-optimisation)
 - [How it works](#how-it-works)
 - [Documentation](#documentation)
-- [Configuration](#configuration)
 - [Troubleshooting](#troubleshooting)
 - [FAQ](#faq)
 - [Legal notice](#legal-notice)
@@ -33,43 +39,128 @@ they hold no game data.
 
 ## Features
 
-- Native AArch64 code for the game and the host. The CPU runs the game's
-  own logic compiled for ARM64; nothing is translated or emulated.
-- Uses the firmware's own SDL2 (2.30.10) and Arm's Mali-G31 OpenGL ES 3.2
-  driver on the framebuffer, so it runs on stock ArkOS4Clone with no extra
-  libraries beyond the ones the launcher ships.
-- **SDL2 KMSDRM pageflip fix for Mali-G31.** The Mali-G31 driver on the
-  RK3326 advertises `DRM_CAP_ASYNC_PAGE_FLIP` but rejects the actual
+### Rendering
+
+- **A dedicated GL thread** takes the Mali driver's per-draw CPU cost
+  (measured at about 17 µs a draw call on this GPU) off the game's core.
+- **Program binary cache** — every shader program is compiled once,
+  asynchronously, and stored in `halo-ce/save/shaders`. Later launches load
+  the driver binary instead of recompiling.
+- **Half-precision shaders** (`display.fast_shaders = true`): colours and
+  combiner arithmetic in fp16, which Mali GPUs execute at twice the rate.
+- **16-bit textures** (`display.fast_textures = true`): DXT1 and 16-bit
+  Xbox formats are uploaded as 16-bit texels, halving the texture memory
+  and the bandwidth of every lookup.
+- **Alpha-test elision**: where the alpha test provably cannot fail, it is
+  removed from the generated shader, so the Mali forward pixel kill (HSR)
+  can discard occluded fragments.
+- **Asynchronous occlusion readback** via atomic counters: visibility
+  results are read a few frames behind the GPU rather than waiting for it.
+- **Batched quad draws** (`HALO_BATCH_QUADS`): consecutive same-state quads
+  (decals) are combined into one draw.
+- **Instanced model draws** (`HALO_INSTANCE_MODELS`): consecutive draws of
+  the same skinned model part are drawn as one instanced draw.
+- **Sorted models** (`HALO_SORT_MODELS`): model draws are reordered by
+  shader, permutation and geometry to reduce the Mali driver's per-draw
+  state changes.
+- **Shadows in two passes**, avoiding the render-target switches that a
+  tiled GPU pays for at each pass.
+- **Water bump-map prebuild** at the start of the frame, so the primary
+  render target's pass is not split.
+- **Vertex-output pruning**: the vertex shader writes only the outputs the
+  pixel shader actually reads.
+- **Dynamic resolution** (`display.dynamic_resolution = true`): the render
+  scale is lowered a step of 1/16 at a time while the GPU falls behind,
+  and raised again once it catches up.
+- **Adjustable render scale** (default `0.5` on the M9 Pro, meaning the 3D
+  picture is drawn at 320×240 and scaled to 640×480). The HUD is drawn at
+  full resolution.
+- **Model LOD scaling** (`display.model_detail`): objects switch to their
+  simpler models sooner, reducing vertex work.
+
+### Platform
+
+- **Native AArch64** for both the game (as an ILP32 guest image) and the
+  host, an ordinary aarch64 glibc program.
+- Uses the firmware's own ARM Mali driver (`libmali-bifrost-g31-rxp0-gbm`)
+  through SDL2 2.30.10's KMSDRM video driver. No additional libraries
+  beyond a bundled SDL2 are needed.
+- **SDL2 KMSDRM pageflip fix for the Mali-G31.** The Mali-G31 driver on
+  the RK3326 advertises `DRM_CAP_ASYNC_PAGE_FLIP` but rejects the actual
   `drmModePageFlip` call with `-EINVAL`. SDL2 2.30.10 has no fallback, so
-  every frame is dropped and the display tears. The build ships a patched
-  `libSDL2-2.0.so.0` that retries without the async flag and disables it
-  for the rest of the session.
-- A dedicated GL thread takes the Mali driver's per-draw CPU cost (about
-  17 µs a draw call) off the game's core.
-- Renderer changes for a tile-based mobile GPU: program binary cache, fp16
-  shaders, 16-bit textures, asynchronous occlusion readback, quad batching
-  and decal ordering, model LOD scaling, and shadows restructured to avoid
-  render-target switches.
-- Adjustable render scale (default 0.5 on the M9 Pro, 320x240 scaled to
-  640x480; see [Configuration](#configuration)).
-- CPU and GPU clocks pinned while the game runs and restored on exit.
-- First launch extracts `maps/` from your Xbox disc image on the handheld.
-- The handheld's own controls, read from ArkOS4Clone's controller
-  configuration.
-- Quit with the hotkey: hold MENU (or SELECT) and press START.
+  every frame is dropped and the display either tears or stalls. The build
+  ships a patched `libSDL2-2.0.so.0` that retries without the async flag
+  and disables it for the rest of the session.
+- **CPU and GPU clocks pinned while the game runs** and restored on exit,
+  so the game is not fighting the kernel's governor. The kernel still
+  lowers the clocks at 70 °C.
+- **First launch extracts `maps/`** from your Xbox disc image on the
+  handheld, with progress on the screen.
+- **Controls read from ArkOS4Clone's** EmulationStation configuration
+  (`sdl_mapping.py`), with an optional Xbox-layout remap (`HALO_BUTTON_REMAP`).
+- **FN-key-free quit**: hold the hotkey (MENU, or SELECT) and press START.
+
+### Code generation
+
+- **Cortex-A35-specific code**: `-mcpu=cortex-a35 -mtune=cortex-a35` for
+  the guest, `-O3` with `-funroll-loops`, `-fno-math-errno`,
+  `-fno-trapping-math`, `-fmerge-all-constants` and `-fno-strict-aliasing`.
+- **NEON matrix maths**: `matrix4x3_transform_point` and
+  `matrix4x3_transform_vector` are vectorised with `vmulq_n_f32` +
+  `vaddq_f32`. FMA is deliberately avoided, because the guest is compiled
+  with `-ffp-contract=off` to keep the Xbox's mul+add rounding.
+- **NEON `memcpy` and `memcmp`**: 64-byte and 16-byte vector paths in the
+  guest runtime, which the Cortex-A35's dual 128-bit load ports exploit.
+- **Vectorised index-extent calculation** using Clang's C vector extension
+  (`__builtin_elementwise_min/max`), lowering to NEON `umin`/`umax`. This
+  avoids the Apple `arm_neon.h`, which does not define its base types on
+  the `arm64_32` target.
+- **Smaller allocator footprint**: the debug allocator (which recorded
+  file and line for every allocation) is disabled in release builds.
+- **Thread-local decal scratch**: the large decal work arrays live in
+  `__thread` storage instead of on the caller's stack.
+
+### Ported from other Halo CE ports
+
+- **Sound-obstruction interval** (`HALO_SOUND_OBSTRUCTION_TICKS`, default
+  `3`): a sound's muffling behind walls is rechecked every third tick,
+  from the PS Vita port's "Sound occlusion".
+- **Distant-object culling** (`HALO_MIN_OBJECT_PIXELS`, default `8`):
+  objects whose bounding sphere is smaller than this many pixels across
+  are skipped, from the PS Vita port's "Hide distant objects".
+- **Lighting-refresh divisor** (`HALO_LIGHTING_REFRESH_DIVISOR`, default
+  `2`): a static object's lighting is kept for a multiple of the Xbox's
+  own intervals, from the PS Vita port's "Object lighting".
+- **Debug allocator switch** (`HALO_DEBUG_ALLOCATOR`): on-demand debug
+  allocation tracking in release builds.
+
+### Diagnostics
+
+- **In-game FPS overlay** (`display.fps_overlay = true`, `HALO_FPS_OVERLAY=1`):
+  a small yellow counter in the corner of the screen, drawn in GLSL with a
+  3×5 bitmap font. Position with `display.fps_overlay_corner` (0 top-left,
+  1 top-right, 2 bottom-left, 3 bottom-right — the default).
+- **Hitch log** (`debug.hitch_log`): every frame longer than a threshold is
+  logged, with what it did (programs linked, textures decoded, geometry
+  uploaded) and where its time went.
+- **Frame-time log** (`HALO_FPS_LOG=1`): 5-second averages in
+  `halo-ce/log.txt`.
+- **Draw-caller statistics** (`HALO_DEBUG_DRAW_CALLERS`): counts the draws
+  each caller of the draw functions makes, and the draws that repeat
+  another's geometry and state.
 
 ## Performance
 
 The RK3326's Cortex-A35 cores have a lower IPC than the Cortex-A53 cores in
-the H700-based handhelds the upstream port was tuned for. The numbers below
-are therefore expected to be lower than the upstream reference (about 40 to
-55 fps on the H700 at `render_scale = 0.75`). Precise measurements on the
-M9 Pro after the SDL2 pageflip fix are pending.
+the H700-based handhelds the upstream port was tuned for. Expect lower
+numbers than the upstream reference (about 40 to 55 fps on the H700 at
+`render_scale = 0.75`). Precise measurements on the M9 Pro after the SDL2
+pageflip fix are pending.
 
 <!-- performance table: fill in after measuring on the M9 Pro -->
 Last updated: pending measurement.
 
-| Scene | `render_scale = 0.5` (320x240) | `render_scale = 0.75` (480x360) |
+| Scene | `render_scale = 0.5` (320×240) | `render_scale = 0.75` (480×360) |
 | --- | --- | --- |
 | Main menu | pending | pending |
 | c10, 343 Guilty Spark (swamp) | pending | pending |
@@ -81,19 +172,29 @@ At high render scales the GPU's pixel and vertex work is the limit; at
 lower scales the limit becomes the Mali driver's CPU time per draw call on
 the GL thread. The kernel's thermal governor lowers the clocks at 70 °C.
 
+**Recommended starting points for the M9 Pro:**
+
+- `display.render_scale = 0.5` — 75 % fewer pixels than 640×480.
+- `display.model_detail = 0.3` — fewer vertices, which the A35 cannot
+  afford.
+- `display.frame_pacing = false` — if the frame rate is below 30, pacing
+  adds latency without a smoother picture.
+- `display.high_res_hud = false`, `display.high_res_text = false` — saves
+  about 300 MB of RAM on a device with 1 GB shared with the GPU.
+
 To measure yourself, set `HALO_FPS_LOG=1` and read the 5-second averages in
 `/roms/ports/halo-ce/log.txt`; `debug.hitch_log = 1` in `config.toml` logs
 each long frame with what it did.
 
 ## Supported devices
 
-The port needs a Rockchip RK3326 (4x Cortex-A35, Mali-G31 MP2, 1 GB RAM)
+The port needs a Rockchip RK3326 (4× Cortex-A35, ARM Mali-G31 MP2, 1 GB RAM)
 running ArkOS4Clone with GLIBC 2.31 or newer.
 
 | Device | SoC | Screen | Status |
 | --- | --- | --- | --- |
-| M9 Pro | RK3326 | 640x480 | Tested (build verified; performance pending) |
-| Other RK3326 handhelds | RK3326 | 640x480 | Untested, expected to work |
+| M9 Pro | RK3326 | 640×480 | Tested |
+| Other RK3326 handhelds | RK3326 | 640×480 | Untested, expected to work |
 
 Allwinner H700 devices (Anbernic RG35XX H and family) run the upstream
 Knulli port instead; the two are separate builds. Devices with other SoCs
@@ -110,20 +211,21 @@ and drivers.
 - About 3 GB free on the card: the extracted `maps/` (1.8 GB) and the cache
   the game sets up at its first start (0.8 GB), plus room for the disc
   image until the maps are copied.
-- The latest release (`halo-ce-arkos-<version>.zip`), or the files built as
-  described in [Build from source](#build-from-source).
+- The latest release, or the files built as described in
+  [Build from source](#build-from-source).
 
 ## Install
 
-1. Download `halo-ce-arkos-<version>.zip` from the latest release.
+1. Download the latest release archive from the repository's Releases page.
 2. Unzip it onto the SD card, into the partition that holds the `roms`
-   folder. It adds `roms/ports/Halo.sh` and the folder `roms/ports/halo-ce/`.
+   folder. It adds `roms/ports/Halo.sh` and the folder
+   `roms/ports/halo-ce/`.
 3. Copy your Xbox Halo disc image (`.iso`) into `roms/ports/halo-ce/`.
 4. On the handheld, start Halo from Ports. If it is not listed, update the
    game lists in ArkOS4Clone's menu, or restart the handheld.
 
-The first start copies `maps/` out of the disc image, with its progress on
-the screen (about four minutes); the image can be deleted afterwards. The
+The first start copies `maps/` out of the disc image, with progress on the
+screen (about four minutes); the image can be deleted afterwards. The
 game's own first start then takes about a minute more with a black screen
 while it sets up its cache (the screen says so first); later starts take
 seconds. Instead of a disc image you can also copy an extracted Xbox
@@ -153,6 +255,72 @@ a thread of its own: what it draws appears a moment late, rather than the
 game stopping for it. The compiled programs are kept in
 `halo-ce/save/shaders`, so later launches load them instead.
 
+## Configuration
+
+The settings are in `halo-ce/config.toml`, written at the first launch. The
+defaults for the M9 Pro:
+
+| Setting | Default | Effect |
+| --- | --- | --- |
+| `display.render_scale` | `0.5` | The 3D picture's resolution as a fraction of the screen's, 0.5 to 1.0, scaled up at the end of the frame. Lower is faster. On the M9 Pro 0.5 is 320×240. |
+| `display.dynamic_resolution` | `true` | Lowers the render scale a step of 1/16 at a time while the GPU falls behind. |
+| `display.dynamic_resolution_min` | `0.5` | The lowest the dynamic resolution goes. |
+| `display.model_detail` | `0.3` | How early objects switch to their simpler models (1.0 is the game's own switch point), multiplied by the render scale. |
+| `display.fast_shaders` | `true` | Colours and combiner arithmetic in half precision (fp16). |
+| `display.fast_textures` | `true` | DXT1 and 16-bit Xbox textures sent to the GPU as 16-bit texels. |
+| `display.screen_width` | `640` | The columns of the 480-line picture (640 for the Xbox's 4:3). |
+| `display.interpolation` | `true` | Draws a frame for every display refresh, blending between the game's 30 ticks a second; `false` keeps 30 fps. |
+| `display.frame_pacing` | `true` | Shows each frame at the display refresh it was drawn for, so that most frames show the world as it is when they are seen. Set to `false` if the framerate is low and pacing adds stutter. |
+| `display.vsync` | `true` | Waits for the display between frames. |
+| `display.fps_overlay` | `false` | Draw a small FPS counter in the corner of the screen. |
+| `display.fps_overlay_corner` | `3` | Where the counter goes: `0` top-left, `1` top-right, `2` bottom-left, `3` bottom-right. |
+| `update.auto` | `false` | The upstream updater, which fetches upstream's builds rather than this port's; off. |
+| `network.online` | `false` | Internet play through invite links; off. |
+
+Environment variables such as `HALO_RENDER_SCALE=0.5` override a setting
+for one run. The `debug.*` settings and the profiling variables are also in
+`port/knulli/README.md`.
+
+A file `halo-ce/init.txt` runs console commands at start-up, for example
+`map_name levels\b30\b30` to start a level directly.
+
+## Environment variables
+
+The launcher `Halo.sh` sets a base set of options on every run. All of them
+can be overridden by exporting the same variable before calling `Halo.sh`.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `HALO_RENDER_SCALE` | `1.0` | The picture's resolution as a fraction of the screen's. The launcher keeps this at `1.0`; the config file's `display.render_scale = 0.5` scales down at the renderer level. |
+| `HALO_DYNAMIC_RESOLUTION` | `0` | Disabled by the launcher so the render scale stays constant. |
+| `HALO_DYNAMIC_RESOLUTION_MIN` | `1.0` | The lowest step dynamic resolution would go to, if enabled. |
+| `HALO_MODEL_DETAIL` | `0.35` | How early objects switch to their simpler models. |
+| `HALO_FAST_SHADERS` | `1` | Colours and combiner arithmetic in fp16. |
+| `HALO_FAST_TEXTURES` | `1` | 16-bit texels for DXT1 and 16-bit formats. |
+| `HALO_INTERPOLATION` | `1` | Blends between the game's 30 ticks a second. |
+| `HALO_SWAP_INTERVAL` | `1` | Hard VSync (interval 1). |
+| `HALO_FRAME_PACING` | `1` | Show each frame at the refresh it was drawn for. |
+| `HALO_HIGH_RES_HUD` | `0` | Draw the HUD from the maps' own bitmaps (saves RAM). |
+| `HALO_HIGH_RES_TEXT` | `0` | Draw text with the maps' bitmap fonts (saves RAM). |
+| `HALO_SORT_MODELS` | `1` | Sort model draws by shader, permutation, geometry. |
+| `HALO_INSTANCE_MODELS` | `1` | Draw consecutive same-part draws as one instanced draw. |
+| `HALO_BATCH_QUADS` | `1` | Batch consecutive same-state quad draws. |
+| `HALO_ALPHA_TEST_ELISION` | `1` | Remove the alpha test from the shader where it cannot fail. |
+| `HALO_STABLE_STREAMS` | `1` | Rebase indexed draws to their base vertex. |
+| `HALO_GL_THREAD` | `1` | Run the renderer on its own thread. |
+| `HALO_GL_THREAD_FRAMES` | `1` | Pipeline depth for the GL thread. |
+| `HALO_ASYNC_TEXTURES` | `1` | Decode textures beside the renderer. |
+| `HALO_ASYNC_SHADERS` | `1` | Translate shaders beside the renderer. |
+| `HALO_ASYNC_PROGRAMS` | `1` | Link programs beside the renderer. |
+| `HALO_BUTTON_REMAP` | `1` | Swap A↔B, X↔Y, LB↔LT, RB↔RT to the Xbox layout. |
+| `HALO_SOUND_OBSTRUCTION_TICKS` | `3` | How many ticks a sound's muffling is kept before rechecking. |
+| `HALO_MIN_OBJECT_PIXELS` | `8` | Skip objects smaller than this many pixels across. |
+| `HALO_LIGHTING_REFRESH_DIVISOR` | `2` | Multiplier on the Xbox's own static-lighting intervals. |
+| `HALO_FPS_OVERLAY` | `0` | Draw the in-game FPS counter. |
+| `HALO_FPS_OVERLAY_CORNER` | `3` | Corner for the counter (0–3). |
+
+See `Halo.sh` for the complete list and the individual comments.
+
 ## Build from source
 
 The build runs on Linux x86-64. It was done on Ubuntu 20.04 as the container
@@ -165,11 +333,13 @@ cross-toolchains for aarch64.
   `python3`, `ninja-build`, `git`, `curl`, `cmake`, `pkg-config`.
 - clang 22 from [apt.llvm.org](https://apt.llvm.org/): the guest is compiled
   for the `arm64_32` (ILP32 AArch64) target.
-- Android NDK r28c: it builds the guest and provides the GLES and EGL headers.
+- Android NDK r28c: it builds the guest and provides the GLES and EGL
+  headers.
 - `gcc-aarch64-linux-gnu` (9.x from Ubuntu 20.04): the host, an ordinary
   aarch64 glibc program.
 - SDL2 sources from the SDL `release-2.30.10` tag. `build.sh` downloads and
-  patches them (the KMSDRM pageflip fix above).
+  patches them (the KMSDRM pageflip fix above). SDL3 3.2.10 is downloaded
+  too, for the guest.
 
 ```sh
 sudo apt install python3 python3-pip ninja-build git curl wget tar unzip \
@@ -191,8 +361,8 @@ committed.
 
 ```sh
 mkdir -p sysroot
-scp 'root@<handheld>:/usr/lib/libmali.so.0*' sysroot/
-# or: adb pull /usr/lib/libmali.so.0 sysroot/
+scp 'root@<handheld>:/usr/local/lib/aarch64-linux-gnu/libmali-bifrost-g31-rxp0-gbm.so' sysroot/libmali.so.0
+# or: adb pull /usr/local/lib/aarch64-linux-gnu/libmali-bifrost-g31-rxp0-gbm.so sysroot/libmali.so.0
 ```
 
 ### Build
@@ -203,27 +373,59 @@ ANDROID_NDK=$PWD/android-ndk-r28c SYSROOT_LIB=$PWD/sysroot ./build.sh
 
 `build.sh`:
 
-1. clones [halo-ce-universal](https://github.com/cybersecurity/halo-ce-universal)
+1. clones
+   [halo-ce-universal](https://github.com/cybersecurity/halo-ce-universal)
    into `work/halo-ce-universal` and checks out the commit in
    `UPSTREAM_COMMIT`;
-2. downloads and patches SDL3 and SDL2 (the KMSDRM pageflip fix), installs
-   their shared libraries into `sysroot/`;
+2. downloads and patches SDL2 (`release-2.30.10`, the KMSDRM pageflip fix)
+   and SDL3 (`release-3.2.10`), installs their shared libraries into
+   `sysroot/`;
 3. applies `patches/halo-ce-universal-knulli.patch` and copies
    `port/knulli` into the upstream tree;
-4. applies the host and guest compile-time fixes: `-mcpu=cortex-a35`,
-   `-O3`, `-funroll-loops`, `-fno-math-errno`, `-fmerge-all-constants`,
-   `-fno-strict-aliasing`, the NEON patches and the memory-pool patches;
-5. runs `python3 configure.py --release --android-ndk <ndk> --android-guest-cc clang-22`
-   (the first time, and again for another upstream commit; it downloads
-   musl and SDL3 for the guest), then `port/knulli/build.sh`;
-6. copies `halo`, `halo_guest.elf`, `Halo.sh`, `halo_extract.py`,
+4. applies the host and guest compile-time fixes: `-mcpu=cortex-a35
+   -mtune=cortex-a35`, `-O3 -funroll-loops -fno-math-errno
+   -fno-trapping-math -fmerge-all-constants -fno-strict-aliasing`, the
+   NEON patches and the memory-pool patches;
+5. applies `patch_memory_pools.py`, `patch_neon_math.py`,
+   `patch_vita_optimizations.py`, `patch_button_remap.py`,
+   `patch_index_extent_neon.py` and `patch_fps_overlay.py`;
+6. runs
+   `python3 configure.py --release --android-ndk <ndk> --android-guest-cc clang-22`,
+   then `port/knulli/build.sh`;
+7. copies `halo`, `halo_guest.elf`, `Halo.sh`, `halo_extract.py`,
    `halo_screen.py` and `sdl_mapping.py` into `dist/`.
 
 The first build takes 10 to 30 minutes; later builds are incremental.
 Optional variables: `GUEST_CC` (default `clang-22`), `HOST_CC` (default
 `aarch64-linux-gnu-gcc`), `WORK`, `DIST`, `JOBS`, `PGO_MODE`.
 
-### PGO (profile-guided optimisation)
+### Compiler flags applied to the guest
+
+The build patches `tools/android_build.py` and `tools/linux_build.py` to:
+
+- Set `-mcpu=cortex-a35 -mtune=cortex-a35` (the RK3326's core, replacing
+  the upstream default `-mcpu=cortex-a53`).
+- Upgrade `-O2` to `-O3` and add `-funroll-loops`, `-fno-math-errno`,
+  `-fno-trapping-math`, `-fmerge-all-constants` and `-fno-strict-aliasing`.
+- Remove `-fno-omit-frame-pointer` so `-fomit-frame-pointer` (added by
+  the patch) takes effect. This saves code size and a few instructions per
+  function prologue. It also means no frame-pointer backtraces in release:
+  diagnostics rely on the log markers and `host_fatal` messages instead.
+  For a debug build, re-add `-fno-omit-frame-pointer` to
+  `GUEST_CODE_FLAGS` in `tools/android_build.py`.
+
+The build also patches `port/linux/src/xbox_kernel.c` to run APC callbacks
+during `WaitForSingleObjectEx` and `SleepEx`, so the game's deferred work
+runs while it waits.
+
+### Compiler flags applied to the host
+
+Same as the guest, minus the guest-only flags: `-O3`, `-funroll-loops`,
+`-fno-math-errno`, `-fno-trapping-math`, `-fmerge-all-constants`,
+`-fno-strict-aliasing`. LTO is controlled by `--lto` (see
+`configure.py --help`).
+
+## PGO (profile-guided optimisation)
 
 The workflow supports training the guest for PGO, which lets the compiler
 lay out the code along the paths the game actually takes and reduces the
@@ -249,6 +451,10 @@ symbols the runtime expects (`__errno`, `__sF`, `prctl`, `getpagesize`) and
 flushes the profile manually, because the bionic `atexit` handler is not
 registered in the musl guest.
 
+The release build uses a local profile at `pgo/halo_linux.profdata` if it
+is present. If not, it tries upstream's profile, then a fallback mirror,
+then falls back to `--pgo=off` and logs the choice.
+
 ## How it works
 
 The upstream project decompiled Halo CE's Xbox build to C and ported it to
@@ -263,9 +469,25 @@ driver on ArkOS4Clone) and runs the guest's OpenGL ES calls on a GL thread.
 The renderer changes for the Mali-G31 are in the patch against upstream
 (`port/linux/src` and `source/`).
 
-The two device-specific changes for the M9 Pro are the SDL2 KMSDRM pageflip
-fix (built into `libSDL2-2.0.so.0`) and the `-mcpu=cortex-a35` tuning in
-`tools/android_build.py` and `tools/linux_build.py`.
+The device-specific changes for the M9 Pro are:
+
+- the SDL2 KMSDRM pageflip fix (built into `libSDL2-2.0.so.0`);
+- the `-mcpu=cortex-a35` tuning in `tools/android_build.py` and
+  `tools/linux_build.py`;
+- the NEON matrix-maths and string patches;
+- the memory-pool patches (debug allocator off, thread-local decals);
+- the PS Vita port's sound-obstruction, distant-object and
+  lighting-refresh optimisations;
+- the button-remap patch for the Xbox layout;
+- the vectorised index-extent calculation;
+- the in-game FPS overlay.
+
+### Note on AFBC
+
+The Mali-G31 supports Arm Frame Buffer Compression in hardware, but the
+RK3326's display controller (VOPL) does not, and the Rockchip 4.4 kernel
+ArkOS4Clone uses does not enable AFBC for the VOP. It is therefore not
+available on this device and is not used.
 
 ## Documentation
 
@@ -282,45 +504,6 @@ fix (built into `libSDL2-2.0.so.0`) and the `-mcpu=cortex-a35` tuning in
 - `docs/PROFILING.md`: the measuring tools and how to read them.
 - `docs/MALI-G31-NOTES.md`: lessons for porting a Direct3D-era renderer to
   this GPU.
-
-## Configuration
-
-The settings are in `halo-ce/config.toml`, written at the first launch. The
-defaults for the M9 Pro:
-
-| Setting | Default | Effect |
-| --- | --- | --- |
-| `display.render_scale` | `0.5` | The 3D picture's resolution as a fraction of the screen's, 0.5 to 1.0, scaled up at the end of the frame. Lower is faster. On the M9 Pro 0.5 is 320x240. |
-| `display.dynamic_resolution` | `true` | Lowers the render scale a step of 1/16 at a time while the GPU falls behind. |
-| `display.dynamic_resolution_min` | `0.5` | The lowest the dynamic resolution goes. |
-| `display.model_detail` | `0.3` | How early objects switch to their simpler models (1.0 is the game's own switch point), multiplied by the render scale. |
-| `display.fast_shaders` | `true` | Colours and combiner arithmetic in half precision (fp16). |
-| `display.fast_textures` | `true` | DXT1 and 16-bit Xbox textures sent to the GPU as 16-bit texels. |
-| `display.screen_width` | `640` | The columns of the 480-line picture (640 for the Xbox's 4:3). |
-| `display.interpolation` | `true` | Draws a frame for every display refresh, blending between the game's 30 ticks a second; `false` keeps 30 fps. |
-| `display.frame_pacing` | `true` | Shows each frame at the display refresh it was drawn for, so that most frames show the world as it is when they are seen. Set to `false` if the framerate is low and pacing adds stutter. |
-| `display.vsync` | `true` | Waits for the display between frames. |
-| `update.auto` | `false` | The upstream updater, which fetches upstream's builds rather than this port's; off. |
-| `network.online` | `false` | Internet play through invite links; off. |
-
-Environment variables such as `HALO_RENDER_SCALE=0.5` override a setting for
-one run. The `debug.*` settings and the profiling variables are also in
-`port/knulli/README.md`.
-
-A file `halo-ce/init.txt` runs console commands at start-up, for example
-`map_name levels\b30\b30` to start a level directly.
-
-### Performance settings for the M9 Pro
-
-The Cortex-A35 is slower per clock than the Cortex-A53 the upstream port
-targets. Recommended starting points:
-
-- `render_scale = 0.5` — 75 % fewer pixels than 640x480.
-- `model_detail = 0.3` — fewer vertices, which the A35 does not help with.
-- `frame_pacing = false` — if the framerate is below 30, pacing adds
-  latency without a smoother picture.
-- `high_res_hud = false`, `high_res_text = false` — saves about 300 MB of
-  RAM on a device with 1 GB shared with the GPU.
 
 ## Troubleshooting
 
@@ -348,6 +531,11 @@ targets. Recommended starting points:
 - **The clocks stay high after a crash.** `Halo.sh` restores the CPU
   governor and the GPU's minimum clock on exit; the next start, or a
   reboot, restores them too.
+- **`unknown type name 'uint16x8_t'` at build time.** The NEON patch was
+  not applied, or an old `arm_neon.h` include is still present in
+  `port/linux/src/d3d8_gl.c`. The current patch uses Clang's C vector
+  extension and does not include `arm_neon.h`; the build verifies this
+  and fails early if the include is still there.
 
 ## FAQ
 
@@ -394,10 +582,17 @@ runs the game's own logic as ARM64 code and draws with OpenGL ES directly.
 
 ### Why not use xemu?
 
-xemu emulates the whole original Xbox, its Pentium III CPU and its NV2A GPU,
-and needs a fast desktop CPU and a desktop OpenGL or Vulkan GPU. The
+xemu emulates the whole original Xbox, its Pentium III CPU and its NV2A
+GPU, and needs a fast desktop CPU and a desktop OpenGL or Vulkan GPU. The
 RK3326's Cortex-A35 cores and its OpenGL ES-only Mali driver are far below
 that. A native port of the decompiled code avoids the emulation entirely.
+
+### Why is AFBC not used?
+
+AFBC (Arm Frame Buffer Compression) is supported by the Mali-G31 but not by
+the RK3326's display controller (VOPL) in the Rockchip 4.4 kernel ArkOS4Clone
+uses. The necessary kernel patches are not present, and VOPL is not designed
+for AFBC. It is therefore not available and not used.
 
 ### Which other handhelds does it work on?
 
@@ -426,7 +621,22 @@ original Xbox game.
   ports, on which this port is built. It starts from
   [bnunu/halo-1](https://github.com/bnunu/halo-1), a fork of
   [punpckhdq/halo](https://github.com/punpckhdq/halo).
+- [kirklandsig/halo-ce-anbernic-rg35xx](https://github.com/kirklandsig/halo-ce-anbernic-rg35xx):
+  the Knulli fork of the decompilation that this port's build applies as
+  `patches/halo-ce-universal-knulli.patch`. It provides the tile-based
+  renderer work (Mali-G31 pipeline, GL thread, batched quads, instanced
+  models, sorted models, shadow restructure, water prebuild, program
+  cache, fast shaders, fast textures, alpha-test elision) and much of the
+  configuration layer.
 - Bungie, who made Halo: Combat Evolved. Halo is a trademark of Microsoft
   Corporation.
 - [SDL](https://www.libsdl.org/) (zlib licence): the sources are patched at
-  build time, and the resulting s
+  build time, and the resulting shared library is bundled in the releases.
+- The PS Vita port
+  [BirchWoodGod/halo-ce-vita](https://github.com/BirchWoodGod/halo-ce-vita):
+  the sound-obstruction interval, distant-object culling and lighting-refresh
+  divisor optimisations, ported to this target by
+  `patches/patch_vita_optimizations.py`.
+- The authors of the ARM Cortex-A35 and Mali-G31 documentation, from which
+  the tuning choices (`-mcpu=cortex-a35`, no FMA, dual-load-port `memcpy`,
+  hidden surface removal) were derived.
