@@ -692,6 +692,10 @@ check_patch "port/linux/src/port_config.c"                "HALO_FPS_OVERLAY_CORN
 check_patch "port/linux/src/xinput_sdl.c"                 "button_remap"                       "xinput_sdl.c Button-Remap"
 check_patch "port/linux/src/d3d8_gl.c"                    "__builtin_elementwise_min"          "d3d8_gl.c index_extent NEON (Builtins)"
 check_patch "port/linux/src/d3d8_gl.c"                    "fps_overlay_enabled"                "d3d8_gl.c FPS-Overlay"
+if grep -q '#include <arm_neon.h>' "$SRC/port/linux/src/d3d8_gl.c"; then
+    echo "   FEHLT: d3d8_gl.c hat noch arm_neon.h (unerwartet)"
+    verification_failed=1
+fi
 if [ "$PGO_MODE" = "train" ]; then
     check_patch "tools/android_build.py" "-fprofile-instr-generate" "android_build.py PGO-Instrumentierung"
     check_patch "tools/android_build.py" "guest_profile_runtime"    "android_build.py Profiling-Runtime"
@@ -784,7 +788,7 @@ stamp=$({
     fi
     echo "pgo-mode=$PGO_MODE"
     echo "frame-pointer=option-a"
-    echo "index-extent=neon-builtins"
+    echo "index-extent=neon-builtins-v2"
     echo "fps-overlay=1"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
