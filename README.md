@@ -1,4 +1,3 @@
-
 # Halo: Combat Evolved on M9 Pro — native port for ArkOS4Clone (Rockchip RK3326)
 
 A native AArch64 port of the Halo: Combat Evolved decompilation,
@@ -15,6 +14,8 @@ built from that source — no game data.
 - Target: M9 Pro (Rockchip RK3326, 4× Cortex-A35, ARM Mali-G31 MP2, 1 GB
   RAM shared with the GPU, 640×480 display) running ArkOS4Clone
   (GLIBC 2.31 / Ubuntu 20.04 base).
+- Native render resolution: **640×480 (`display.render_scale = 1.0`)**,
+  matching the M9 Pro's screen.
 - Status: builds, starts and runs on the M9 Pro. Frame-rate measurements
   after the SDL2 pageflip fix are pending (see [Performance](#performance)).
 - Licence: CC0 1.0, like upstream.
@@ -69,12 +70,16 @@ built from that source — no game data.
   render target's pass is not split.
 - **Vertex-output pruning**: the vertex shader writes only the outputs the
   pixel shader actually reads.
-- **Dynamic resolution** (`display.dynamic_resolution = true`): the render
-  scale is lowered a step of 1/16 at a time while the GPU falls behind,
-  and raised again once it catches up.
-- **Adjustable render scale** (default `0.5` on the M9 Pro, meaning the 3D
-  picture is drawn at 320×240 and scaled to 640×480). The HUD is drawn at
-  full resolution.
+- **Native render resolution by default**: `display.render_scale = 1.0`,
+  the full 640×480 of the M9 Pro's screen. The HUD is drawn at the same
+  resolution.
+- **Adjustable render scale**, `0.5` to `1.0`: below `1.0` the 3D picture
+  is drawn at fewer pixels and scaled up at the end of the frame. Optional
+  lever if the native resolution's frame rate is too low for a scene.
+- **Dynamic resolution** (`display.dynamic_resolution = false` by default
+  on this port): can be enabled to lower the render scale a step of 1/16
+  at a time while the GPU falls behind, and raise it again once it catches
+  up. Kept off on the M9 Pro so the native 640×480 stays constant.
 - **Model LOD scaling** (`display.model_detail`): objects switch to their
   simpler models sooner, reducing vertex work.
 
@@ -152,39 +157,53 @@ built from that source — no game data.
 ## Performance
 
 The RK3326's Cortex-A35 cores have a lower IPC than the Cortex-A53 cores in
-the H700-based handhelds the upstream port was tuned for. Expect lower
-numbers than the upstream reference (about 40 to 55 fps on the H700 at
-`render_scale = 0.75`). Precise measurements on the M9 Pro after the SDL2
-pageflip fix are pending.
+the H700-based handhelds the upstream port was tuned for. The stock render
+resolution on the M9 Pro is **`display.render_scale = 1.0`, the native
+640×480 of the screen**; the numbers below are what to expect at that
+resolution and at lower render scales if a scene needs headroom. Precise
+measurements on the M9 Pro after the SDL2 pageflip fix are pending.
 
 <!-- performance table: fill in after measuring on the M9 Pro -->
 Last updated: pending measurement.
 
-| Scene | `render_scale = 0.5` (320×240) | `render_scale = 0.75` (480×360) |
-| --- | --- | --- |
-| Main menu | pending | pending |
-| c10, 343 Guilty Spark (swamp) | pending | pending |
-| b30, The Silent Cartographer (beach battle) | pending | pending |
-| a30, Halo (level opening) | pending | pending |
+| Scene | `render_scale = 1.0` (640×480, stock) | `render_scale = 0.75` (480×360) | `render_scale = 0.5` (320×240) |
+| --- | --- | --- | --- |
+| Main menu | pending | pending | pending |
+| c10, 343 Guilty Spark (swamp) | pending | pending | pending |
+| b30, The Silent Cartographer (beach battle) | pending | pending | pending |
+| a30, Halo (level opening) | pending | pending | pending |
 <!-- end of performance table -->
 
-At high render scales the GPU's pixel and vertex work is the limit; at
-lower scales the limit becomes the Mali driver's CPU time per draw call on
-the GL thread. The kernel's thermal governor lowers the clocks at 70 °C.
+At the native 640×480 the GPU's pixel and vertex work is the limit; at
+lower render scales the limit becomes the Mali driver's CPU time per draw
+call on the GL thread. The kernel's thermal governor lowers the clocks at
+70 °C.
 
-**Recommended starting points for the M9 Pro:**
+**Recommended settings for the M9 Pro:**
 
-- `display.render_scale = 0.5` — 75 % fewer pixels than 640×480.
-- `display.model_detail = 0.3` — fewer vertices, which the A35 cannot
-  afford.
-- `display.frame_pacing = false` — if the frame rate is below 30, pacing
+- `display.render_scale = 1.0` — the native 640×480 of the M9 Pro's screen,
+  the default of this port.
+- `display.dynamic_resolution = false` — the launcher keeps this off, so
+  the resolution stays fixed at the native 640×480.
+- `display.model_detail = 0.3` — objects switch to their simpler models
+  sooner; saves vertex work the Cortex-A35 cannot afford.
+- `display.frame_pacing = true` — shows each frame at the refresh it was
+  drawn for. Switch to `false` if the frame rate is below 30, where pacing
   adds latency without a smoother picture.
 - `display.high_res_hud = false`, `display.high_res_text = false` — saves
   about 300 MB of RAM on a device with 1 GB shared with the GPU.
 
-To measure yourself, set `HALO_FPS_LOG=1` and read the 5-second averages in
-`/roms/ports/halo-ce/log.txt`; `debug.hitch_log = 1` in `config.toml` logs
-each long frame with what it did.
+If a scene drops below a comfortable frame rate at the native 640×480,
+lower `display.render_scale` step by step:
+
+- `1.0` → 640×480 (stock, native).
+- `0.75` → 480×360, about 56 % of the pixels.
+- `0.5` → 320×240, about 25 % of the pixels.
+
+To measure yourself, set `HALO_FPS_OVERLAY=1` for the on-screen counter,
+`HALO_FPS_LOG=1` for the 5-second averages in `/roms/ports/halo-ce/log.txt`,
+and `debug.hitch_log = 1` in `config.toml` to log each long frame with what
+it did.
 
 ## Supported devices
 
@@ -262,9 +281,9 @@ defaults for the M9 Pro:
 
 | Setting | Default | Effect |
 | --- | --- | --- |
-| `display.render_scale` | `0.5` | The 3D picture's resolution as a fraction of the screen's, 0.5 to 1.0, scaled up at the end of the frame. Lower is faster. On the M9 Pro 0.5 is 320×240. |
-| `display.dynamic_resolution` | `true` | Lowers the render scale a step of 1/16 at a time while the GPU falls behind. |
-| `display.dynamic_resolution_min` | `0.5` | The lowest the dynamic resolution goes. |
+| `display.render_scale` | `1.0` | The 3D picture's resolution as a fraction of the screen's, `0.5` to `1.0`. **`1.0` is the stock native 640×480 of the M9 Pro's screen**; below `1.0` fewer pixels are drawn and the picture is scaled up at the end of the frame. |
+| `display.dynamic_resolution` | `false` | When `true`, the render scale is lowered a step of 1/16 at a time while the GPU falls behind, and raised again once it catches up. Kept `false` on the M9 Pro so the native 640×480 stays constant. |
+| `display.dynamic_resolution_min` | `1.0` | The lowest the dynamic resolution goes, when it is enabled. `1.0` keeps the native resolution. |
 | `display.model_detail` | `0.3` | How early objects switch to their simpler models (1.0 is the game's own switch point), multiplied by the render scale. |
 | `display.fast_shaders` | `true` | Colours and combiner arithmetic in half precision (fp16). |
 | `display.fast_textures` | `true` | DXT1 and 16-bit Xbox textures sent to the GPU as 16-bit texels. |
@@ -277,7 +296,7 @@ defaults for the M9 Pro:
 | `update.auto` | `false` | The upstream updater, which fetches upstream's builds rather than this port's; off. |
 | `network.online` | `false` | Internet play through invite links; off. |
 
-Environment variables such as `HALO_RENDER_SCALE=0.5` override a setting
+Environment variables such as `HALO_RENDER_SCALE=0.75` override a setting
 for one run. The `debug.*` settings and the profiling variables are also in
 `port/knulli/README.md`.
 
@@ -291,9 +310,9 @@ can be overridden by exporting the same variable before calling `Halo.sh`.
 
 | Variable | Default | Effect |
 | --- | --- | --- |
-| `HALO_RENDER_SCALE` | `1.0` | The picture's resolution as a fraction of the screen's. The launcher keeps this at `1.0`; the config file's `display.render_scale = 0.5` scales down at the renderer level. |
-| `HALO_DYNAMIC_RESOLUTION` | `0` | Disabled by the launcher so the render scale stays constant. |
-| `HALO_DYNAMIC_RESOLUTION_MIN` | `1.0` | The lowest step dynamic resolution would go to, if enabled. |
+| `HALO_RENDER_SCALE` | `1.0` | The picture's resolution as a fraction of the screen's. Kept at `1.0` by the launcher: native 640×480 on the M9 Pro. Lower it only if a scene needs the headroom. |
+| `HALO_DYNAMIC_RESOLUTION` | `0` | Disabled by the launcher so the render scale stays at the native 640×480. |
+| `HALO_DYNAMIC_RESOLUTION_MIN` | `1.0` | The lowest step dynamic resolution would go to, if enabled. `1.0` keeps the native resolution. |
 | `HALO_MODEL_DETAIL` | `0.35` | How early objects switch to their simpler models. |
 | `HALO_FAST_SHADERS` | `1` | Colours and combiner arithmetic in fp16. |
 | `HALO_FAST_TEXTURES` | `1` | 16-bit texels for DXT1 and 16-bit formats. |
@@ -480,7 +499,9 @@ The device-specific changes for the M9 Pro are:
   lighting-refresh optimisations;
 - the button-remap patch for the Xbox layout;
 - the vectorised index-extent calculation;
-- the in-game FPS overlay.
+- the in-game FPS overlay;
+- the native 640×480 render resolution (`display.render_scale = 1.0`) as
+  the stock default, matching the M9 Pro's screen.
 
 ### Note on AFBC
 
@@ -527,7 +548,8 @@ available on this device and is not used.
   `halo-ce/log.txt` for `Could not queue pageflip`; if those lines appear
   more than once, an old SDL2 is in the library path.
 - **The frame rate drops after a while.** At 70 °C the kernel lowers the
-  CPU and GPU clocks. Lower `display.render_scale` for more headroom.
+  CPU and GPU clocks. Lower `display.render_scale` from the native `1.0`
+  to `0.75` or `0.5` for more headroom.
 - **The clocks stay high after a crash.** `Halo.sh` restores the CPU
   governor and the GPU's minimum clock on exit; the next start, or a
   reboot, restores them too.
@@ -536,6 +558,10 @@ available on this device and is not used.
   `port/linux/src/d3d8_gl.c`. The current patch uses Clang's C vector
   extension and does not include `arm_neon.h`; the build verifies this
   and fails early if the include is still there.
+- **`undefined symbol: glUniform4f` at link time.** The FPS-overlay patch
+  was not updated, or the wrong version is in the tree. Use the current
+  `patches/patch_fps_overlay.py`, which calls `glUniform4fv` (the only
+  uniform-vec4 form in the guest's import list).
 
 ## FAQ
 
@@ -548,10 +574,11 @@ game's data.
 
 ### What frame rate does Halo CE get on the M9 Pro?
 
-Pending measurement after the SDL2 pageflip fix. The Cortex-A35 is slower
+Pending measurement after the SDL2 pageflip fix. The port runs at the
+native 640×480 (`render_scale = 1.0`) by default; the Cortex-A35 is slower
 per clock than the Cortex-A53 in the H700 handhelds the upstream port was
-tuned for, so expect lower numbers than the upstream reference (about 40
-to 55 fps at `render_scale = 0.75`). Start at `render_scale = 0.5`.
+tuned for, so if a scene is too slow for you, lower `display.render_scale`
+to `0.75` (480×360) or `0.5` (320×240).
 
 ### Does it work with the Xbox version or the PC version of Halo?
 
