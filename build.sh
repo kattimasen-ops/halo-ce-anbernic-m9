@@ -664,6 +664,47 @@ for patch_script in patch_memory_pools.py patch_neon_math.py \
     fi
 done
 
+# ── Fix 4a: Sicherheitskorrektur fuer das FPS-Overlay ────────────────
+# Falls eine vorherige Build-Ausfuehrung eine d3d8_gl.c mit dem alten
+# glUniform4f-Aufruf hinterlassen hat (der nicht in der Import-Liste
+# des Guests steht und den Linker mit "undefined symbol: glUniform4f"
+# abbricht), ersetzt dies jeden solchen Aufruf durch die v-Variante
+# glUniform4fv, die in port/linux/src/gl.h deklariert ist.
+# Idempotent: beim zweiten Lauf findet er nichts mehr zu korrigieren.
+if [ -f "$SRC/port/linux/src/d3d8_gl.c" ]; then
+    python3 - "$SRC/port/linux/src/d3d8_gl.c" <<'PYEOF'
+import re
+import sys
+
+path = sys.argv[1]
+with open(path) as f:
+    text = f.read()
+
+if "fps_overlay_enabled" not in text:
+    # FPS-Overlay nicht im Code; nichts zu tun.
+    sys.exit(0)
+
+pattern = re.compile(
+    r'glUniform4f\(\s*fps_overlay_color\s*,\s*([^;]+?)\s*\)\s*;'
+)
+
+def repl(match):
+    args = match.group(1).strip()
+    return (
+        '{ const float overlay_color[4] = { ' + args + ' }; '
+        'glUniform4fv(fps_overlay_color, 1, overlay_color); }'
+    )
+
+new_text = pattern.sub(repl, text)
+if new_text != text:
+    with open(path, "w") as f:
+        f.write(new_text)
+    print("d3d8_gl.c: glUniform4f -> glUniform4fv (Sicherheitskorrektur)")
+else:
+    print("d3d8_gl.c: keine glUniform4f-Aufrufe zu korrigieren")
+PYEOF
+fi
+
 # ── Fix 4b: Verifikation der Patches ─────────────────────────────────
 echo ""
 echo "== Fix 4b: Verifiziere Patch-Ergebnisse ..."
@@ -694,6 +735,10 @@ check_patch "port/linux/src/d3d8_gl.c"                    "__builtin_elementwise
 check_patch "port/linux/src/d3d8_gl.c"                    "fps_overlay_enabled"                "d3d8_gl.c FPS-Overlay"
 if grep -q '#include <arm_neon.h>' "$SRC/port/linux/src/d3d8_gl.c"; then
     echo "   FEHLT: d3d8_gl.c hat noch arm_neon.h (unerwartet)"
+    verification_failed=1
+fi
+if grep -q 'glUniform4f(fps_overlay_color' "$SRC/port/linux/src/d3d8_gl.c"; then
+    echo "   FEHLT: d3d8_gl.c enthaelt noch glUniform4f (Sicherheitskorrektur fehlgeschlagen)"
     verification_failed=1
 fi
 if [ "$PGO_MODE" = "train" ]; then
@@ -789,7 +834,7 @@ stamp=$({
     echo "pgo-mode=$PGO_MODE"
     echo "frame-pointer=option-a"
     echo "index-extent=neon-builtins-v2"
-    echo "fps-overlay=1"
+    echo "fps-overlay=uniform4fv"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 if [ -f "$SRC/.port-stamp" ] && [ "$(cat "$SRC/.port-stamp")" = "$stamp" ]; then
