@@ -2,13 +2,12 @@
 # Halo: Combat Evolved – M9 Pro (RK3326 / Cortex-A35 + Mali-G31 MP2)
 #
 # RELEASE-BUILD: PGO (use) + LTO, alle Port-Optimierungen aktiv.
-# Kein Training, kein Auto-Exit, keine Debug-Logs.
 #
-# Tastenbelegung (ueber HALO_BUTTON_REMAP=1 in xinput_sdl.c):
-#   A <-> B       Springen auf B, Nahkampf auf A
-#   X <-> Y       Nachladen auf Y, Waffenwechsel auf X
-#   LB (L1) <-> LT (L2)   Granate auf L1, Taschenlampe auf L2
-#   RB (R1) <-> RT (R2)   Feuern auf R1, Granatenwechsel auf R2
+# Bild- und Performance-Einstellungen kommen NICHT mehr aus dieser Datei,
+# sondern aus config.toml (Settings -> Video im Spiel). Nur die
+# Host-seitigen Variablen (VSync-Intervall, GL-Thread, Button-Remap)
+# werden hier gesetzt. Alle HALO_*-Variablen, die config.toml-Werte
+# ueberschreiben wuerden, sind entfernt.
 
 XDG_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
 
@@ -27,7 +26,6 @@ cd "$GAMEDIR" || exit 1
 
 # ── LOGGING (nur Launcher-Minimum) ───────────────────────────────────
 LOG="$GAMEDIR/log.txt"
-# Log-Rotation: wenn > 2 MB, nach log.txt.1 verschieben (ein Generation)
 if [ -f "$LOG" ] && [ "$(stat -c%s "$LOG" 2>/dev/null || echo 0)" -gt 2097152 ]; then
     mv -f "$LOG" "$LOG.1" 2>/dev/null || true
 fi
@@ -182,7 +180,6 @@ restore_services() {
 : > "$HALO_SERVICE_STATE" 2>/dev/null || true
 stop_service_if_active tailscaled.service
 
-# Restore-Handler
 saved=/tmp/halo-clocks
 printf '%s|%s|%s\n' "$cpu_saved" "$gpu_governor_saved" "$gpu_min_saved" > "$saved" 2>/dev/null || true
 
@@ -237,8 +234,7 @@ if [ -f "$SYSTEM_MALI" ]; then
     done
     export LD_LIBRARY_PATH="/tmp/halo-mali:$GAMEDIR/libs.aarch64:$GAMEDIR"
 else
-    # Fallback: System-libmali direkt nutzen
-    log "WARNUNG: $SYSTEM_MALI nicht gefunden – nutze System-Libraries."
+    log "WARNUNG: $SYSTEM_MALI nicht gefunden - nutze System-Libraries."
     export LD_LIBRARY_PATH="$GAMEDIR/libs.aarch64:$GAMEDIR"
 fi
 
@@ -272,57 +268,37 @@ log "HALO_SAVE_ROOT=$HALO_SAVE_ROOT"
 # ── HALO-EINSTELLUNGEN (Release) ─────────────────────────────────────
 log_section "HALO-EINSTELLUNGEN"
 
-# --- Bild ---
-export HALO_RENDER_SCALE="${HALO_RENDER_SCALE:-1.0}"
-# Dynamische Auflösung aus, damit render_scale garantiert konstant bleibt.
-export HALO_DYNAMIC_RESOLUTION="${HALO_DYNAMIC_RESOLUTION:-0}"
-export HALO_DYNAMIC_RESOLUTION_MIN="${HALO_DYNAMIC_RESOLUTION_MIN:-1.0}"
-export HALO_MODEL_DETAIL="${HALO_MODEL_DETAIL:-0.35}"
+# WICHTIG: Die Bild- und Performance-Einstellungen werden jetzt im
+# In-Game-Menue (Settings -> Video) gesetzt und aus config.toml gelesen.
+# Sie duerfen hier NICHT als HALO_*-Umgebungsvariablen exportiert werden,
+# sonst gewinnen sie gegen config.toml (port_config.c liest die Datei
+# zuerst und ueberschreibt sie dann mit vorhandenen HALO_*-Variablen).
+#
+# Nur noch Variablen, die der Host liest und die kein config.toml-
+# Setting haben:
 
-# --- Mali-Beschleuniger ---
-export HALO_FAST_SHADERS="${HALO_FAST_SHADERS:-1}"
-export HALO_FAST_TEXTURES="${HALO_FAST_TEXTURES:-1}"
-
-# --- Pacing und VSync ---
-export HALO_INTERPOLATION="${HALO_INTERPOLATION:-1}"
-# HALO_NO_VSYNC darf NICHT gesetzt werden (jeder Wert schaltet VSync ab).
-unset HALO_NO_VSYNC
-# Zusätzlicher Schutz: Swap-Interval hart auf 1 (VSync an)
+# VSync-Intervall: der Host liest HALO_SWAP_INTERVAL direkt
+# (port/knulli/host/host_sdl2.c).
 export HALO_SWAP_INTERVAL=1
-export HALO_FRAME_PACING="${HALO_FRAME_PACING:-1}"
 
-# --- HUD und Text: aus (RAM-Ersparnis auf 1 GB) ---
-export HALO_HIGH_RES_HUD=0
-export HALO_HIGH_RES_TEXT=0
+# HALO_NO_VSYNC darf nicht gesetzt sein.
+unset HALO_NO_VSYNC
 
-# --- Renderer-Features ---
-export HALO_SORT_MODELS="${HALO_SORT_MODELS:-1}"
-export HALO_INSTANCE_MODELS="${HALO_INSTANCE_MODELS:-1}"
-export HALO_BATCH_QUADS="${HALO_BATCH_QUADS:-1}"
-export HALO_ALPHA_TEST_ELISION="${HALO_ALPHA_TEST_ELISION:-1}"
-export HALO_STABLE_STREAMS="${HALO_STABLE_STREAMS:-1}"
-
-# --- Threading (async textures/shaders/programs) ---
+# GL-Thread und Async-Programs: der Host liest sie direkt
+# (port/knulli/host/host_glthread.c).
 export HALO_GL_THREAD="${HALO_GL_THREAD:-1}"
 export HALO_GL_THREAD_FRAMES="${HALO_GL_THREAD_FRAMES:-1}"
-export HALO_ASYNC_TEXTURES="${HALO_ASYNC_TEXTURES:-1}"
-export HALO_ASYNC_SHADERS="${HALO_ASYNC_SHADERS:-1}"
 export HALO_ASYNC_PROGRAMS="${HALO_ASYNC_PROGRAMS:-1}"
 
-# --- Tastenbelegung (in port/linux/src/xinput_sdl.c ausgewertet) ---
+# Tastenbelegung: vom Host (port/linux/src/xinput_sdl.c) gelesen.
 # A <-> B (Springen auf B, Nahkampf auf A)
 # X <-> Y (Nachladen auf Y, Waffenwechsel auf X)
 # LB (L1) <-> LT (L2) (Granate auf L1, Taschenlampe auf L2)
 # RB (R1) <-> RT (R2) (Feuern auf R1, Granatenwechsel auf R2)
 export HALO_BUTTON_REMAP=1
 
-# --- PS Vita Port-Optimierungen ---
-# Sound-Occlusion nur jeden 3. Tick berechnen
-export HALO_SOUND_OBSTRUCTION_TICKS=3
-# Objekte unter 8 Pixeln Durchmesser überspringen
-export HALO_MIN_OBJECT_PIXELS=8
-# Statische Objektbeleuchtung nur jeden 2. Tick neu berechnen
-export HALO_LIGHTING_REFRESH_DIVISOR=2
+log "Bild- und Performance-Einstellungen kommen aus config.toml."
+log "Nur Host-Variablen (VSync, GL-Thread, Button-Remap) sind hier gesetzt."
 
 # ══════════════════════════════════════════════════════════════════════
 # KEINE DEBUG- ODER STATISTIK-AUSGABEN IM RELEASE
@@ -344,16 +320,6 @@ unset HALO_GPU_PASS_TIMING 2>/dev/null || true
 unset HALO_GPU_TRACE_PASSES_AT 2>/dev/null || true
 unset HALO_GPU_TRACE_PASSES_FRAMES 2>/dev/null || true
 unset HALO_DEBUG_SKIP_GL 2>/dev/null || true
-
-log "render_scale=$HALO_RENDER_SCALE, model_detail=$HALO_MODEL_DETAIL"
-log "distant_objects=$HALO_MIN_OBJECT_PIXELS px"
-log "dynamic_resolution=$HALO_DYNAMIC_RESOLUTION (min $HALO_DYNAMIC_RESOLUTION_MIN)"
-log "fast_shaders=$HALO_FAST_SHADERS, fast_textures=$HALO_FAST_TEXTURES"
-log "interpolation=$HALO_INTERPOLATION, swap_interval=$HALO_SWAP_INTERVAL, frame_pacing=$HALO_FRAME_PACING"
-log "high_res_hud=$HALO_HIGH_RES_HUD, high_res_text=$HALO_HIGH_RES_TEXT"
-log "button_remap=$HALO_BUTTON_REMAP (A<->B, X<->Y, LB<->LT, RB<->RT)"
-log "sound_occlusion_ticks=$HALO_SOUND_OBSTRUCTION_TICKS, lighting_refresh_divisor=$HALO_LIGHTING_REFRESH_DIVISOR"
-log "Release: keine Debug- und Statistik-Ausgaben."
 
 # ── MAPS-CHECK ───────────────────────────────────────────────────────
 if [ ! -s "$GAMEDIR/maps/ui.map" ]; then
@@ -381,7 +347,6 @@ HALO_STDERR="$GAMEDIR/halo-stderr.txt"
 : > "$HALO_STDOUT"
 : > "$HALO_STDERR"
 
-# gptokeyb falls verfügbar
 GPTOKEYB_PID=""
 if [ -n "$PM_CONTROLFOLDER" ] && command -v gptokeyb >/dev/null 2>&1; then
     gptokeyb "./halo" >/dev/null 2>&1 &
