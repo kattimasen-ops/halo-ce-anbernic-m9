@@ -3,11 +3,12 @@
 #
 # RELEASE-BUILD: PGO (use) + LTO, alle Port-Optimierungen aktiv.
 #
-# Bild- und Performance-Einstellungen kommen NICHT mehr aus dieser Datei,
-# sondern aus config.toml (Settings -> Video im Spiel). Nur die
-# Host-seitigen Variablen (VSync-Intervall, GL-Thread, Button-Remap)
-# werden hier gesetzt. Alle HALO_*-Variablen, die config.toml-Werte
-# ueberschreiben wuerden, sind entfernt.
+# Bild- und Performance-Einstellungen kommen aus config.toml
+# (Settings -> Video im Spiel). Nur Host-Variablen werden hier gesetzt.
+#
+# WICHTIG: Der Port fasst die systemweite ALSA-Konfiguration NICHT an.
+# SDL2 benutzt den ALSA-Default von ArkOS, der bereits korrekt
+# eingerichtet ist.
 
 XDG_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
 
@@ -238,19 +239,33 @@ else
     export LD_LIBRARY_PATH="$GAMEDIR/libs.aarch64:$GAMEDIR"
 fi
 
-# ── ALSA (RK817) ─────────────────────────────────────────────────────
-if command -v amixer >/dev/null 2>&1; then
-    for ctrl in Playback Master PCM Speaker Headphone DAC; do
-        amixer -c 0 sset "$ctrl" 100% unmute >/dev/null 2>&1 || true
-    done
-    amixer -c 0 cset numid=1 1 >/dev/null 2>&1 || true
-fi
+# ── ALSA ─────────────────────────────────────────────────────────────
+# WICHTIG: Der Port fasst die systemweite ALSA-Konfiguration NICHT an.
+#
+# Frühere Versionen haben hier:
+#   1. eine persistente ~/.asoundrc geschrieben, die alle Anwendungen
+#      danach auf hw:0,0 zwang;
+#   2. mit "amixer cset numid=1 1" einen rohen Control-Index gesetzt,
+#      der auf dem R36S (RK817) Playback Path auf SPK_HP schaltete —
+#      danach waren Lautsprecher und Kopfhörer-Ausgang stumm, und
+#      die Einstellung blieb systemweit erhalten.
+#
+# SDL2 auf ArkOS benutzt den ALSA-Default bereits korrekt. Der Port
+# braucht hier nichts zu tun.
+
+# Nur aufräumen: falls eine ältere Version dieses Skripts die .asoundrc
+# angelegt hat, wird sie entfernt. Wir prüfen streng auf den exakten
+# Inhalt, damit eine vom Nutzer selbst angelegte .asoundrc unangetastet
+# bleibt.
 ASOUNDRC="$HOME/.asoundrc"
-if [ ! -f "$ASOUNDRC" ]; then
-    cat > "$ASOUNDRC" << 'ASOUNDEOF'
-pcm.!default { type hw; card 0; device 0 }
-ctl.!default { type hw; card 0 }
-ASOUNDEOF
+if [ -f "$ASOUNDRC" ]; then
+    HALO_ASOUNDRC_EXPECTED="$(printf 'pcm.!default { type hw; card 0; device 0 }\nctl.!default { type hw; card 0 }\n')"
+    if [ "$(cat "$ASOUNDRC" 2>/dev/null)" = "$HALO_ASOUNDRC_EXPECTED" ]; then
+        mv -f "$ASOUNDRC" "$ASOUNDRC.halo-backup" 2>/dev/null || rm -f "$ASOUNDRC" 2>/dev/null || true
+        log "Alte .asoundrc (von einer früheren Halo-Version) entfernt und gesichert."
+    else
+        log "Vorhandene .asoundrc stammt nicht von Halo - unangetastet."
+    fi
 fi
 
 # ── SDL-UMGEBUNG ─────────────────────────────────────────────────────
@@ -268,33 +283,18 @@ log "HALO_SAVE_ROOT=$HALO_SAVE_ROOT"
 # ── HALO-EINSTELLUNGEN (Release) ─────────────────────────────────────
 log_section "HALO-EINSTELLUNGEN"
 
-# WICHTIG: Die Bild- und Performance-Einstellungen werden jetzt im
-# In-Game-Menue (Settings -> Video) gesetzt und aus config.toml gelesen.
-# Sie duerfen hier NICHT als HALO_*-Umgebungsvariablen exportiert werden,
-# sonst gewinnen sie gegen config.toml (port_config.c liest die Datei
-# zuerst und ueberschreibt sie dann mit vorhandenen HALO_*-Variablen).
-#
-# Nur noch Variablen, die der Host liest und die kein config.toml-
-# Setting haben:
-
 # VSync-Intervall: der Host liest HALO_SWAP_INTERVAL direkt
-# (port/knulli/host/host_sdl2.c).
 export HALO_SWAP_INTERVAL=1
 
 # HALO_NO_VSYNC darf nicht gesetzt sein.
 unset HALO_NO_VSYNC
 
-# GL-Thread und Async-Programs: der Host liest sie direkt
-# (port/knulli/host/host_glthread.c).
+# GL-Thread und Async-Programs: der Host liest sie direkt.
 export HALO_GL_THREAD="${HALO_GL_THREAD:-1}"
 export HALO_GL_THREAD_FRAMES="${HALO_GL_THREAD_FRAMES:-1}"
 export HALO_ASYNC_PROGRAMS="${HALO_ASYNC_PROGRAMS:-1}"
 
-# Tastenbelegung: vom Host (port/linux/src/xinput_sdl.c) gelesen.
-# A <-> B (Springen auf B, Nahkampf auf A)
-# X <-> Y (Nachladen auf Y, Waffenwechsel auf X)
-# LB (L1) <-> LT (L2) (Granate auf L1, Taschenlampe auf L2)
-# RB (R1) <-> RT (R2) (Feuern auf R1, Granatenwechsel auf R2)
+# Tastenbelegung: vom Host gelesen.
 export HALO_BUTTON_REMAP=1
 
 log "Bild- und Performance-Einstellungen kommen aus config.toml."
