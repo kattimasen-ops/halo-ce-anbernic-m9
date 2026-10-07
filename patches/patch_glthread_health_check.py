@@ -13,6 +13,10 @@ auf die GPU zu warten.
      Includes, vor gl_thread_main).
   2. gl_thread_main: health_check() nach glthread_replay() aufrufen.
 
+Ist die Datei nicht vorhanden (weil port/knulli nicht kopiert wurde),
+gibt das Skript eine Warnung aus und kehrt zurück; es bricht den Build
+nicht ab.
+
 Idempotent.
 """
 import os
@@ -62,8 +66,10 @@ def apply_patch(src_root):
     print("== Patch 12: GL-Thread health_check (HALO_GL_HEALTH_CHECK) ==")
     path = os.path.join(src_root, "port", "knulli", "host", "host_glthread.c")
     if not os.path.exists(path):
-        print(f"FEHLER: {path} nicht gefunden", file=sys.stderr)
-        sys.exit(1)
+        print(f"WARNUNG: {path} nicht gefunden – überspringe health_check-Patch.")
+        print("         (port/knulli/host/host_glthread.c ist in deinem Repo nicht vorhanden;")
+        print("          das Kopieren des port/knulli-Verzeichnisses muss vor Fix 4 passieren.)")
+        return
     with open(path) as f:
         text = f.read()
 
