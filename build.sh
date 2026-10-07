@@ -825,6 +825,7 @@ for patch_script in patch_memory_pools.py patch_neon_math.py \
                     patch_vita_optimizations.py patch_button_remap.py \
                     patch_index_extent_neon.py patch_fps_overlay.py \
                     patch_draw_framebuffer_bound.py \
+                    patch_mali_subdata.py \
                     patch_settings_menu.py \
                     patch_config_defaults.py \
                     patch_credits.py; do
@@ -937,6 +938,9 @@ check_patch "port/linux/src/d3d8_gl.c"                    "__builtin_elementwise
 check_patch "port/linux/src/d3d8_gl.c"                    "fps_overlay_enabled"                "d3d8_gl.c FPS-Overlay"
 check_patch "port/linux/src/d3d8_gl.c"                    "static int draw_framebuffer_bound(void)" "d3d8_gl.c framebuffer_bound"
 check_patch "port/linux/src/d3d8_gl.c"                    "if (draw_framebuffer_bound())"       "d3d8_gl.c Discard"
+check_patch "port/linux/src/d3d8_gl.c"                    "mali_subdata_guard"                 "d3d8_gl.c Mali-Subdata-Guard"
+check_patch "port/linux/src/d3d8_gl.c"                    "subdata_frame"                      "d3d8_gl.c subdata_frame[]"
+check_patch "port/linux/src/d3d8_gl.c"                    "device.frame - mirror.subdata_frame" "d3d8_gl.c Frame-Guard"
 check_patch "tools/android_build.py"                      '"-DHALO_ANDROID"'                   "android_build.py -DHALO_ANDROID"
 check_patch "source/main/main.c"                          "St0len-One"                          "main.c Credits"
 
@@ -1035,9 +1039,9 @@ stamp=$({
     for p in patch_memory_pools.py patch_neon_math.py \
              patch_vita_optimizations.py patch_button_remap.py \
              patch_index_extent_neon.py patch_fps_overlay.py \
-             patch_draw_framebuffer_bound.py patch_settings_menu.py \
-             patch_config_defaults.py patch_credits.py \
-             patch_credits_xml.py; do
+             patch_draw_framebuffer_bound.py patch_mali_subdata.py \
+             patch_settings_menu.py patch_config_defaults.py \
+             patch_credits.py patch_credits_xml.py; do
         cat "$HERE/patches/$p" 2>/dev/null || true
     done
     if [ -f "$HERE/pgo/halo_linux.profdata" ]; then
@@ -1052,6 +1056,7 @@ stamp=$({
     echo "fps-overlay=uniform4fv"
     echo "halo-android=on"
     echo "draw-framebuffer-bound=on"
+    echo "mali-subdata=guard-v1"
     echo "glthread-health-check=tolerant"
     echo "xml-hunk-removed=1"
     echo "settings-menu=regenerated"
@@ -1143,6 +1148,7 @@ Zu installieren auf dem M9 Pro:
 Aktiv in diesem Build:
   - HALO_ANDROID aktiv (Guest + Host): alle ES-Optimierungen.
   - draw_framebuffer_bound: kein GL_INVALID_OPERATION mehr.
+  - Mali-Subdata-Guard: kein Stick-Figure-Bug auf Mali-G31.
   - In-Game-Settings-Menue mit 20 Zeilen, ohne Luecken (OpenCE).
   - Credits "St0len-One" im Hauptmenue und in allen Settings-Screens.
   - Default-Werte aus Halo.sh in port_config.c festgenagelt.
