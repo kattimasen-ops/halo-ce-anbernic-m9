@@ -5,22 +5,17 @@ set -euo pipefail
 # Halo CE Universal — M9 Pro (RK3326 / Cortex-A35 + Mali-G31 MP2)
 # Build-Skript: Host (aarch64) + Guest (arm64_32 ILP32 AArch64)
 #
-# Option A: -fno-omit-frame-pointer wird aus GUEST_CODE_FLAGS entfernt,
-#           damit -fomit-frame-pointer aus GUEST_ABI_FLAGS wirkt.
-#
 # Fix 2e: -DHALO_ANDROID wird sowohl im Guest als auch im Host gesetzt,
 #         damit die ES-Optimierungen (Vita, Shader-Praezision,
-#         Async-Texturen, Instance-Models, ES-Pixel-Precision) aktiv
-#         werden. Ohne dieses Flag sind die #ifdef HALO_ANDROID-Bloecke
-#         im Quellcode unerreichbar und der Port ignoriert die in
-#         Halo.sh gesetzten HALO_MIN_OBJECT_PIXELS, HALO_LIGHTING_
-#         REFRESH_DIVISOR usw.
+#         Async-Texturen, Instance-Models) aktiv werden.
+#
+# Fix 3b: -DHALO_ANDROID in port/knulli/build.sh, damit die ES-
+#         Optimierungen im Host greifen.
+#
+# Reihenfolge-Hinweis: port/knulli wird VOR den Python-Patches (Fix 4)
+# in den Quellbaum kopiert, damit die Patches host_glthread.c und
+# build.sh dort finden.
 # ══════════════════════════════════════════════════════════════════════
-# PGO-MODUS
-# ══════════════════════════════════════════════════════════════════════
-#   use    → Release-Build mit PGO (Linux-Profil) und LTO  [DEFAULT]
-#   off    → ohne PGO, LTO an
-#   train  → instrumentierter Android-Guest, erzeugt .profraw
 PGO_MODE=${PGO_MODE:-use}
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -436,10 +431,6 @@ print(f"android_build.py gepatcht: {count_mcpu}x mcpu, {count_flags}x O-Flags")
 PYEOF
 
 # ── Fix 2e: -DHALO_ANDROID in tools/android_build.py ────────────────
-# (WICHTIG: -DHALO_ANDROID aktiviert die ES-Optimierungen im GUEST.
-#  Ohne dieses Flag sind Vita-Optimierungen, Shader-Praezision,
-#  Async-Texturen usw. wirkungslos, weil sie in #ifdef HALO_ANDROID
-#  eingeschlossen sind.)
 python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import sys
 path = sys.argv[1]
@@ -450,13 +441,11 @@ if '"-DHALO_ANDROID"' in text:
     print("android_build.py: -DHALO_ANDROID bereits vorhanden")
     sys.exit(0)
 
-# Anker: entweder das -DHALO_RELEASE oder das erste Element der Flag-Liste
 anchor = '"-DHALO_RELEASE"'
 if anchor in text:
     text = text.replace(anchor, '"-DHALO_ANDROID",\n    "-DHALO_RELEASE"', 1)
     print("android_build.py: -DHALO_ANDROID vor -DHALO_RELEASE eingefuegt")
 else:
-    # Fallback: vor GUEST_ABI_FLAGS-Element "-O3" einfügen
     fallback = '"-O3",\n    "-fomit-frame-pointer"'
     if fallback in text:
         text = text.replace(fallback, '"-DHALO_ANDROID",\n    ' + fallback, 1)
@@ -469,16 +458,17 @@ with open(path, 'w') as f:
     f.write(text)
 PYEOF
 
-# ── Fix 2b: clang-Builtin-Shim ───────────────────────────────────────
+# ── Fix 2b: clang-Builtin-Shim (robuste guest_abi-Erkennung) ────────
 python3 - "$SRC/tools/android_build.py" <<'PYEOF'
+import re
 import sys
 path = sys.argv[1]
 with open(path) as f:
     text = f.read()
 if "_clang_builtin_shim" in text:
     print("shim bereits aktiv")
-    sys.exit(0)
-old_fn = '''def _clang_resource_include(cc: str) -> List[str]:
+else:
+    old_fn = '''def _clang_resource_include(cc: str) -> List[str]:
     # Include directory of cc's own built-in headers (arm_neon.h etc.).
     #
     # The guest build compiles with -nostdinc so the host's glibc headers
@@ -502,7 +492,7 @@ old_fn = '''def _clang_resource_include(cc: str) -> List[str]:
               f"is missing", file=sys.stderr)
         return []
     return ["-isystem", str(include)]'''
-new_fn = '''def _clang_builtin_shim(cc: str) -> List[str]:
+    new_fn = '''def _clang_builtin_shim(cc: str) -> List[str]:
     try:
         result = subprocess.run([cc, "-print-resource-dir"],
                                 capture_output=True, text=True, check=True)
@@ -533,40 +523,53 @@ new_fn = '''def _clang_builtin_shim(cc: str) -> List[str]:
         except OSError:
             shutil.copy2(source, target)
     return ["-isystem", str(shim)]'''
-if old_fn in text:
-    text = text.replace(old_fn, new_fn, 1)
-    text = text.replace("_clang_resource_include(guest_cc)",
-                        "_clang_builtin_shim(guest_cc)")
-elif "_clang_resource_include" in text:
-    print("FEHLER: alte Funktion in unerwarteter Form", file=sys.stderr); sys.exit(1)
-else:
-    anchor = """    for sdk in (Path.home() / "Android/Sdk", Path("/opt/android-sdk")):
+    if old_fn in text:
+        text = text.replace(old_fn, new_fn, 1)
+        text = text.replace("_clang_resource_include(guest_cc)",
+                            "_clang_builtin_shim(guest_cc)")
+    elif "_clang_resource_include" in text:
+        print("FEHLER: alte Funktion in unerwarteter Form", file=sys.stderr); sys.exit(1)
+    else:
+        anchor = """    for sdk in (Path.home() / "Android/Sdk", Path("/opt/android-sdk")):
         if (sdk / "ndk").is_dir():
             versions = sorted((sdk / "ndk").iterdir())
             if versions:
                 return versions[-1]
     return None
 """
-    if anchor not in text:
-        print("FEHLER: _find_ndk-Anker fehlt", file=sys.stderr); sys.exit(1)
-    text = text.replace(anchor, anchor + "\n\n" + new_fn, 1)
+        if anchor not in text:
+            print("FEHLER: _find_ndk-Anker fehlt", file=sys.stderr); sys.exit(1)
+        text = text.replace(anchor, anchor + "\n\n" + new_fn, 1)
+
+# Robuste guest_abi-Erkennung mit Regex
 if "_clang_builtin_shim(guest_cc)" not in text:
-    old_abi = ('    guest_abi = " ".join(GUEST_ABI_FLAGS + '
-               '(["-DHALO_RELEASE"] if getattr(sln, "port_release", False) else []))')
-    new_abi = ('    guest_abi = " ".join(\n'
-               '        GUEST_ABI_FLAGS\n'
-               '        + _clang_builtin_shim(guest_cc)\n'
-               '        + (["-DHALO_RELEASE"] if getattr(sln, "port_release", False) else []))')
-    if old_abi in text:
-        text = text.replace(old_abi, new_abi, 1)
+    pattern = re.compile(
+        r'(\bguest_abi\s*=\s*"[^"]*"\s*\.join\(\s*\n?\s*GUEST_ABI_FLAGS\b)',
+        re.MULTILINE,
+    )
+    if pattern.search(text):
+        text = pattern.sub(r'\1\n        + _clang_builtin_shim(guest_cc)', text, count=1)
+        print("clang-Builtin-Shim in guest_abi eingebaut (Regex)")
     else:
-        print("WARNUNG: guest_abi-Berechnung nicht gefunden", file=sys.stderr)
+        # Fallback: suche nach jeder .join(GUEST_ABI_FLAGS-Zeile
+        pattern2 = re.compile(
+            r'(\.join\(\s*\n?\s*GUEST_ABI_FLAGS\b)',
+            re.MULTILINE,
+        )
+        if pattern2.search(text):
+            text = pattern2.sub(r'\1\n        + _clang_builtin_shim(guest_cc)', text, count=1)
+            print("clang-Builtin-Shim in guest_abi eingebaut (Fallback-Regex)")
+        else:
+            print("WARNUNG: guest_abi-Berechnung nicht gefunden - Shim bleibt ungenutzt", file=sys.stderr)
+else:
+    print("clang-Builtin-Shim bereits in guest_abi")
+
 with open(path, 'w') as f:
     f.write(text)
 print("clang-Builtin-Shim aktiv")
 PYEOF
 
-# ── Fix 2c: NUR im Trainings-Modus: PGO-Instrumentierung ─────────────
+# ── Fix 2c/2d: NUR Trainings-Modus ───────────────────────────────────
 if [ "$PGO_MODE" = "train" ]; then
     python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import sys
@@ -587,10 +590,7 @@ for old in ('"-O3",', '"-O3"'):
 print("FEHLER: O3-Flag nicht gefunden", file=sys.stderr)
 sys.exit(1)
 PYEOF
-fi
 
-# ── Fix 2d: NUR im Trainings-Modus: Profiling-Runtime zum Link ───────
-if [ "$PGO_MODE" = "train" ]; then
     python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import sys
 path = sys.argv[1]
@@ -683,14 +683,27 @@ with open(path, 'w') as f:
 print(f"linux_build.py: {count_opt}x O2->O3, {count_abi}x zusaetzliche Flags")
 PYEOF
 
-# ── Fix 3b: -DHALO_ANDROID im Host-Build (port/knulli/build.sh) ─────
-# Wird NACH dem Kopieren von port/knulli angewendet, weil build.sh
-# den Port-Ordner frisch aus dem Repo kopiert. Ohne dieses Flag sind
-# alle ES-Optimierungen im Host (d3d8_gl.c, xgpu.h) wirkungslos.
+# ══════════════════════════════════════════════════════════════════════
+# WICHTIG: port/knulli MUSS jetzt kopiert werden, BEVOR Fix 3b und Fix 4
+# laufen, weil diese Dateien in port/knulli/host/ suchen.
+# ══════════════════════════════════════════════════════════════════════
+
+# ── port/knulli kopieren ─────────────────────────────────────────────
+echo ""
+echo "== Kopiere port/knulli in den Quellbaum ..."
+if [ ! -d "$HERE/port/knulli" ]; then
+    die "port/knulli/ existiert nicht im Repo"
+fi
+rm -rf "$SRC/port/knulli"
+cp -a "$HERE/port/knulli" "$SRC/port/knulli"
+rm -rf "$SRC/port/knulli/__pycache__"
+chmod +x "$SRC/port/knulli/build.sh" 2>/dev/null || true
+
+# ── Fix 3b: -DHALO_ANDROID in $SRC/port/knulli/build.sh ─────────────
 echo ""
 echo "== Fix 3b: -DHALO_ANDROID in port/knulli/build.sh ..."
-if [ -f "$HERE/port/knulli/build.sh" ]; then
-    python3 - "$HERE/port/knulli/build.sh" <<'PYEOF'
+if [ -f "$SRC/port/knulli/build.sh" ]; then
+    python3 - "$SRC/port/knulli/build.sh" <<'PYEOF'
 import sys
 path = sys.argv[1]
 with open(path) as f:
@@ -712,7 +725,7 @@ else
     echo "WARNUNG: port/knulli/build.sh fehlt, Fix 3b uebersprungen"
 fi
 
-# ── Fix 4: Python-Patches (memory, neon, vita, button, index, fps) ───
+# ── Fix 4: Python-Patches ────────────────────────────────────────────
 echo ""
 echo "== Fix 4: Quellcode-Optimierungen ..."
 for patch_script in patch_memory_pools.py patch_neon_math.py \
@@ -730,7 +743,7 @@ for patch_script in patch_memory_pools.py patch_neon_math.py \
     fi
 done
 
-# ── Fix 4a: Sicherheitskorrektur fuer das FPS-Overlay ────────────────
+# ── Fix 4a: glUniform4f -> glUniform4fv ─────────────────────────────
 if [ -f "$SRC/port/linux/src/d3d8_gl.c" ]; then
     python3 - "$SRC/port/linux/src/d3d8_gl.c" <<'PYEOF'
 import re
@@ -764,7 +777,7 @@ else:
 PYEOF
 fi
 
-# ── Fix 4b: Verifikation der Patches ─────────────────────────────────
+# ── Fix 4b: Verifikation ─────────────────────────────────────────────
 echo ""
 echo "== Fix 4b: Verifiziere Patch-Ergebnisse ..."
 verification_failed=0
@@ -794,11 +807,18 @@ check_patch "port/linux/src/d3d8_gl.c"                    "__builtin_elementwise
 check_patch "port/linux/src/d3d8_gl.c"                    "fps_overlay_enabled"                "d3d8_gl.c FPS-Overlay"
 check_patch "port/linux/src/d3d8_gl.c"                    "static int draw_framebuffer_bound(void)" "d3d8_gl.c draw_framebuffer_bound"
 check_patch "port/linux/src/d3d8_gl.c"                    "if (draw_framebuffer_bound())"       "d3d8_gl.c Discard-Bedingung"
-check_patch "port/knulli/host/host_glthread.c"            "static void health_check(void)"      "host_glthread.c health_check"
-check_patch "port/knulli/host/host_glthread.c"            "static int draw_framebuffer_bound(void)" "host_glthread.c draw_framebuffer_bound"
-check_patch "port/knulli/host/host_glthread.c"            "health_check();"                    "host_glthread.c health_check-Aufruf"
 check_patch "tools/android_build.py"                      '"-DHALO_ANDROID"'                   "android_build.py -DHALO_ANDROID"
 check_patch "port/knulli/build.sh"                        "-DHALO_ANDROID"                     "port/knulli/build.sh -DHALO_ANDROID"
+
+# host_glthread.c nur prüfen, wenn die Datei existiert
+if [ -f "$SRC/port/knulli/host/host_glthread.c" ]; then
+    check_patch "port/knulli/host/host_glthread.c"            "static void health_check(void)"      "host_glthread.c health_check"
+    check_patch "port/knulli/host/host_glthread.c"            "static int draw_framebuffer_bound(void)" "host_glthread.c draw_framebuffer_bound"
+    check_patch "port/knulli/host/host_glthread.c"            "health_check();"                    "host_glthread.c health_check-Aufruf"
+else
+    echo "   HINWEIS: host_glthread.c nicht vorhanden – health_check-Patch uebersprungen"
+fi
+
 if grep -q '#include <arm_neon.h>' "$SRC/port/linux/src/d3d8_gl.c"; then
     echo "   FEHLT: d3d8_gl.c hat noch arm_neon.h (unerwartet)"
     verification_failed=1
@@ -874,18 +894,7 @@ CEOF
     fi
 fi
 
-# ── Port-Verzeichnis kopieren ────────────────────────────────────────
-if [ ! -d "$HERE/port/knulli" ]; then
-    die "port/knulli/ existiert nicht im Repo"
-fi
-rm -rf "$SRC/port/knulli"
-cp -a "$HERE/port/knulli" "$SRC/port/knulli"
-rm -rf "$SRC/port/knulli/__pycache__"
-chmod +x "$SRC/port/knulli/build.sh" 2>/dev/null || true
-
-# (Fix 3b hat bereits $HERE/port/knulli/build.sh gepatcht; das Kopieren
-#  uebernimmt das Flag in den Quellbaum.)
-
+# ── Stamp ────────────────────────────────────────────────────────────
 stamp=$({
     cat "$PATCH"
     for p in patch_memory_pools.py patch_neon_math.py \
