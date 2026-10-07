@@ -22,16 +22,16 @@ jobs:
       PGO_MODE: use
 
     steps:
-      - name: Switch to a reliable mirror (Hetzner, HTTP)
+      - name: Switch to reliable mirror (Stuttgart, HTTP)
         run: |
           # Die offiziellen Canonical-Server (archive.ubuntu.com,
           # security.ubuntu.com) haben seit Tagen einen kaputten Knoten
           # (185.125.190.83) und antworten oft mit 6 kB/s. Wir wechseln
-          # im ersten Schritt auf einen deutschen Mirror. Vorlaeufig
-          # HTTP, weil das Docker-Image noch keine CA-Zertifikate hat;
-          # apt verifiziert die Pakete ohnehin per GPG.
-          sed -i 's|http://archive.ubuntu.com|http://mirror.hetzner.com/ubuntu|g' /etc/apt/sources.list
-          sed -i 's|http://security.ubuntu.com|http://mirror.hetzner.com/ubuntu|g' /etc/apt/sources.list
+          # im ersten Schritt auf den Mirror der Universität Stuttgart.
+          # Vorlaeufig HTTP, weil das Docker-Image noch keine CA-Zertifikate
+          # hat; apt verifiziert die Pakete ohnehin per GPG.
+          sed -i 's|http://archive.ubuntu.com|http://ftp.uni-stuttgart.de|g' /etc/apt/sources.list
+          sed -i 's|http://security.ubuntu.com|http://ftp.uni-stuttgart.de|g' /etc/apt/sources.list
           # Aggressive Timeouts und wenige Retries, damit apt nicht ewig
           # auf einen toten Knoten wartet.
           tee /etc/apt/apt.conf.d/99-ci-timeouts > /dev/null <<'EOF'
@@ -51,7 +51,7 @@ jobs:
       - name: Switch mirror to HTTPS
         run: |
           # Mit installierten CA-Zertifikaten koennen wir HTTPS nutzen.
-          sed -i 's|http://mirror.hetzner.com|https://mirror.hetzner.com|g' /etc/apt/sources.list
+          sed -i 's|http://ftp.uni-stuttgart.de|https://ftp.uni-stuttgart.de|g' /etc/apt/sources.list
 
       - name: Cache apt packages
         uses: actions/cache@v4
@@ -76,9 +76,9 @@ jobs:
         run: |
           dpkg --add-architecture arm64
           printf '%s\n' \
-            'deb [arch=amd64] https://mirror.hetzner.com/ubuntu focal main restricted universe multiverse' \
-            'deb [arch=amd64] https://mirror.hetzner.com/ubuntu focal-updates main restricted universe multiverse' \
-            'deb [arch=amd64] https://mirror.hetzner.com/ubuntu focal-security main restricted universe multiverse' \
+            'deb [arch=amd64] https://ftp.uni-stuttgart.de/ubuntu focal main restricted universe multiverse' \
+            'deb [arch=amd64] https://ftp.uni-stuttgart.de/ubuntu focal-updates main restricted universe multiverse' \
+            'deb [arch=amd64] https://ftp.uni-stuttgart.de/ubuntu focal-security main restricted universe multiverse' \
             'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal main restricted universe multiverse' \
             'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-updates main restricted universe multiverse' \
             'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-security main restricted universe multiverse' \
@@ -91,4 +91,183 @@ jobs:
             libegl1-mesa-dev:arm64 \
             libgles2-mesa-dev:arm64
 
-      # ... Der Rest deines Workflows bleibt unverändert.
+      - name: Place arm64 headers and libs on the cross-compile paths
+        run: |
+          mkdir -p /usr/aarch64-linux-gnu/include
+          mkdir -p /usr/aarch64-linux-gnu/lib
+          mkdir -p /usr/aarch64-linux-gnu/lib/pkgconfig
+          cp -a /usr/include/libdrm /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
+          cp -a /usr/include/gbm.h /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
+          cp -a /usr/include/alsa /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
+          cp -a /usr/include/EGL /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
+          cp -a /usr/include/GLES2 /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
+          cp -a /usr/include/GLES3 /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
+          cp -a /usr/include/KHR /usr/aarch64-linux-gnu/include/ 2>/dev/null || true
+          for lib in libdrm libgbm libasound libEGL libGLESv2; do
+            cp -a /usr/lib/aarch64-linux-gnu/${lib}.so* /usr/aarch64-linux-gnu/lib/ 2>/dev/null || true
+          done
+          for pc in libdrm gbm alsa egl glesv2; do
+            src=""
+            for candidate in \
+              "/usr/lib/aarch64-linux-gnu/pkgconfig/${pc}.pc" \
+              "/usr/share/pkgconfig/${pc}.pc"; do
+              if [ -f "$candidate" ]; then
+                src="$candidate"
+                break
+              fi
+            done
+            if [ -n "$src" ]; then
+              sed -e 's|^prefix=.*|prefix=/usr/aarch64-linux-gnu|' \
+                  -e 's|^exec_prefix=.*|exec_prefix=${prefix}|' \
+                  -e 's|^libdir=.*|libdir=${prefix}/lib|' \
+                  -e 's|^includedir=.*|includedir=${prefix}/include|' \
+                  "$src" > "/usr/aarch64-linux-gnu/lib/pkgconfig/${pc}.pc"
+            fi
+          done
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install clang-22 (for the arm64_32 guest build)
+        run: |
+          wget -q https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          ./llvm.sh 22
+          ln -sf /usr/bin/clang-22 /usr/local/bin/clang-22
+          clang-22 --version
+
+      - name: Download Android NDK r28c
+        run: |
+          wget -q https://dl.google.com/android/repository/android-ndk-r28c-linux.zip
+          unzip -q android-ndk-r28c-linux.zip
+          echo "ANDROID_NDK=$PWD/android-ndk-r28c" >> $GITHUB_ENV
+
+      - name: Prepare sysroot directory
+        run: |
+          mkdir -p sysroot
+          rm -f sysroot/libSDL2* sysroot/libSDL3* sysroot/libdecor* sysroot/libmali*
+
+      - name: Download and extract libdecor
+        run: |
+          URLS=(
+            "https://mirror.eu.ossplanet.net/ubuntu-ports/pool/main/libd/libdecor-0/libdecor-0-0_0.1.0-3build1_arm64.deb"
+            "http://ftp.ubuntu-tw.org/ubuntu-ports/ubuntu-ports/ubuntu-ports/pool/main/libd/libdecor-0/libdecor-0-0_0.1.0-3build1_arm64.deb"
+          )
+          DECOR_DEB=""
+          for url in "${URLS[@]}"; do
+            if curl -fsSL --retry 2 --connect-timeout 30 -o /tmp/libdecor.deb "$url"; then
+              if dpkg-deb --info /tmp/libdecor.deb > /dev/null 2>&1; then
+                DECOR_DEB=/tmp/libdecor.deb
+                break
+              fi
+            fi
+          done
+          [ -n "$DECOR_DEB" ] || { echo "FEHLER: libdecor"; exit 1; }
+          dpkg-deb -x "$DECOR_DEB" /tmp/libdecor-extract
+          DECOR_LIB=$(find /tmp/libdecor-extract -name "libdecor-0.so.0*" -type f | head -n 1)
+          cp "$DECOR_LIB" sysroot/libdecor-0.so.0
+          echo "libdecor-0.so.0: $(stat -c%s sysroot/libdecor-0.so.0) Bytes"
+
+      - name: Download and extract libmali
+        run: |
+          URLS=(
+            "https://oph.mdrjr.net/meveric/pool/go2/libm/libmali-rk/libmali-rk-bifrost-g31-rxp0-gbm_1.7-2+deb10_arm64.deb"
+            "https://cdn.opensuse.org/repositories/home:/amazingfate:/libmali-rockchip/Debian_Testing/arm64/libmali-bifrost-g31-g2p0-gbm_1.9-1+debian1_arm64.deb"
+          )
+          MALI_DEB=""
+          for url in "${URLS[@]}"; do
+            if curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 30 -o /tmp/libmali.deb "$url"; then
+              SIZE=$(stat -c%s /tmp/libmali.deb 2>/dev/null || echo 0)
+              if [ "$SIZE" -gt 5000000 ] && dpkg-deb --info /tmp/libmali.deb > /dev/null 2>&1; then
+                MALI_DEB=/tmp/libmali.deb
+                break
+              fi
+            fi
+          done
+          [ -n "$MALI_DEB" ] || { echo "FEHLER: libmali"; exit 1; }
+          dpkg-deb -x "$MALI_DEB" /tmp/libmali-extract
+          MALI_LIB=$(find /tmp/libmali-extract -name "libmali*" -type f -size +5M | head -n 1)
+          cp "$MALI_LIB" sysroot/libmali.so.0
+          SONAME=$(aarch64-linux-gnu-readelf -d sysroot/libmali.so.0 2>/dev/null | grep SONAME | sed 's/.*\[\(.*\)\].*/\1/' || echo "")
+          if [ -n "$SONAME" ] && [ "$SONAME" != "libmali.so.0" ]; then
+            patchelf --set-soname libmali.so.0 sysroot/libmali.so.0
+          fi
+
+      - name: Verify sysroot libraries
+        run: |
+          for f in sysroot/libdecor-0.so.0 sysroot/libmali.so.0; do
+            [ -f "$f" ] && [ "$(stat -c%s "$f")" -gt 10240 ] || { echo "FEHLER: $f"; exit 1; }
+          done
+
+      - name: Make build scripts executable
+        run: |
+          chmod +x build.sh
+          [ -f apply_all.sh ] && chmod +x apply_all.sh || true
+          for f in build.sh UPSTREAM_COMMIT \
+                   patches/halo-ce-universal-knulli.patch \
+                   patches/patch_memory_pools.py \
+                   patches/patch_neon_math.py \
+                   patches/patch_vita_optimizations.py \
+                   patches/patch_button_remap.py \
+                   patches/patch_index_extent_neon.py \
+                   patches/patch_fps_overlay.py \
+                   patches/patch_draw_framebuffer_bound.py \
+                   patches/patch_settings_menu.py \
+                   patches/patch_config_defaults.py \
+                   patches/patch_credits.py \
+                   patches/patch_credits_xml.py; do
+            [ -f "$f" ] || { echo "FEHLT: $f"; exit 1; }
+          done
+          echo "== PGO_MODE: $PGO_MODE"
+
+      - name: Build (PGO use, LTO full)
+        run: |
+          export SYSROOT_LIB=$PWD/sysroot
+          export JOBS=$(nproc)
+          export HOST_CC=aarch64-linux-gnu-gcc
+          export GUEST_CC=clang-22
+          export PGO_MODE=use
+          export PKG_CONFIG_LIBDIR=/usr/aarch64-linux-gnu/lib/pkgconfig
+          export PKG_CONFIG_PATH=/usr/aarch64-linux-gnu/lib/pkgconfig
+          export PKG_CONFIG_SYSROOT_DIR=/
+          ./build.sh
+        timeout-minutes: 120
+
+      - name: Upload patched sources for analysis
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: patched-sources
+          path: |
+            work/halo-ce-universal/source/sound/game_sound.c
+            work/halo-ce-universal/source/render/render_objects.c
+            work/halo-ce-universal/source/models/models.c
+            work/halo-ce-universal/source/effects/decals.c
+            work/halo-ce-universal/source/math/matrix_math.c
+            work/halo-ce-universal/source/cseries/cseries.h
+            work/halo-ce-universal/source/main/main.c
+            work/halo-ce-universal/port/linux/src/port_config.c
+            work/halo-ce-universal/port/linux/src/xinput_sdl.c
+            work/halo-ce-universal/port/linux/src/d3d8_gl.c
+            work/halo-ce-universal/port/android/guest/runtime/guest_string.c
+            work/halo-ce-universal/tools/port_settings.py
+            work/halo-ce-universal/port/assets/menus/ce/main_menu.settings_select.player_setup.player_profile_edit.video_settings.xml
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Verify release build
+        run: |
+          SIZE=$(stat -c%s dist/halo_guest.elf)
+          SIZE_MB=$((SIZE / 1048576))
+          echo "== halo_guest.elf: $SIZE Bytes (~${SIZE_MB} MB)"
+          if [ "$SIZE" -lt 4000000 ]; then
+            echo "WARNUNG: halo_guest.elf ungewoehnlich klein (${SIZE_MB} MB) - PGO/LTO pruefen"
+          fi
+          ls -la dist/
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: halo-m9-pro-rk3326-release
+          path: dist/
+          retention-days: 30
