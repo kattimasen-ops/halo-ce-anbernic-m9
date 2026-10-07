@@ -3,8 +3,10 @@
 #
 # RELEASE-BUILD: PGO (use) + LTO, alle Port-Optimierungen aktiv.
 #
-# Bild- und Performance-Einstellungen kommen aus config.toml
-# (Settings -> Video im Spiel). Nur Host-Variablen werden hier gesetzt.
+# Bild- und Performance-Einstellungen kommen NICHT mehr aus dieser Datei,
+# sondern aus config.toml (Settings -> Video im Spiel). Nur die
+# Host-seitigen Variablen (VSync-Intervall, GL-Thread, Button-Remap)
+# werden hier gesetzt.
 #
 # WICHTIG: Der Port fasst die systemweite ALSA-Konfiguration NICHT an.
 # SDL2 benutzt den ALSA-Default von ArkOS, der bereits korrekt
@@ -283,7 +285,16 @@ log "HALO_SAVE_ROOT=$HALO_SAVE_ROOT"
 # ── HALO-EINSTELLUNGEN (Release) ─────────────────────────────────────
 log_section "HALO-EINSTELLUNGEN"
 
-# VSync-Intervall: der Host liest HALO_SWAP_INTERVAL direkt
+# WICHTIG: Die Bild- und Performance-Einstellungen werden jetzt im
+# In-Game-Menue (Settings -> Video) gesetzt und aus config.toml gelesen.
+# Sie duerfen hier NICHT als HALO_*-Umgebungsvariablen exportiert werden,
+# sonst gewinnen sie gegen config.toml (port_config.c liest die Datei
+# zuerst und ueberschreibt sie dann mit vorhandenen HALO_*-Variablen).
+#
+# Nur noch Variablen, die der Host liest und die kein config.toml-
+# Setting haben:
+
+# VSync-Intervall: der Host liest HALO_SWAP_INTERVAL direkt.
 export HALO_SWAP_INTERVAL=1
 
 # HALO_NO_VSYNC darf nicht gesetzt sein.
@@ -294,7 +305,11 @@ export HALO_GL_THREAD="${HALO_GL_THREAD:-1}"
 export HALO_GL_THREAD_FRAMES="${HALO_GL_THREAD_FRAMES:-1}"
 export HALO_ASYNC_PROGRAMS="${HALO_ASYNC_PROGRAMS:-1}"
 
-# Tastenbelegung: vom Host gelesen.
+# Tastenbelegung: vom Host (port/linux/src/xinput_sdl.c) gelesen.
+# A <-> B (Springen auf B, Nahkampf auf A)
+# X <-> Y (Nachladen auf Y, Waffenwechsel auf X)
+# LB (L1) <-> LT (L2) (Granate auf L1, Taschenlampe auf L2)
+# RB (R1) <-> RT (R2) (Feuern auf R1, Granatenwechsel auf R2)
 export HALO_BUTTON_REMAP=1
 
 log "Bild- und Performance-Einstellungen kommen aus config.toml."
