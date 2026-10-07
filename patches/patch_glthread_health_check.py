@@ -2,20 +2,12 @@
 """
 Fügt dem GL-Thread einen health_check hinzu (HALO_GL_HEALTH_CHECK=1).
 
-Der GL-Thread replayed GL-Aufrufe in den Mali-Treiber. Ohne eine
-regelmäßige glGetError-Prüfung bleiben Fehler wie GL_INVALID_OPERATION
-unentdeckt. Der health_check läuft nur, wenn die Umgebungsvariable
-HALO_GL_HEALTH_CHECK gesetzt ist, weil glGetError den Treiber zwingt,
-auf die GPU zu warten.
-
 Änderungen in port/knulli/host/host_glthread.c:
-  1. draw_framebuffer_bound() und health_check() einfügen (nach den
-     Includes, vor gl_thread_main).
+  1. draw_framebuffer_bound() und health_check() einfügen.
   2. gl_thread_main: health_check() nach glthread_replay() aufrufen.
 
-Ist die Datei nicht vorhanden (weil port/knulli nicht kopiert wurde),
-gibt das Skript eine Warnung aus und kehrt zurück; es bricht den Build
-nicht ab.
+Ist die Datei nicht vorhanden, gibt das Skript eine Warnung aus und
+kehrt zurück; es bricht den Build nicht ab.
 
 Idempotent.
 """
@@ -25,12 +17,9 @@ import sys
 
 HEALTH_FUNCTION = '''/* ---------- health check (HALO_GL_HEALTH_CHECK) and draw framebuffer bound
 
-The GL thread replays the guest's GL calls. A wrong call (an attachment
-named while another framebuffer is bound, a state the driver refuses)
-leaves a GL error the guest never sees, and on a tiled GPU (Mali) it also
-wastes a load or a store. HALO_GL_HEALTH_CHECK=1 drains the error queue
-after each call and logs what it finds; it is off by default, because
-glGetError forces the driver to wait for the GPU.
+HALO_GL_HEALTH_CHECK=1 drains the error queue after each call and logs
+what it finds; it is off by default, because glGetError forces the driver
+to wait for the GPU.
 
 draw_framebuffer_bound tells whether the drawing target is a game
 framebuffer (not the window's own, name 0): the end-of-frame
@@ -67,8 +56,6 @@ def apply_patch(src_root):
     path = os.path.join(src_root, "port", "knulli", "host", "host_glthread.c")
     if not os.path.exists(path):
         print(f"WARNUNG: {path} nicht gefunden – überspringe health_check-Patch.")
-        print("         (port/knulli/host/host_glthread.c ist in deinem Repo nicht vorhanden;")
-        print("          das Kopieren des port/knulli-Verzeichnisses muss vor Fix 4 passieren.)")
         return
     with open(path) as f:
         text = f.read()
@@ -77,7 +64,6 @@ def apply_patch(src_root):
         print("host_glthread.c: health_check + draw_framebuffer_bound bereits vorhanden – überspringe.")
         return
 
-    # 1) Funktionen vor gl_thread_main einfügen
     if "static void health_check(void)" not in text or "static int draw_framebuffer_bound(void)" not in text:
         anchor = "static void *gl_thread_main(void *unused)"
         if anchor not in text:
@@ -86,7 +72,6 @@ def apply_patch(src_root):
         text = text.replace(anchor, HEALTH_FUNCTION + anchor, 1)
         print("host_glthread.c: health_check + draw_framebuffer_bound eingefügt.")
 
-    # 2) health_check() nach glthread_replay im _command_call-Block aufrufen
     if "health_check();" not in text:
         old = "\t\t\t\tglthread_replay(command->function, command + 1);\n"
         new = "\t\t\t\tglthread_replay(command->function, command + 1);\n\t\t\t\thealth_check();\n"
