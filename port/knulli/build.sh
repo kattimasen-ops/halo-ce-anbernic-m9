@@ -1,379 +1,173 @@
-#!/bin/bash
-# Halo: Combat Evolved – M9 Pro (RK3326 / Cortex-A35 + Mali-G31 MP2)
+#!/bin/sh
+# Builds the Knulli port into build/knulli:
+#   halo            the aarch64 glibc host (the loader, SDL2, OpenGL ES)
+#   halo_guest.elf  the game, the Android port's guest image
+#   libs.aarch64/   the runtime libraries the device may not have
 #
-# RELEASE-BUILD: PGO (use) + LTO, alle Port-Optimierungen aktiv.
-#
-# Bild- und Performance-Einstellungen kommen NICHT mehr aus dieser Datei,
-# sondern aus config.toml (Settings -> Video im Spiel). Nur die
-# Host-seitigen Variablen und die Tastenbelegung werden hier gesetzt.
+# Bewusst POSIX-sh-kompatibel (dash): set -eu statt set -euo pipefail.
+set -eu
 
-XDG_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
-
-# ── PFADE ────────────────────────────────────────────────────────────
-SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
-if [ -z "$SCRIPT_DIR" ]; then
-    echo "FEHLER: Skript-Verzeichnis nicht ermittelbar." >&2
-    exit 1
-fi
-GAMEDIR="$SCRIPT_DIR/halo-ce"
-if [ ! -d "$GAMEDIR" ]; then
-    echo "FEHLER: $GAMEDIR existiert nicht." >&2
-    exit 1
-fi
-cd "$GAMEDIR" || exit 1
-
-# ── LOGGING (nur Launcher-Minimum) ───────────────────────────────────
-LOG="$GAMEDIR/log.txt"
-if [ -f "$LOG" ] && [ "$(stat -c%s "$LOG" 2>/dev/null || echo 0)" -gt 2097152 ]; then
-    mv -f "$LOG" "$LOG.1" 2>/dev/null || true
-fi
-if ! touch "$LOG" 2>/dev/null; then
-    LOG="/tmp/halo-log.txt"
-    touch "$LOG" 2>/dev/null || LOG="/dev/null"
-fi
-exec >> "$LOG" 2>&1
-
-log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
-log_section() {
-    log ""
-    log "========================================================="
-    log "== $*"
-    log "========================================================="
+folder() {
+    resolved=$(cd "$1" && pwd) || { echo "build.sh: $1: no such folder" >&2; exit 1; }
+    case "$resolved" in
+        *" "*) echo "build.sh: $resolved: a path with spaces is not supported" >&2; exit 1 ;;
+    esac
+    echo "$resolved"
 }
 
-log_section "START"
-log "SCRIPT_DIR=$SCRIPT_DIR"
-log "GAMEDIR=$GAMEDIR"
-log "Kernel=$(uname -r), Arch=$(uname -m)"
-log "Datum=$(date)"
+SDL2_INCLUDE=$(folder "${SDL2_INCLUDE:?the folder that holds SDL2/SDL.h}")
+SYSROOT_LIB=$(folder "${SYSROOT_LIB:?the device libraries}")
+NDK=$(folder "${ANDROID_NDK:?the Android NDK (for the OpenGL ES and EGL headers)}")
 
-# ── LOCK ─────────────────────────────────────────────────────────────
-exec 9> /tmp/halo-lock 2>/dev/null || true
-if [ -e /proc/self/fd/9 ]; then
-    if ! { flock -n 9 || python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)' 2>/dev/null; } 2>/dev/null; then
-        log "Halo laeuft bereits"
-        exit 1
-    fi
-fi
+cd "$(dirname "$0")/../.."
+ROOT=$(folder .)
+CC=${CC:-aarch64-linux-gnu-gcc}
+JOBS=${JOBS:-$(nproc)}
+OUT=build/knulli
+OBJ=$OUT/obj
 
-# ── PORTMASTER-CONTROLS ──────────────────────────────────────────────
-PM_CONTROLFOLDER=""
-for candidate in \
-    "/opt/system/Tools/PortMaster" \
-    "/opt/tools/PortMaster" \
-    "$XDG_DATA_HOME/PortMaster" \
-    "/roms/ports/PortMaster"; do
-    if [ -d "$candidate" ]; then
-        PM_CONTROLFOLDER="$candidate"
-        break
-    fi
+ninja -j "$JOBS" build/android/halo_guest.elf build/android/host/host_import_table.c
+mkdir -p "$OBJ" "$OUT/gl_include" "$OUT/lib" "$OUT/libs.aarch64"
+
+KHRONOS=$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include
+for name in EGL GLES2 GLES3 KHR; do
+    ln -sfn "$KHRONOS/$name" "$OUT/gl_include/$name"
 done
 
-if [ -n "$PM_CONTROLFOLDER" ] && [ -f "$PM_CONTROLFOLDER/control.txt" ]; then
-    source "$PM_CONTROLFOLDER/control.txt" 2>/dev/null || true
-    if [ -n "${CFW_NAME:-}" ] && [ -f "$PM_CONTROLFOLDER/mod_${CFW_NAME}.txt" ]; then
-        source "$PM_CONTROLFOLDER/mod_${CFW_NAME}.txt" 2>/dev/null || true
-    fi
-    if command -v get_controls >/dev/null 2>&1; then
-        get_controls 2>/dev/null || true
-    fi
-fi
+echo "== Inhalt von SYSROOT_LIB=$SYSROOT_LIB:"
+ls -la "$SYSROOT_LIB" || true
 
-if [ -n "${sdl_controllerconfig:-}" ]; then
-    export SDL_GAMECONTROLLERCONFIG="$sdl_controllerconfig"
-    log "SDL_GAMECONTROLLERCONFIG aus PortMaster gesetzt."
-elif [ -f "$GAMEDIR/sdl_mapping.py" ]; then
-    SDL_MAP="$(cd "$GAMEDIR" && python3 sdl_mapping.py 2>/dev/null)"
-    if [ -n "$SDL_MAP" ]; then
-        export SDL_GAMECONTROLLERCONFIG="$SDL_MAP"
-        log "SDL_GAMECONTROLLERCONFIG aus sdl_mapping.py gesetzt."
+echo "== Kopiere Laufzeitbibliotheken nach $OUT/libs.aarch64/"
+copy_runtime_lib() {
+    prefix=$1
+    target=$2
+    src=$(find "$SYSROOT_LIB" -maxdepth 1 -name "$prefix*" -type f 2>/dev/null | head -n 1)
+    if [ -z "$src" ]; then
+        src=$(find "$SYSROOT_LIB" -maxdepth 1 -name "$prefix*" 2>/dev/null | head -n 1)
     fi
-fi
-
-# ── SYSTEMOPTIMIERUNG ────────────────────────────────────────────────
-log_section "SYSTEMOPTIMIERUNG"
-
-# CPU-Governor auf performance
-cpu_governor_path=""
-for candidate in \
-    /sys/devices/system/cpu/cpufreq/policy0/scaling_governor \
-    /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor; do
-    if [ -w "$candidate" ]; then
-        cpu_governor_path="$candidate"
-        break
+    if [ -z "$src" ]; then
+        echo "  WARNUNG: keine $prefix*-Datei in SYSROOT_LIB – $target wird nicht ausgeliefert"
+        return 1
     fi
-done
-cpu_saved=""
-if [ -n "$cpu_governor_path" ]; then
-    cpu_saved=$(cat "$cpu_governor_path" 2>/dev/null)
-    log "CPU-Governor: $cpu_saved -> performance"
-    echo performance > "$cpu_governor_path" 2>/dev/null || true
-fi
-for cpu in /sys/devices/system/cpu/cpu[0-9]*; do
-    [ -w "$cpu/cpufreq/scaling_governor" ] && \
-        echo performance > "$cpu/cpufreq/scaling_governor" 2>/dev/null || true
-done
-
-# GPU-Governor auf performance + min_freq = max_freq
-gpu_devfreq_path=""
-for candidate in /sys/class/devfreq/ff400000.gpu /sys/class/devfreq/gpu; do
-    if [ -d "$candidate" ]; then
-        gpu_devfreq_path="$candidate"
-        break
-    fi
-done
-gpu_governor_saved=""; gpu_min_saved=""
-if [ -n "$gpu_devfreq_path" ]; then
-    [ -r "$gpu_devfreq_path/governor" ] && gpu_governor_saved=$(cat "$gpu_devfreq_path/governor" 2>/dev/null)
-    log "GPU-Governor: $gpu_governor_saved -> performance"
-    [ -w "$gpu_devfreq_path/governor" ] && \
-        echo performance > "$gpu_devfreq_path/governor" 2>/dev/null || true
-    if [ -r "$gpu_devfreq_path/available_frequencies" ] && [ -w "$gpu_devfreq_path/min_freq" ]; then
-        gpu_min_saved=$(cat "$gpu_devfreq_path/min_freq" 2>/dev/null)
-        max_freq=$(tr ' ' '\n' < "$gpu_devfreq_path/available_frequencies" | sort -n | tail -n 1)
-        [ -n "$max_freq" ] && echo "$max_freq" > "$gpu_devfreq_path/min_freq" 2>/dev/null || true
-    fi
-fi
-
-# ZRAM
-if swapon --show 2>/dev/null | grep -q zram; then
-    log "ZRAM bereits aktiv."
-else
-    modprobe zram 2>/dev/null || true
-    if [ -e /dev/zram0 ]; then
-        echo 512M > /sys/block/zram0/disksize 2>/dev/null || true
-        mkswap /dev/zram0 >/dev/null 2>&1 || true
-        swapon /dev/zram0 2>/dev/null || true
-        log "ZRAM aktiviert."
-    fi
-fi
-
-# tailscaled stoppen
-HALO_SERVICE_STATE="/tmp/halo-ce-services.$$"
-HALO_SERVICES_RESTORED=0
-
-stop_service_if_active() {
-    service="$1"
-    if command -v systemctl >/dev/null 2>&1 && \
-       systemctl is-active --quiet "$service" 2>/dev/null; then
-        echo "$service" >> "$HALO_SERVICE_STATE" 2>/dev/null || true
-        log "stopping $service"
-        command -v sudo >/dev/null 2>&1 && sudo -n systemctl stop "$service" 2>/dev/null || true
-    fi
+    cp -L "$src" "$OUT/libs.aarch64/$target"
+    echo "  $target <- $(basename "$src") ($(stat -c%s "$OUT/libs.aarch64/$target") Bytes)"
+    return 0
 }
 
-restore_services() {
-    [ "$HALO_SERVICES_RESTORED" = "0" ] || return 0
-    HALO_SERVICES_RESTORED=1
-    if [ -f "$HALO_SERVICE_STATE" ]; then
-        while IFS= read -r service; do
-            [ -n "$service" ] || continue
-            log "restoring $service"
-            command -v sudo >/dev/null 2>&1 && sudo -n systemctl start "$service" 2>/dev/null || true
-        done < "$HALO_SERVICE_STATE"
-        rm -f "$HALO_SERVICE_STATE" 2>/dev/null || true
+copy_runtime_lib "libSDL3"   "libSDL3.so.0"
+copy_runtime_lib "libmali"   "libmali.so.0"
+copy_runtime_lib "libSDL2"   "libSDL2-2.0.so.0"
+copy_runtime_lib "libdecor"  "libdecor-0.so.0"
+
+link_library() {
+    pattern=$1
+    linkname=$2
+    library=$(find "$SYSROOT_LIB" -maxdepth 1 -name "$pattern" -type f 2>/dev/null | head -n 1)
+    if [ -z "$library" ]; then
+        library=$(find "$SYSROOT_LIB" -maxdepth 1 -name "$pattern" 2>/dev/null | head -n 1)
     fi
+    if [ -z "$library" ]; then
+        echo "build.sh: no $pattern in SYSROOT_LIB=$SYSROOT_LIB" >&2
+        return 1
+    fi
+    ln -sf "$library" "$OUT/lib/$linkname"
+    echo "  linked $linkname -> $(basename "$library")"
+    return 0
 }
 
-: > "$HALO_SERVICE_STATE" 2>/dev/null || true
-stop_service_if_active tailscaled.service
+link_library "libSDL2*" "libSDL2.so"    || exit 1
+link_library "libSDL3*" "libSDL3.so"    || exit 1
+link_library "libmali*" "libmali.so"    || exit 1
+link_library "libdecor*" "libdecor.so"  || exit 1
 
-saved=/tmp/halo-clocks
-printf '%s|%s|%s\n' "$cpu_saved" "$gpu_governor_saved" "$gpu_min_saved" > "$saved" 2>/dev/null || true
+CFLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -fPIC -Wall -Wno-unused-function \
+        -D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS \
+        -DHALO_ANDROID \
+        -flto -fomit-frame-pointer -ffunction-sections -fdata-sections \
+        -fno-plt -fno-semantic-interposition"
 
-restore() {
-    log_section "RESTORE"
-    if [ -f "$saved" ]; then
-        IFS='|' read -r cpu_gov gpu_gov gpu_min < "$saved"
-        [ -n "$cpu_gov" ] && [ -n "$cpu_governor_path" ] && [ -w "$cpu_governor_path" ] && \
-            echo "$cpu_gov" > "$cpu_governor_path" 2>/dev/null || true
-        if [ -n "$gpu_devfreq_path" ]; then
-            [ -n "$gpu_gov" ] && [ -w "$gpu_devfreq_path/governor" ] && \
-                echo "$gpu_gov" > "$gpu_devfreq_path/governor" 2>/dev/null || true
-            [ -n "$gpu_min" ] && [ -w "$gpu_devfreq_path/min_freq" ] && \
-                echo "$gpu_min" > "$gpu_devfreq_path/min_freq" 2>/dev/null || true
-        fi
-        rm -f "$saved"
-    fi
-    restore_services
-    rm -f /var/run/battery-saver/halo.pause 2>/dev/null || true
-    log "Restore abgeschlossen."
-}
-trap restore EXIT
+CFLAGS="$CFLAGS -ffile-prefix-map=$ROOT=. -ffile-prefix-map=$SDL2_INCLUDE=sdl2"
+INCLUDES="-Iport/knulli/compat -Iport/knulli/host -Iport/android/include \
+          -Iport/android/host -Iport/linux/src -Iport/third_party/tomlc17 \
+          -I$OUT/gl_include -I$SDL2_INCLUDE"
+MINIUPNPC="-Iport/third_party/miniupnpc/include -Iport/third_party/miniupnpc/src \
+           -DMINIUPNP_STATICLIB -DMINIUPNPC_SET_SOCKET_TIMEOUT -DMINIUPNPC_GET_SRC_ADDR \
+           -D_BSD_SOURCE -D_DEFAULT_SOURCE -w"
 
-mkdir -p /var/run/battery-saver 2>/dev/null && \
-    touch /var/run/battery-saver/halo.pause 2>/dev/null || true
+FLAGS=$OUT/flags
+printf '%s\n' "$CC $CFLAGS $INCLUDES $MINIUPNPC" > "$FLAGS.new"
+cmp -s "$FLAGS.new" "$FLAGS" || mv "$FLAGS.new" "$FLAGS"
+rm -f "$FLAGS.new"
 
-# ── SAVE-VERZEICHNISSE ───────────────────────────────────────────────
-mkdir -p "$GAMEDIR/save" \
-         "$GAMEDIR/save/z" \
-         "$GAMEDIR/save/saved" \
-         "$GAMEDIR/save/saved/player_profiles" \
-         "$GAMEDIR/save/saved/player_profiles/default_profile" \
-         "$GAMEDIR/save/saved/playlists" \
-         "$GAMEDIR/save/saved/playlists/default_playlist" \
-         "$GAMEDIR/save/saved/recordings" \
-         "$GAMEDIR/save/saved/recordings/last_recording" 2>/dev/null || true
-
-# ── DRI-RECHTE ───────────────────────────────────────────────────────
-for node in /dev/dri/card0 /dev/dri/renderD128 /dev/fb0; do
-    if [ -e "$node" ] && { [ ! -r "$node" ] || [ ! -w "$node" ]; }; then
-        sudo -n chmod 666 "$node" 2>/dev/null || true
-    fi
-done
-
-# ── MALI-SYMLINKS ────────────────────────────────────────────────────
-SYSTEM_MALI="/usr/local/lib/aarch64-linux-gnu/libmali-bifrost-g31-rxp0-gbm.so"
-if [ -f "$SYSTEM_MALI" ]; then
-    rm -rf /tmp/halo-mali
-    mkdir -p /tmp/halo-mali
-    for name in libmali.so.0 libmali.so.1 libmali.so libgbm.so.1 libgbm.so.1.0.0 libgbm.so; do
-        ln -sf "$SYSTEM_MALI" "/tmp/halo-mali/$name"
+objects=""
+stale() {
+    object=$1
+    [ ! -f "$object" ] || [ ! -f "$object.d" ] || [ "$0" -nt "$object" ] || [ "$FLAGS" -nt "$object" ] && return 0
+    dependencies=$(sed -e 's/^[^:]*://' -e 's/\\$//' "$object.d") || return 0
+    for dependency in $dependencies; do
+        [ -f "$dependency" ] || return 0
+        [ "$dependency" -nt "$object" ] && return 0
     done
-    export LD_LIBRARY_PATH="/tmp/halo-mali:$GAMEDIR/libs.aarch64:$GAMEDIR"
-else
-    log "WARNUNG: $SYSTEM_MALI nicht gefunden - nutze System-Libraries."
-    export LD_LIBRARY_PATH="$GAMEDIR/libs.aarch64:$GAMEDIR"
-fi
-
-# ── ALSA (RK817) ─────────────────────────────────────────────────────
-if command -v amixer >/dev/null 2>&1; then
-    for ctrl in Playback Master PCM Speaker Headphone DAC; do
-        amixer -c 0 sset "$ctrl" 100% unmute >/dev/null 2>&1 || true
-    done
-    amixer -c 0 cset numid=1 1 >/dev/null 2>&1 || true
-fi
-ASOUNDRC="$HOME/.asoundrc"
-if [ ! -f "$ASOUNDRC" ]; then
-    cat > "$ASOUNDRC" << 'ASOUNDEOF'
-pcm.!default { type hw; card 0; device 0 }
-ctl.!default { type hw; card 0 }
-ASOUNDEOF
-fi
-
-# ── SDL-UMGEBUNG ─────────────────────────────────────────────────────
-export SDL_VIDEODRIVER="${SDL_VIDEODRIVER:-kmsdrm}"
-unset SDL_AUDIODRIVER
-unset AUDIODEV
-
-# ── HALO-PFADE ───────────────────────────────────────────────────────
-log_section "HALO-PFADE"
-export HALO_DATA_ROOT="$GAMEDIR"
-export HALO_SAVE_ROOT="$GAMEDIR/save"
-log "HALO_DATA_ROOT=$HALO_DATA_ROOT"
-log "HALO_SAVE_ROOT=$HALO_SAVE_ROOT"
-
-# ── HALO-EINSTELLUNGEN (Release) ─────────────────────────────────────
-log_section "HALO-EINSTELLUNGEN"
-
-# WICHTIG: Die Bild- und Performance-Einstellungen werden jetzt im
-# In-Game-Menue (Settings -> Video) gesetzt und aus config.toml gelesen.
-# Sie duerfen hier NICHT als HALO_*-Umgebungsvariablen exportiert werden,
-# sonst gewinnen sie gegen config.toml (port_config.c liest die Datei
-# zuerst und ueberschreibt sie dann mit vorhandenen HALO_*-Variablen).
-#
-# Nur noch Variablen, die der Host liest und die kein config.toml-
-# Setting haben:
-
-# VSync-Intervall: der Host liest HALO_SWAP_INTERVAL direkt
-# (port/knulli/host/host_sdl2.c).
-export HALO_SWAP_INTERVAL=1
-
-# HALO_NO_VSYNC darf nicht gesetzt sein.
-unset HALO_NO_VSYNC
-
-# GL-Thread und Async-Programs: der Host liest sie direkt
-# (port/knulli/host/host_glthread.c).
-export HALO_GL_THREAD="${HALO_GL_THREAD:-1}"
-export HALO_GL_THREAD_FRAMES="${HALO_GL_THREAD_FRAMES:-1}"
-export HALO_ASYNC_PROGRAMS="${HALO_ASYNC_PROGRAMS:-1}"
-
-# Tastenbelegung: vom Host (port/linux/src/xinput_sdl.c) gelesen.
-# A <-> B, X <-> Y, LB <-> LT, RB <-> RT
-export HALO_BUTTON_REMAP=1
-
-log "Bild- und Performance-Einstellungen kommen aus config.toml."
-log "Nur Host-Variablen (VSync, GL-Thread, Button-Remap) sind hier gesetzt."
-
-# ══════════════════════════════════════════════════════════════════════
-# KEINE DEBUG- ODER STATISTIK-AUSGABEN IM RELEASE
-# ══════════════════════════════════════════════════════════════════════
-unset HALO_DEBUG_LOGS 2>/dev/null || true
-unset HALO_GPU_STATS 2>/dev/null || true
-unset HALO_GL_TIMING 2>/dev/null || true
-unset HALO_HITCH_LOG 2>/dev/null || true
-unset HALO_FPS_LOG 2>/dev/null || true
-unset HALO_PERF_LOG 2>/dev/null || true
-unset HALO_MEMORY_STATS 2>/dev/null || true
-unset HALO_SAMPLE 2>/dev/null || true
-unset HALO_DEBUG_DRAW_CALLERS 2>/dev/null || true
-unset HALO_DEBUG_FREEZE 2>/dev/null || true
-unset HALO_DEBUG_LOD_BIAS 2>/dev/null || true
-unset HALO_GL_FRAME_LOG 2>/dev/null || true
-unset HALO_PACING_LOG 2>/dev/null || true
-unset HALO_GPU_PASS_TIMING 2>/dev/null || true
-unset HALO_GPU_TRACE_PASSES_AT 2>/dev/null || true
-unset HALO_GPU_TRACE_PASSES_FRAMES 2>/dev/null || true
-unset HALO_DEBUG_SKIP_GL 2>/dev/null || true
-
-# ── MAPS-CHECK ───────────────────────────────────────────────────────
-if [ ! -s "$GAMEDIR/maps/ui.map" ]; then
-    log "FEHLER: $GAMEDIR/maps/ui.map fehlt."
-    echo "FEHLER: maps/ui.map fehlt." >&2
-    exit 1
-fi
-
-# ── SPIELSTART ───────────────────────────────────────────────────────
-log_section "SPIELSTART"
-
-if [ ! -x ./halo ]; then
-    echo "FEHLER: ./halo fehlt." >&2
-    exit 1
-fi
-
-if [ -f ./halo_guest.elf ]; then
-    GUEST_SIZE=$(stat -c%s ./halo_guest.elf)
-    GUEST_SIZE_MB=$((GUEST_SIZE / 1048576))
-    log "halo_guest.elf: $GUEST_SIZE Bytes (~${GUEST_SIZE_MB} MB)"
-fi
-
-HALO_STDOUT="$GAMEDIR/halo-stdout.txt"
-HALO_STDERR="$GAMEDIR/halo-stderr.txt"
-: > "$HALO_STDOUT"
-: > "$HALO_STDERR"
-
-GPTOKEYB_PID=""
-if [ -n "$PM_CONTROLFOLDER" ] && command -v gptokeyb >/dev/null 2>&1; then
-    gptokeyb "./halo" >/dev/null 2>&1 &
-    GPTOKEYB_PID=$!
-fi
-cleanup_gptokeyb() {
-    [ -n "$GPTOKEYB_PID" ] && kill -0 "$GPTOKEYB_PID" 2>/dev/null && \
-        kill -TERM "$GPTOKEYB_PID" 2>/dev/null || true
-}
-trap cleanup_gptokeyb EXIT
-
-log "Starte: ./halo"
-./halo > "$HALO_STDOUT" 2> "$HALO_STDERR" &
-HALO_PID=$!
-log "PID=$HALO_PID"
-
-forward_signal() {
-    [ -n "$HALO_PID" ] && kill -0 "$HALO_PID" 2>/dev/null && \
-        kill -TERM "$HALO_PID" 2>/dev/null || true
-}
-trap forward_signal TERM INT HUP
-
-wait "$HALO_PID"
-HALO_STATUS=$?
-
-[ -n "$GPTOKEYB_PID" ] && kill -0 "$GPTOKEYB_PID" 2>/dev/null && {
-    kill -TERM "$GPTOKEYB_PID" 2>/dev/null || true
-    wait "$GPTOKEYB_PID" 2>/dev/null || true
+    return 1
 }
 
-log "halo beendet mit Status $HALO_STATUS"
+compile() {
+    source=$1
+    shift
+    object=$OBJ/$(echo "$source" | tr / _).o
+    if stale "$object"; then
+        echo "CC $source"
+        $CC $CFLAGS $INCLUDES "$@" -MMD -MF "$object.d" -c "$source" -o "$object"
+    fi
+    objects="$objects $object"
+}
 
-log_section "ENDE"
-sync
-exit "$HALO_STATUS"
+for source in host_debug host_gl host_loader host_memory host_syscall host_thread; do
+    compile port/android/host/$source.c
+done
+compile port/knulli/host/host_main.c
+compile port/knulli/host/host_sdl2.c
+compile port/knulli/host/host_profile.c
+compile port/knulli/host/host_gl_timing.c
+compile port/knulli/host/host_gl_timing.S
+
+python3 port/knulli/glthread_gen.py build/android/guest/gen/gl_imports.list \
+    "$KHRONOS/GLES3/gl32.h" \
+    "$OUT/host_glthread_gen.c.new"
+cmp -s "$OUT/host_glthread_gen.c.new" "$OUT/host_glthread_gen.c" || \
+    mv "$OUT/host_glthread_gen.c.new" "$OUT/host_glthread_gen.c"
+rm -f "$OUT/host_glthread_gen.c.new"
+
+compile port/knulli/host/host_glthread.c
+compile "$OUT/host_glthread_gen.c"
+compile port/knulli/host/host_sdl3_events.c -Ibuild/android/third_party/SDL3/include
+compile port/linux/src/posix_files.c
+compile port/linux/src/posix_net.c
+compile port/linux/src/posix_upnp.c $MINIUPNPC
+for source in port/third_party/miniupnpc/src/*.c; do
+    compile "$source" $MINIUPNPC
+done
+compile port/third_party/tomlc17/tomlc17.c -w
+compile build/android/host/host_import_table.c
+
+echo "LINK $OUT/halo"
+# WICHTIG: Nur -lSDL2, nicht -lSDL3. Der GNU-Linker löst Symbole in der
+# Reihenfolge der -l-Flags auf. SDL_Init, SDL_CreateWindow und
+# SDL_GL_CreateContext existieren in beiden Bibliotheken – mit -lSDL3
+# zuerst landen sie alle in SDL3 statt SDL2, was den KMSDRM-Videopfad
+# bricht. host_sdl3_events.c braucht SDL3 nur als Header (die Größe
+# von SDL_Event), nicht als Symbol.
+$CC -o "$OUT/halo" $objects \
+    -L"$OUT/lib" \
+    -Wl,-rpath-link,"$OUT/lib" \
+    -Wl,--allow-shlib-undefined \
+    -Wl,-O1 -Wl,--as-needed -Wl,--gc-sections \
+    -flto \
+    -lSDL2 -lmali -lpthread -ldl -lm
+
+cp build/android/halo_guest.elf "$OUT/halo_guest.elf"
+
+echo "== Inhalt von $OUT/libs.aarch64/:"
+ls -la "$OUT/libs.aarch64/"
+echo "== $OUT/halo und $OUT/halo_guest.elf:"
+ls -l "$OUT/halo" "$OUT/halo_guest.elf"
