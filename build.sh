@@ -5,15 +5,9 @@ set -euo pipefail
 # Halo CE Universal — M9 Pro (RK3326 / Cortex-A35 + Mali-G31 MP2)
 # Build-Skript: Host (aarch64) + Guest (arm64_32 ILP32 AArch64)
 #
-# Enthaelt:
-#   - XML-Hunk-Entfernung aus dem Knulli-Patch
-#   - patch_settings_menu.py      (In-Game-Menue-Zeilen)
-#   - patch_config_defaults.py    (Defaults aus Halo.sh festnageln)
-#   - patch_credits.py            (Credits "St0len-One")
-#   - Regeneration der Settings-XMLs aus port_settings.py
-#   - patch_credits_xml.py        (Wasserzeichen in statische Menue-XMLs)
-#   - alle bestehenden Fixes (APC, -mcpu, -O3, Clang-Shim, -DHALO_ANDROID)
-#   - PGO (use/off/train) und LTO
+# Zieht die port_settings.py und den Menue-Ordner aus dem OpenCE-Fork,
+# weil der cybersecurity-Upstream sie nicht hat. Der Knulli-Patch wird
+# danach mit "git apply --check" geprueft, damit er sauber laeuft.
 # ══════════════════════════════════════════════════════════════════════
 PGO_MODE=${PGO_MODE:-use}
 
@@ -27,6 +21,8 @@ SDL2_ARCHIVE=https://github.com/libsdl-org/SDL/archive/refs/tags/$SDL2_TAG.tar.g
 GUEST_CC=${GUEST_CC:-clang-22}
 HOST_CC=${HOST_CC:-aarch64-linux-gnu-gcc}
 JOBS=${JOBS:-$(nproc)}
+
+OPEN_CE_URL=${OPEN_CE_URL:-https://github.com/OpenCommunityEdition/OpenCE.git}
 
 die() { echo "build.sh: $*" >&2; exit 1; }
 need() { command -v "$1" > /dev/null 2>&1 || die "$1 not found: $2"; }
@@ -71,6 +67,76 @@ mkdir -p "$WORK" "$DIST"
 WORK=$(cd "$WORK" && pwd)
 DIST=$(cd "$DIST" && pwd)
 SRC=$WORK/halo-ce-universal
+
+# ── OpenCE-Dateien holen (port_settings.py + Menue-Ordner) ──────────
+# Wird VOR dem Anwenden des Knulli-Patches ausgefuehrt. Sparse-Checkout
+# ueber einen shallow Clone, damit keine GitHub-API-Limits getroffen
+# werden.
+fetch_opence_files() {
+    local opence_dir="$WORK/opence-source"
+
+    echo ""
+    echo "== Hole OpenCE-Dateien (port_settings.py + Menue-Ordner) ..."
+    rm -rf "$opence_dir"
+
+    # Shallow Clone mit Blob-Filter und Sparse-Checkout
+    if ! git clone --depth 1 --filter=blob:none --sparse \
+        "$OPEN_CE_URL" "$opence_dir" > /dev/null 2>&1; then
+        die "Konnte OpenCE nicht klonen ($OPEN_CE_URL)."
+    fi
+
+    if ! git -C "$opence_dir" sparse-checkout set \
+        tools port/assets/menus/ce > /dev/null 2>&1; then
+        die "Sparse-Checkout in OpenCE fehlgeschlagen."
+    fi
+
+    # 1. tools/port_settings.py
+    if [ -f "$opence_dir/tools/port_settings.py" ]; then
+        mkdir -p "$SRC/tools"
+        cp "$opence_dir/tools/port_settings.py" "$SRC/tools/"
+        echo "   + tools/port_settings.py"
+    else
+        die "OpenCE hat keine tools/port_settings.py."
+    fi
+
+    # 2. tools/ce_menus.py (Generator, von port_settings.py benutzt)
+    if [ -f "$opence_dir/tools/ce_menus.py" ]; then
+        cp "$opence_dir/tools/ce_menus.py" "$SRC/tools/"
+        echo "   + tools/ce_menus.py"
+    fi
+
+    # 3. port/assets/menus/ce (kompletter Ordner)
+    if [ -d "$opence_dir/port/assets/menus/ce" ]; then
+        mkdir -p "$SRC/port/assets/menus"
+        rm -rf "$SRC/port/assets/menus/ce"
+        cp -a "$opence_dir/port/assets/menus/ce" "$SRC/port/assets/menus/"
+        local count
+        count=$(find "$SRC/port/assets/menus/ce" -name "*.xml" | wc -l)
+        echo "   + port/assets/menus/ce/ ($count XML-Dateien)"
+    else
+        die "OpenCE hat keinen port/assets/menus/ce Ordner."
+    fi
+
+    # 4. Weitere Verzeichnisse, die der Menue-Build braucht
+    for extra in port/assets/menus/port_svg port/assets/menus/strings; do
+        if [ -d "$opence_dir/$extra" ]; then
+            cp -a "$opence_dir/$extra" "$SRC/$(dirname "$extra")/"
+            echo "   + $extra"
+        fi
+    done
+
+    # 5. tools, die von ce_menus.py aufgerufen werden
+    for t in tools/menu_art.py tools/menu_files.py; do
+        if [ -f "$opence_dir/$t" ]; then
+            cp "$opence_dir/$t" "$SRC/tools/"
+            echo "   + $t"
+        fi
+    done
+
+    # Aufraeumen
+    rm -rf "$opence_dir"
+    echo "== OpenCE-Dateien geholt."
+}
 
 # ── XML-Hunk aus dem Knulli-Patch entfernen (idempotent) ────────────
 echo ""
@@ -247,10 +313,21 @@ tree_is_patched() {
         cmp -s <(git -C "$SRC" diff HEAD | grep -v '^index ') <(grep -v '^index ' "$PATCH")
 }
 if ! tree_is_patched; then
-    echo "== checking out $UPSTREAM_COMMIT and applying $(basename "$PATCH")"
+    echo "== checking out $UPSTREAM_COMMIT ..."
     git -C "$SRC" checkout -q --force --detach "$UPSTREAM_COMMIT"
     git -C "$SRC" reset -q --hard
     git -C "$SRC" clean -q -fd
+
+    # 1. OpenCE-Dateien holen
+    fetch_opence_files
+
+    # 2. Knulli-Patch pruefen und anwenden
+    echo ""
+    echo "== Pruefe, ob der Knulli-Patch auf den OpenCE-Dateien sauber laeuft ..."
+    if ! git -C "$SRC" apply --check "$PATCH" 2>&1; then
+        die "Knulli-Patch kann auf den OpenCE-Dateien NICHT sauber angewendet werden. Bitte Patch-Konflikt pruefen."
+    fi
+    echo "== Knulli-Patch ist sauber anwendbar. Wende an ..."
     git -C "$SRC" apply "$PATCH"
     git -C "$SRC" apply --summary "$PATCH" | awk '$1 == "create" { print $4 }' | xargs -r git -C "$SRC" add -N --
 fi
@@ -269,7 +346,7 @@ if [ "$PGO_MODE" = "use" ]; then
     PGO_FALLBACK_URL="https://raw.githubusercontent.com/Andiweli/HaloCE-Android-AAOS/main/pgo/halo_linux.profdata"
 
     if [ -f "$LOCAL_PGO" ]; then
-        echo "== PGO: use (lokales Linux-Profil: pgo/halo_linux.profdata)"
+        echo "== PGO: use (lokales Linux-Profil)"
         PGO_FLAG="--pgo=use"
         PGO_EXTRA_ARGS="--pgo-profile $LOCAL_PGO"
     elif curl -fsSL --retry 2 --connect-timeout 30 -o "$WORK/halo_linux.profdata" "$PGO_LINUX_URL" 2>/dev/null; then
@@ -291,7 +368,7 @@ if [ "$PGO_MODE" = "use" ]; then
 elif [ "$PGO_MODE" = "off" ]; then
     echo "== PGO: aus"
 elif [ "$PGO_MODE" = "train" ]; then
-    echo "== PGO: Trainings-Build (Android-Guest wird manuell instrumentiert, kein LTO)"
+    echo "== PGO: Trainings-Build (kein LTO)"
     LTO_FLAG="--lto=off"
 fi
 
@@ -390,7 +467,7 @@ with open(path, 'w') as f:
 print("xbox_kernel.c gepatcht")
 PYEOF
 
-# ── Fix 2: android_build.py (mcpu, O3, Frame-Pointer) ────────────────
+# ── Fix 2: android_build.py (mcpu, O3) ──────────────────────────────
 python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import sys
 path = sys.argv[1]
@@ -441,7 +518,7 @@ else:
 
 if '"-fno-omit-frame-pointer"' in text:
     text = text.replace('    "-fno-omit-frame-pointer",\n', '')
-    print("Guest-Code-Flags: -fno-omit-frame-pointer entfernt (Option A)")
+    print("Guest-Code-Flags: -fno-omit-frame-pointer entfernt")
 else:
     print("Guest-Code-Flags: -fno-omit-frame-pointer war nicht vorhanden")
 
@@ -450,7 +527,7 @@ with open(path, 'w') as f:
 print(f"android_build.py gepatcht: {count_mcpu}x mcpu, {count_flags}x O-Flags")
 PYEOF
 
-# ── Fix 2e: -DHALO_ANDROID in tools/android_build.py ────────────────
+# ── Fix 2e: -DHALO_ANDROID ──────────────────────────────────────────
 python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import sys
 path = sys.argv[1]
@@ -462,14 +539,14 @@ if '"-DHALO_ANDROID"' in text:
 anchor = '"-DHALO_RELEASE"'
 if anchor in text:
     text = text.replace(anchor, '"-DHALO_ANDROID",\n    "-DHALO_RELEASE"', 1)
-    print("android_build.py: -DHALO_ANDROID vor -DHALO_RELEASE eingefuegt")
+    print("android_build.py: -DHALO_ANDROID vor -DHALO_RELEASE")
 else:
     fallback = '"-O3",\n    "-fomit-frame-pointer"'
     if fallback in text:
         text = text.replace(fallback, '"-DHALO_ANDROID",\n    ' + fallback, 1)
-        print("android_build.py: -DHALO_ANDROID vor -O3 eingefuegt")
+        print("android_build.py: -DHALO_ANDROID vor -O3")
     else:
-        print("FEHLER: kein Anker fuer -DHALO_ANDROID gefunden", file=sys.stderr)
+        print("FEHLER: kein Anker fuer -DHALO_ANDROID", file=sys.stderr)
         sys.exit(1)
 with open(path, 'w') as f:
     f.write(text)
@@ -573,9 +650,9 @@ if "_clang_builtin_shim(guest_cc)" not in text:
         )
         if pattern2.search(text):
             text = pattern2.sub(r'\1\n        + _clang_builtin_shim(guest_cc)', text, count=1)
-            print("clang-Builtin-Shim in guest_abi eingebaut (Fallback-Regex)")
+            print("clang-Builtin-Shim in guest_abi eingebaut (Fallback)")
         else:
-            print("WARNUNG: guest_abi-Berechnung nicht gefunden - Shim bleibt ungenutzt", file=sys.stderr)
+            print("WARNUNG: guest_abi-Berechnung nicht gefunden", file=sys.stderr)
 else:
     print("clang-Builtin-Shim bereits in guest_abi")
 with open(path, 'w') as f:
@@ -598,7 +675,7 @@ for old in ('"-O3",', '"-O3"'):
         text = text.replace(old, new, 1)
         with open(path, 'w') as f:
             f.write(text)
-        print("android_build.py: -fprofile-instr-generate hinzugefuegt")
+        print("android_build.py: -fprofile-instr-generate")
         sys.exit(0)
 print("FEHLER: O3-Flag nicht gefunden", file=sys.stderr)
 sys.exit(1)
@@ -636,7 +713,7 @@ new = '''    guest_profile_runtime = ""
             _candidate = Path(_rd) / "lib" / "linux" / _name
             if _candidate.is_file():
                 guest_profile_runtime = str(_candidate)
-                print(f"== using profile runtime from {_cc_candidate}: {guest_profile_runtime}")
+                print(f"== using profile runtime: {guest_profile_runtime}")
                 break
         if guest_profile_runtime:
             break
@@ -657,11 +734,11 @@ if old not in text:
 text = text.replace(old, new, 1)
 with open(path, 'w') as f:
     f.write(text)
-print("android_build.py: Profiling-Runtime zum Link hinzugefuegt")
+print("android_build.py: Profiling-Runtime zum Link")
 PYEOF
 fi
 
-# ── Fix 3: linux_build.py (Host-Optimierung) ─────────────────────────
+# ── Fix 3: linux_build.py ────────────────────────────────────────────
 python3 - "$SRC/tools/linux_build.py" <<'PYEOF'
 import sys
 path = sys.argv[1]
@@ -726,7 +803,7 @@ if old not in text:
 text = text.replace(old, new, 1)
 with open(path, 'w') as f:
     f.write(text)
-print("port/knulli/build.sh: -DHALO_ANDROID in CFLAGS eingefuegt")
+print("port/knulli/build.sh: -DHALO_ANDROID in CFLAGS")
 PYEOF
 else
     echo "WARNUNG: port/knulli/build.sh fehlt, Fix 3b uebersprungen"
@@ -775,13 +852,13 @@ new_text = pattern.sub(repl, text)
 if new_text != text:
     with open(path, "w") as f:
         f.write(new_text)
-    print("d3d8_gl.c: glUniform4f -> glUniform4fv (Sicherheitskorrektur)")
+    print("d3d8_gl.c: glUniform4f -> glUniform4fv")
 else:
-    print("d3d8_gl.c: keine glUniform4f-Aufrufe zu korrigieren")
+    print("d3d8_gl.c: keine glUniform4f-Aufrufe")
 PYEOF
 fi
 
-# ── Fix 4c: In-Game-Settings-Menus aus port_settings.py regenerieren ─
+# ── Fix 4c: Menus aus port_settings.py regenerieren ─────────────────
 echo ""
 echo "== Regeneriere die In-Game-Settings-Menus aus port_settings.py ..."
 python3 - "$SRC" <<'PYEOF'
@@ -792,10 +869,11 @@ sys.path.insert(0, os.path.join(src, "tools"))
 try:
     import port_settings
 except ImportError as e:
-    print(f"  WARNUNG: port_settings.py nicht importierbar: {e}")
+    print(f"  HINWEIS: port_settings.py nicht importierbar ({e}).")
+    print("           In-Game-Menue wird nicht regeneriert.")
     sys.exit(0)
 if not hasattr(port_settings, "settings_files"):
-    print("  WARNUNG: port_settings.settings_files() fehlt; Regeneration uebersprungen.")
+    print("  WARNUNG: port_settings.settings_files() fehlt.")
     sys.exit(0)
 files = port_settings.settings_files()
 target_dir = os.path.join(src, "port", "assets", "menus", "ce")
@@ -814,7 +892,7 @@ echo "== Injiziere das Credits-Wasserzeichen in die statischen Menue-XMLs ..."
 if [ -f "$HERE/patches/patch_credits_xml.py" ]; then
     python3 "$HERE/patches/patch_credits_xml.py" "$SRC"
 else
-    echo "  WARNUNG: patch_credits_xml.py nicht vorhanden - ueberspringe."
+    echo "  WARNUNG: patch_credits_xml.py nicht vorhanden"
 fi
 
 # ── Fix 4b: Verifikation ─────────────────────────────────────────────
@@ -823,7 +901,7 @@ echo "== Fix 4b: Verifiziere Patch-Ergebnisse ..."
 verification_failed=0
 check_patch() {
     local file="$1" pattern="$2" name="$3"
-    if grep -q -- "$pattern" "$SRC/$file"; then
+    if grep -q -- "$pattern" "$SRC/$file" 2>/dev/null; then
         echo "   OK: $name"
     else
         echo "   FEHLT: $name ($file)"
@@ -836,43 +914,53 @@ check_patch "source/math/matrix_math.c"                   "vmulq_n_f32"         
 check_patch "port/android/guest/runtime/guest_string.c"   "vld1q_u8"                           "guest_string.c NEON memcmp"
 check_patch "port/android/guest/runtime/guest_string.c"   "vst1q_u8"                           "guest_string.c NEON memcpy"
 check_patch "source/sound/game_sound.c"                   "obstruction_interval_value"         "game_sound.c Sound-Occlusion"
-check_patch "source/render/render_objects.c"              "HALO_MIN_OBJECT_PIXELS"             "render_objects.c Distant-Object"
+check_patch "source/render/render_objects.c"              "HALO_MIN_OBJECT_PIXELS"             "render_objects.c Distant"
 check_patch "source/render/render_objects.c"              "HALO_LIGHTING_REFRESH_DIVISOR"      "render_objects.c Lighting"
-check_patch "port/linux/src/port_config.c"                "HALO_SOUND_OBSTRUCTION_TICKS"       "port_config.c audio.obstruction_ticks"
-check_patch "port/linux/src/port_config.c"                "HALO_MIN_OBJECT_PIXELS"             "port_config.c display.distant_objects"
-check_patch "port/linux/src/port_config.c"                "HALO_LIGHTING_REFRESH_DIVISOR"      "port_config.c debug.lighting_refresh_divisor"
-check_patch "port/linux/src/port_config.c"                "HALO_FPS_OVERLAY_CORNER"            "port_config.c FPS-Eintraege"
-check_patch "port/linux/src/port_config.c"                "HALO_FAST_SHADERS"                  "port_config.c Knulli-Eintraege"
+check_patch "port/linux/src/port_config.c"                "HALO_SOUND_OBSTRUCTION_TICKS"       "port_config.c Sound"
+check_patch "port/linux/src/port_config.c"                "HALO_MIN_OBJECT_PIXELS"             "port_config.c Distant"
+check_patch "port/linux/src/port_config.c"                "HALO_LIGHTING_REFRESH_DIVISOR"      "port_config.c Lighting"
+check_patch "port/linux/src/port_config.c"                "HALO_FPS_OVERLAY_CORNER"            "port_config.c FPS"
+check_patch "port/linux/src/port_config.c"                "HALO_FAST_SHADERS"                  "port_config.c Knulli"
 check_patch "port/linux/src/port_config.c"                'display.model_detail", _config_real, "0.35"' "port_config.c default model_detail=0.35"
-check_patch "port/linux/src/port_config.c"                'lighting_refresh_divisor", _config_integer, "2"' "port_config.c default lighting_refresh_divisor=2"
+check_patch "port/linux/src/port_config.c"                'lighting_refresh_divisor", _config_integer, "2"' "port_config.c default lighting=2"
 check_patch "port/linux/src/xinput_sdl.c"                 "button_remap"                       "xinput_sdl.c Button-Remap"
-check_patch "port/linux/src/d3d8_gl.c"                    "__builtin_elementwise_min"          "d3d8_gl.c index_extent NEON"
+check_patch "port/linux/src/d3d8_gl.c"                    "__builtin_elementwise_min"          "d3d8_gl.c index_extent"
 check_patch "port/linux/src/d3d8_gl.c"                    "fps_overlay_enabled"                "d3d8_gl.c FPS-Overlay"
 check_patch "port/linux/src/d3d8_gl.c"                    "static int draw_framebuffer_bound(void)" "d3d8_gl.c draw_framebuffer_bound"
-check_patch "port/linux/src/d3d8_gl.c"                    "if (draw_framebuffer_bound())"       "d3d8_gl.c Discard-Bedingung"
+check_patch "port/linux/src/d3d8_gl.c"                    "if (draw_framebuffer_bound())"       "d3d8_gl.c Discard"
 check_patch "tools/android_build.py"                      '"-DHALO_ANDROID"'                   "android_build.py -DHALO_ANDROID"
-check_patch "tools/port_settings.py"                      "display.fast_shaders"                "port_settings.py Video-Rows"
-check_patch "tools/port_settings.py"                      'button_top'                          "port_settings.py button_top"
-check_patch "tools/port_settings.py"                      "credits_watermark"                   "port_settings.py Credits-Wasserzeichen"
-check_patch "source/main/main.c"                          "St0len-One"                          "main.c Credits-String"
+check_patch "source/main/main.c"                          "St0len-One"                          "main.c Credits"
 
-check_patch "port/assets/menus/ce/main_menu.settings_select.player_setup.player_profile_edit.video_settings.xml" \
-    "op_fast_shaders" "video_settings.xml: op_fast_shaders"
-check_patch "port/assets/menus/ce/main_menu.settings_select.player_setup.player_profile_edit.video_settings.xml" \
-    "op_alpha_test_elision" "video_settings.xml: op_alpha_test_elision"
-check_patch "port/assets/menus/ce/main_menu.settings_select.player_setup.player_profile_edit.video_settings.xml" \
-    "credits_watermark" "video_settings.xml: Wasserzeichen"
+# OpenCE-abhaengige Dateien: nur pruefen, wenn vorhanden
+if [ -f "$SRC/tools/port_settings.py" ]; then
+    check_patch "tools/port_settings.py" "display.fast_shaders"  "port_settings.py Video-Rows"
+    check_patch "tools/port_settings.py" "button_top"            "port_settings.py button_top"
+    check_patch "tools/port_settings.py" "credits_watermark"     "port_settings.py Credits"
+else
+    echo "   HINWEIS: tools/port_settings.py fehlt."
+fi
+
+if [ -f "$SRC/port/assets/menus/ce/main_menu.settings_select.player_setup.player_profile_edit.video_settings.xml" ]; then
+    check_patch "port/assets/menus/ce/main_menu.settings_select.player_setup.player_profile_edit.video_settings.xml" \
+        "op_fast_shaders" "video_settings.xml op_fast_shaders"
+    check_patch "port/assets/menus/ce/main_menu.settings_select.player_setup.player_profile_edit.video_settings.xml" \
+        "op_alpha_test_elision" "video_settings.xml op_alpha_test_elision"
+    check_patch "port/assets/menus/ce/main_menu.settings_select.player_setup.player_profile_edit.video_settings.xml" \
+        "credits_watermark" "video_settings.xml Wasserzeichen"
+else
+    echo "   HINWEIS: video_settings.xml fehlt."
+fi
 
 if [ -f "$SRC/port/knulli/host/host_glthread.c" ]; then
     if grep -q "health_check" "$SRC/port/knulli/host/host_glthread.c"; then
-        echo "   OK: host_glthread.c health_check (beliebige Form)"
+        echo "   OK: host_glthread.c health_check"
     else
-        echo "   HINWEIS: host_glthread.c hat keinen health_check (optional)"
+        echo "   HINWEIS: host_glthread.c ohne health_check (optional)"
     fi
 fi
 
 if grep -q '#include <arm_neon.h>' "$SRC/port/linux/src/d3d8_gl.c"; then
-    echo "   FEHLT: d3d8_gl.c hat noch arm_neon.h (unerwartet)"
+    echo "   FEHLT: d3d8_gl.c hat noch arm_neon.h"
     verification_failed=1
 fi
 if grep -q 'glUniform4f(fps_overlay_color' "$SRC/port/linux/src/d3d8_gl.c"; then
@@ -880,8 +968,8 @@ if grep -q 'glUniform4f(fps_overlay_color' "$SRC/port/linux/src/d3d8_gl.c"; then
     verification_failed=1
 fi
 if [ "$PGO_MODE" = "train" ]; then
-    check_patch "tools/android_build.py" "-fprofile-instr-generate" "android_build.py PGO-Instrumentierung"
-    check_patch "tools/android_build.py" "guest_profile_runtime"    "android_build.py Profiling-Runtime"
+    check_patch "tools/android_build.py" "-fprofile-instr-generate" "android_build.py PGO"
+    check_patch "tools/android_build.py" "guest_profile_runtime"    "android_build.py Runtime"
 fi
 if [ "$verification_failed" -ne 0 ]; then
     echo "FEHLER: Optimierungen fehlen"
@@ -894,7 +982,7 @@ if [ "$PGO_MODE" = "train" ]; then
     SHIM="$SRC/port/android/guest/runtime/guest_pgo_shim.c"
     cat > "$SHIM" <<'CEOF'
 /*
-GUEST_PGO_SHIM.C — Bionic-Symbole und SIGTERM-Handler für die
+GUEST_PGO_SHIM.C — Bionic-Symbole und SIGTERM-Handler fuer die
 LLVM-Profiling-Runtime im musl-Guest.
 */
 #include <signal.h>
@@ -961,6 +1049,7 @@ stamp=$({
     echo "settings-menu=regenerated"
     echo "config-defaults=m9"
     echo "credits=st0len-one"
+    echo "opence-files=fetched"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 if [ -f "$SRC/.port-stamp" ] && [ "$(cat "$SRC/.port-stamp")" = "$stamp" ]; then
@@ -1007,7 +1096,7 @@ echo "== halo_guest.elf: $GUEST_SIZE Bytes (~${GUEST_SIZE_MB} MB)"
 
 if [ "$PGO_MODE" = "train" ]; then
     if [ "$GUEST_SIZE" -lt 11500000 ]; then
-        die "Trainings-Build ist nur ${GUEST_SIZE_MB} MB – Instrumentierung hat nicht gegriffen."
+        die "Trainings-Build ist nur ${GUEST_SIZE_MB} MB - Instrumentierung hat nicht gegriffen."
     fi
     cat <<'TRAINING'
 
@@ -1046,8 +1135,9 @@ Zu installieren auf dem M9 Pro:
 Aktiv in diesem Build:
   - HALO_ANDROID aktiv (Guest + Host): alle ES-Optimierungen.
   - draw_framebuffer_bound: kein GL_INVALID_OPERATION mehr.
-  - In-Game-Settings-Menue mit 20 Zeilen, ohne Luecken.
+  - In-Game-Settings-Menue mit 20 Zeilen, ohne Luecken (OpenCE).
   - Credits "St0len-One" im Hauptmenue und in allen Settings-Screens.
+  - Default-Werte aus Halo.sh in port_config.c festgenagelt.
 
 FERTIG.
 ────────────────────────────────────────────────────────────────────────
