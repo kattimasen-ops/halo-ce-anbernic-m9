@@ -5,9 +5,15 @@ set -euo pipefail
 # Halo CE Universal — M9 Pro (RK3326 / Cortex-A35 + Mali-G31 MP2)
 # Build-Skript: Host (aarch64) + Guest (arm64_32 ILP32 AArch64)
 #
-# Neu: patch_settings_menu.py erweitert tools/port_settings.py um die
-# neuen Video-Settings-Zeilen; danach regeneriert build.sh die XML aus
-# port_settings.py, damit die Zeilen ohne Luecken erscheinen.
+# Enthaelt:
+#   - XML-Hunk-Entfernung aus dem Knulli-Patch
+#   - patch_settings_menu.py      (In-Game-Menue-Zeilen)
+#   - patch_config_defaults.py    (Defaults aus Halo.sh festnageln)
+#   - patch_credits.py            (Credits "St0len-One")
+#   - Regeneration der Settings-XMLs aus port_settings.py
+#   - patch_credits_xml.py        (Wasserzeichen in statische Menue-XMLs)
+#   - alle bestehenden Fixes (APC, -mcpu, -O3, Clang-Shim, -DHALO_ANDROID)
+#   - PGO (use/off/train) und LTO
 # ══════════════════════════════════════════════════════════════════════
 PGO_MODE=${PGO_MODE:-use}
 
@@ -700,7 +706,7 @@ cp -a "$HERE/port/knulli" "$SRC/port/knulli"
 rm -rf "$SRC/port/knulli/__pycache__"
 chmod +x "$SRC/port/knulli/build.sh" 2>/dev/null || true
 
-# ── Fix 3b: -DHALO_ANDROID in $SRC/port/knulli/build.sh ─────────────
+# ── Fix 3b: -DHALO_ANDROID in port/knulli/build.sh ──────────────────
 echo ""
 echo "== Fix 3b: -DHALO_ANDROID in port/knulli/build.sh ..."
 if [ -f "$SRC/port/knulli/build.sh" ]; then
@@ -726,14 +732,16 @@ else
     echo "WARNUNG: port/knulli/build.sh fehlt, Fix 3b uebersprungen"
 fi
 
-# ── Fix 4: Python-Patches (mit patch_settings_menu.py) ───────────────
+# ── Fix 4: Python-Patches ────────────────────────────────────────────
 echo ""
 echo "== Fix 4: Quellcode-Optimierungen ..."
 for patch_script in patch_memory_pools.py patch_neon_math.py \
                     patch_vita_optimizations.py patch_button_remap.py \
                     patch_index_extent_neon.py patch_fps_overlay.py \
                     patch_draw_framebuffer_bound.py \
-                    patch_settings_menu.py; do
+                    patch_settings_menu.py \
+                    patch_config_defaults.py \
+                    patch_credits.py; do
     if [ -f "$HERE/patches/$patch_script" ]; then
         echo "== Wende $patch_script an ..."
         if ! python3 "$HERE/patches/$patch_script" "$SRC"; then
@@ -774,31 +782,24 @@ PYEOF
 fi
 
 # ── Fix 4c: In-Game-Settings-Menus aus port_settings.py regenerieren ─
-# Läuft NACH allen Patches, damit die neuen Rows schon in port_settings.py
-# stehen.
 echo ""
 echo "== Regeneriere die In-Game-Settings-Menus aus port_settings.py ..."
 python3 - "$SRC" <<'PYEOF'
 import os
 import sys
-
 src = sys.argv[1]
 sys.path.insert(0, os.path.join(src, "tools"))
-
 try:
     import port_settings
 except ImportError as e:
     print(f"  WARNUNG: port_settings.py nicht importierbar: {e}")
     sys.exit(0)
-
 if not hasattr(port_settings, "settings_files"):
     print("  WARNUNG: port_settings.settings_files() fehlt; Regeneration uebersprungen.")
     sys.exit(0)
-
 files = port_settings.settings_files()
 target_dir = os.path.join(src, "port", "assets", "menus", "ce")
 os.makedirs(target_dir, exist_ok=True)
-
 for name, lines in files.items():
     path = os.path.join(target_dir, name)
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -806,6 +807,15 @@ for name, lines in files.items():
         f.write("\n".join(lines))
     print(f"  geschrieben: {name}")
 PYEOF
+
+# ── Fix 4d: Credits-Wasserzeichen in statische Menue-XMLs ───────────
+echo ""
+echo "== Injiziere das Credits-Wasserzeichen in die statischen Menue-XMLs ..."
+if [ -f "$HERE/patches/patch_credits_xml.py" ]; then
+    python3 "$HERE/patches/patch_credits_xml.py" "$SRC"
+else
+    echo "  WARNUNG: patch_credits_xml.py nicht vorhanden - ueberspringe."
+fi
 
 # ── Fix 4b: Verifikation ─────────────────────────────────────────────
 echo ""
@@ -833,6 +843,8 @@ check_patch "port/linux/src/port_config.c"                "HALO_MIN_OBJECT_PIXEL
 check_patch "port/linux/src/port_config.c"                "HALO_LIGHTING_REFRESH_DIVISOR"      "port_config.c debug.lighting_refresh_divisor"
 check_patch "port/linux/src/port_config.c"                "HALO_FPS_OVERLAY_CORNER"            "port_config.c FPS-Eintraege"
 check_patch "port/linux/src/port_config.c"                "HALO_FAST_SHADERS"                  "port_config.c Knulli-Eintraege"
+check_patch "port/linux/src/port_config.c"                'display.model_detail", _config_real, "0.35"' "port_config.c default model_detail=0.35"
+check_patch "port/linux/src/port_config.c"                'lighting_refresh_divisor", _config_integer, "2"' "port_config.c default lighting_refresh_divisor=2"
 check_patch "port/linux/src/xinput_sdl.c"                 "button_remap"                       "xinput_sdl.c Button-Remap"
 check_patch "port/linux/src/d3d8_gl.c"                    "__builtin_elementwise_min"          "d3d8_gl.c index_extent NEON"
 check_patch "port/linux/src/d3d8_gl.c"                    "fps_overlay_enabled"                "d3d8_gl.c FPS-Overlay"
@@ -841,14 +853,16 @@ check_patch "port/linux/src/d3d8_gl.c"                    "if (draw_framebuffer_
 check_patch "tools/android_build.py"                      '"-DHALO_ANDROID"'                   "android_build.py -DHALO_ANDROID"
 check_patch "tools/port_settings.py"                      "display.fast_shaders"                "port_settings.py Video-Rows"
 check_patch "tools/port_settings.py"                      'button_top'                          "port_settings.py button_top"
+check_patch "tools/port_settings.py"                      "credits_watermark"                   "port_settings.py Credits-Wasserzeichen"
+check_patch "source/main/main.c"                          "St0len-One"                          "main.c Credits-String"
 
-# Regeneriertes XML: die neuen Zeilen sind drin?
 check_patch "port/assets/menus/ce/main_menu.settings_select.player_setup.player_profile_edit.video_settings.xml" \
     "op_fast_shaders" "video_settings.xml: op_fast_shaders"
 check_patch "port/assets/menus/ce/main_menu.settings_select.player_setup.player_profile_edit.video_settings.xml" \
     "op_alpha_test_elision" "video_settings.xml: op_alpha_test_elision"
+check_patch "port/assets/menus/ce/main_menu.settings_select.player_setup.player_profile_edit.video_settings.xml" \
+    "credits_watermark" "video_settings.xml: Wasserzeichen"
 
-# host_glthread.c: jede Form von health_check ist OK (oder gar keins)
 if [ -f "$SRC/port/knulli/host/host_glthread.c" ]; then
     if grep -q "health_check" "$SRC/port/knulli/host/host_glthread.c"; then
         echo "   OK: host_glthread.c health_check (beliebige Form)"
@@ -925,7 +939,9 @@ stamp=$({
     for p in patch_memory_pools.py patch_neon_math.py \
              patch_vita_optimizations.py patch_button_remap.py \
              patch_index_extent_neon.py patch_fps_overlay.py \
-             patch_draw_framebuffer_bound.py patch_settings_menu.py; do
+             patch_draw_framebuffer_bound.py patch_settings_menu.py \
+             patch_config_defaults.py patch_credits.py \
+             patch_credits_xml.py; do
         cat "$HERE/patches/$p" 2>/dev/null || true
     done
     if [ -f "$HERE/pgo/halo_linux.profdata" ]; then
@@ -943,6 +959,8 @@ stamp=$({
     echo "glthread-health-check=tolerant"
     echo "xml-hunk-removed=1"
     echo "settings-menu=regenerated"
+    echo "config-defaults=m9"
+    echo "credits=st0len-one"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 if [ -f "$SRC/.port-stamp" ] && [ "$(cat "$SRC/.port-stamp")" = "$stamp" ]; then
@@ -1028,8 +1046,8 @@ Zu installieren auf dem M9 Pro:
 Aktiv in diesem Build:
   - HALO_ANDROID aktiv (Guest + Host): alle ES-Optimierungen.
   - draw_framebuffer_bound: kein GL_INVALID_OPERATION mehr.
-  - Das In-Game-Settings-Menue zeigt 20 Zeilen ohne Luecken, generiert
-    aus tools/port_settings.py (patch_settings_menu.py).
+  - In-Game-Settings-Menue mit 20 Zeilen, ohne Luecken.
+  - Credits "St0len-One" im Hauptmenue und in allen Settings-Screens.
 
 FERTIG.
 ────────────────────────────────────────────────────────────────────────
