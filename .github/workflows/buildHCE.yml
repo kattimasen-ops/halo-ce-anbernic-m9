@@ -22,21 +22,18 @@ jobs:
       PGO_MODE: use
 
     steps:
-      - name: Install ca-certificates over HTTP first
+      - name: Switch to a reliable mirror (Hetzner, HTTP)
         run: |
-          # WICHTIG: In diesem Schritt bleibt die sources.list auf HTTP,
-          # damit apt-get ca-certificates ohne Zertifikate installieren kann.
-          # Erst danach wird auf HTTPS umgestellt.
-          apt-get update -o Acquire::Retries=2
-          apt-get install -y --no-install-recommends ca-certificates
-          update-ca-certificates
-
-      - name: Configure apt for HTTPS and unreliable networks
-        run: |
-          # Jetzt, mit installierten CA-Zertifikaten, kann auf HTTPS
-          # umgestellt werden.
-          sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g' /etc/apt/sources.list
-          sed -i 's|http://security.ubuntu.com|https://security.ubuntu.com|g' /etc/apt/sources.list
+          # Die offiziellen Canonical-Server (archive.ubuntu.com,
+          # security.ubuntu.com) haben seit Tagen einen kaputten Knoten
+          # (185.125.190.83) und antworten oft mit 6 kB/s. Wir wechseln
+          # im ersten Schritt auf einen deutschen Mirror. Vorlaeufig
+          # HTTP, weil das Docker-Image noch keine CA-Zertifikate hat;
+          # apt verifiziert die Pakete ohnehin per GPG.
+          sed -i 's|http://archive.ubuntu.com|http://mirror.hetzner.com/ubuntu|g' /etc/apt/sources.list
+          sed -i 's|http://security.ubuntu.com|http://mirror.hetzner.com/ubuntu|g' /etc/apt/sources.list
+          # Aggressive Timeouts und wenige Retries, damit apt nicht ewig
+          # auf einen toten Knoten wartet.
           tee /etc/apt/apt.conf.d/99-ci-timeouts > /dev/null <<'EOF'
           Acquire::Retries "2";
           Acquire::http::Timeout "15";
@@ -44,6 +41,25 @@ jobs:
           Acquire::ftp::Timeout "15";
           Acquire::http::Pipeline-Depth "0";
           EOF
+
+      - name: Install ca-certificates
+        run: |
+          apt-get update -o Acquire::Retries=2
+          apt-get install -y --no-install-recommends ca-certificates
+          update-ca-certificates
+
+      - name: Switch mirror to HTTPS
+        run: |
+          # Mit installierten CA-Zertifikaten koennen wir HTTPS nutzen.
+          sed -i 's|http://mirror.hetzner.com|https://mirror.hetzner.com|g' /etc/apt/sources.list
+
+      - name: Cache apt packages
+        uses: actions/cache@v4
+        with:
+          path: /var/cache/apt/archives
+          key: apt-focal-${{ hashFiles('.github/workflows/buildHCE.yml') }}
+          restore-keys: |
+            apt-focal-
 
       - name: Install base tools in container
         run: |
@@ -60,9 +76,9 @@ jobs:
         run: |
           dpkg --add-architecture arm64
           printf '%s\n' \
-            'deb [arch=amd64] https://archive.ubuntu.com/ubuntu focal main restricted universe multiverse' \
-            'deb [arch=amd64] https://archive.ubuntu.com/ubuntu focal-updates main restricted universe multiverse' \
-            'deb [arch=amd64] https://security.ubuntu.com/ubuntu focal-security main restricted universe multiverse' \
+            'deb [arch=amd64] https://mirror.hetzner.com/ubuntu focal main restricted universe multiverse' \
+            'deb [arch=amd64] https://mirror.hetzner.com/ubuntu focal-updates main restricted universe multiverse' \
+            'deb [arch=amd64] https://mirror.hetzner.com/ubuntu focal-security main restricted universe multiverse' \
             'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal main restricted universe multiverse' \
             'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-updates main restricted universe multiverse' \
             'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-security main restricted universe multiverse' \
@@ -75,4 +91,4 @@ jobs:
             libegl1-mesa-dev:arm64 \
             libgles2-mesa-dev:arm64
 
-      # ... Der Rest deines Workflows bleibt unverändert ...
+      # ... Der Rest deines Workflows bleibt unverändert.
