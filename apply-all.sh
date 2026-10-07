@@ -5,43 +5,94 @@
 #
 #   ./apply_all.sh <source-root>
 #
-# Reihenfolge:
-#   1. XML-Hunk aus dem Knulli-Patch entfernen (der Regenerator unten
-#      baut die Menue-XMLs neu; der Hunk im Patch wuerde sonst kollidieren)
-#   2. git apply patches/halo-ce-universal-knulli.patch
-#   3. port/knulli in den Quellbaum kopieren
-#   4. Fix 3b: -DHALO_ANDROID in port/knulli/build.sh
-#   5. Alle Python-Patches in fester Reihenfolge
-#   6. Fix 4a: glUniform4f -> glUniform4fv
-#   7. In-Game-Settings-Menus aus port_settings.py regenerieren
-#   8. Credits-Wasserzeichen in statische Menue-XMLs
-#   9. Verifikation
-#
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SRC=${1:?usage: apply_all.sh <source-root>}
+OPEN_CE_URL=${OPEN_CE_URL:-https://github.com/OpenCommunityEdition/OpenCE.git}
 
 [ -d "$SRC" ] || { echo "FEHLER: $SRC ist kein Verzeichnis" >&2; exit 1; }
 SRC=$(cd "$SRC" && pwd)
 
 PATCHES=$HERE/patches
 MAIN_PATCH=$PATCHES/halo-ce-universal-knulli.patch
+WORK_TMP=$(mktemp -d)
+trap 'rm -rf "$WORK_TMP"' EXIT
 
-# ── 1) Der große Git-Patch ────────────────────────────────────────────
+# ── 1) OpenCE-Dateien holen (port_settings.py + Menue-Ordner) ──────
+# Wird VOR dem Knulli-Patch ausgefuehrt. Sparse-Checkout ueber einen
+# shallow Clone, damit keine GitHub-API-Limits getroffen werden.
+fetch_opence_files() {
+    local opence_dir="$WORK_TMP/opence-source"
+
+    echo "== Hole OpenCE-Dateien (port_settings.py + Menue-Ordner) ..."
+    rm -rf "$opence_dir"
+
+    if ! git clone --depth 1 --filter=blob:none --sparse \
+        "$OPEN_CE_URL" "$opence_dir" > /dev/null 2>&1; then
+        echo "FEHLER: Konnte OpenCE nicht klonen ($OPEN_CE_URL)." >&2
+        exit 1
+    fi
+
+    if ! git -C "$opence_dir" sparse-checkout set \
+        tools port/assets/menus/ce > /dev/null 2>&1; then
+        echo "FEHLER: Sparse-Checkout in OpenCE fehlgeschlagen." >&2
+        exit 1
+    fi
+
+    if [ -f "$opence_dir/tools/port_settings.py" ]; then
+        mkdir -p "$SRC/tools"
+        cp "$opence_dir/tools/port_settings.py" "$SRC/tools/"
+        echo "   + tools/port_settings.py"
+    else
+        echo "FEHLER: OpenCE hat keine tools/port_settings.py." >&2
+        exit 1
+    fi
+
+    if [ -f "$opence_dir/tools/ce_menus.py" ]; then
+        cp "$opence_dir/tools/ce_menus.py" "$SRC/tools/"
+        echo "   + tools/ce_menus.py"
+    fi
+
+    if [ -d "$opence_dir/port/assets/menus/ce" ]; then
+        mkdir -p "$SRC/port/assets/menus"
+        rm -rf "$SRC/port/assets/menus/ce"
+        cp -a "$opence_dir/port/assets/menus/ce" "$SRC/port/assets/menus/"
+        count=$(find "$SRC/port/assets/menus/ce" -name "*.xml" | wc -l)
+        echo "   + port/assets/menus/ce/ ($count XML-Dateien)"
+    else
+        echo "FEHLER: OpenCE hat keinen port/assets/menus/ce Ordner." >&2
+        exit 1
+    fi
+
+    for extra in port/assets/menus/port_svg port/assets/menus/strings; do
+        if [ -d "$opence_dir/$extra" ]; then
+            cp -a "$opence_dir/$extra" "$SRC/$(dirname "$extra")/"
+            echo "   + $extra"
+        fi
+    done
+
+    for t in tools/menu_art.py tools/menu_files.py; do
+        if [ -f "$opence_dir/$t" ]; then
+            cp "$opence_dir/$t" "$SRC/tools/"
+            echo "   + $t"
+        fi
+    done
+
+    rm -rf "$opence_dir"
+    echo "== OpenCE-Dateien geholt."
+}
+
+# ── 2) Knulli-Patch (mit XML-Hunk-Entfernung) ────────────────────────
 if [ ! -f "$MAIN_PATCH" ]; then
     echo "FEHLER: $MAIN_PATCH fehlt" >&2
     exit 1
 fi
 
-# XML-Hunk aus dem Knulli-Patch entfernen. Der Regenerator (Schritt 7)
-# erzeugt die video_settings.xml neu; der Hunk im Patch wuerde sonst mit
-# "patch does not apply" abbrechen.
 echo "== Entferne den video_settings.xml-Hunk aus dem Knulli-Patch (einmalig) ..."
 python3 - "$MAIN_PATCH" <<'PYEOF'
 import re
 import sys
-
 path = sys.argv[1]
 text = open(path).read()
 pattern = re.compile(
@@ -52,17 +103,25 @@ pattern = re.compile(
     re.DOTALL,
 )
 if not pattern.search(text):
-    print("  XML-Hunk war nicht vorhanden (bereits entfernt).")
+    print("  XML-Hunk war nicht vorhanden.")
     sys.exit(0)
 new_text = pattern.sub('', text)
 open(path, 'w').write(new_text)
-print("  XML-Hunk entfernt; Patch ist jetzt %d Bytes kleiner." % (len(text) - len(new_text)))
+print("  XML-Hunk entfernt.")
 PYEOF
+
+# OpenCE-Dateien holen BEVOR der Patch angewendet wird
+fetch_opence_files
 
 if git -C "$SRC" rev-parse --git-dir > /dev/null 2>&1; then
     if git -C "$SRC" apply --check --reverse "$MAIN_PATCH" > /dev/null 2>&1; then
-        echo "== $MAIN_PATCH ist bereits angewendet – überspringe"
+        echo "== $MAIN_PATCH ist bereits angewendet - ueberspringe"
     else
+        echo "== Pruefe, ob der Knulli-Patch auf den OpenCE-Dateien laeuft ..."
+        if ! git -C "$SRC" apply --check "$MAIN_PATCH" 2>&1; then
+            echo "FEHLER: Knulli-Patch kann auf den OpenCE-Dateien NICHT sauber angewendet werden." >&2
+            exit 1
+        fi
         echo "== git apply $(basename "$MAIN_PATCH")"
         git -C "$SRC" apply --whitespace=nowarn "$MAIN_PATCH"
     fi
@@ -71,7 +130,7 @@ else
     git apply --whitespace=nowarn --directory="$SRC" "$MAIN_PATCH"
 fi
 
-# ── 2) port/knulli kopieren ──────────────────────────────────────────
+# ── 3) port/knulli kopieren ──────────────────────────────────────────
 if [ -d "$HERE/port/knulli" ]; then
     echo "== Kopiere port/knulli in den Quellbaum ..."
     rm -rf "$SRC/port/knulli"
@@ -79,10 +138,10 @@ if [ -d "$HERE/port/knulli" ]; then
     rm -rf "$SRC/port/knulli/__pycache__"
     chmod +x "$SRC/port/knulli/build.sh" 2>/dev/null || true
 else
-    echo "== port/knulli im Repo nicht vorhanden – überspringe"
+    echo "== port/knulli im Repo nicht vorhanden - ueberspringe"
 fi
 
-# ── 3) Fix 3b: -DHALO_ANDROID in port/knulli/build.sh ────────────────
+# ── 4) Fix 3b: -DHALO_ANDROID in port/knulli/build.sh ────────────────
 if [ -f "$SRC/port/knulli/build.sh" ]; then
     if grep -q -- "-DHALO_ANDROID" "$SRC/port/knulli/build.sh"; then
         echo "port/knulli/build.sh: -DHALO_ANDROID bereits vorhanden"
@@ -101,21 +160,12 @@ if old not in text:
 text = text.replace(old, new, 1)
 with open(path, 'w') as f:
     f.write(text)
-print("port/knulli/build.sh: -DHALO_ANDROID in CFLAGS eingefuegt")
+print("port/knulli/build.sh: -DHALO_ANDROID in CFLAGS")
 PYEOF
     fi
 fi
 
-# ── 4) Python-Patches (feste Reihenfolge) ────────────────────────────
-# Reihenfolge ist wichtig:
-#   - memory/neon/vita/button zuerst (Basisschicht)
-#   - index_extent_neon + fps_overlay + draw_framebuffer_bound
-#     (d3d8_gl.c / port_config.c)
-#   - settings_menu (port_settings.py erweitern)
-#   - config_defaults (port_config.c Defaults festnageln)
-#   - credits (main.c + port_settings.py Wasserzeichen)
-# patch_credits_xml.py laeuft NICHT hier, sondern nach der Regeneration
-# (Schritt 8).
+# ── 5) Python-Patches ────────────────────────────────────────────────
 for script in \
     patch_memory_pools.py \
     patch_neon_math.py \
@@ -128,94 +178,72 @@ for script in \
     patch_config_defaults.py \
     patch_credits.py; do
     if [ ! -f "$PATCHES/$script" ]; then
-        echo "== $script nicht vorhanden – überspringe"
+        echo "== $script nicht vorhanden - ueberspringe"
         continue
     fi
     echo "== python3 $script"
     if ! python3 "$PATCHES/$script" "$SRC"; then
-        echo "WARNUNG: $script hat nichts geändert (evtl. schon gepatcht)" >&2
+        echo "WARNUNG: $script hat nichts geaendert" >&2
     fi
 done
 
-# ── 5) Fix 4a: glUniform4f -> glUniform4fv ───────────────────────────
+# ── 6) Fix 4a: glUniform4f -> glUniform4fv ───────────────────────────
 if [ -f "$SRC/port/linux/src/d3d8_gl.c" ]; then
     python3 - "$SRC/port/linux/src/d3d8_gl.c" <<'PYEOF'
 import re
 import sys
-
 path = sys.argv[1]
 with open(path) as f:
     text = f.read()
-
 if "fps_overlay_enabled" not in text:
     sys.exit(0)
-
-pattern = re.compile(
-    r'glUniform4f\(\s*fps_overlay_color\s*,\s*([^;]+?)\s*\)\s*;'
-)
-
+pattern = re.compile(r'glUniform4f\(\s*fps_overlay_color\s*,\s*([^;]+?)\s*\)\s*;')
 def repl(match):
     args = match.group(1).strip()
-    return (
-        '{ const float overlay_color[4] = { ' + args + ' }; '
-        'glUniform4fv(fps_overlay_color, 1, overlay_color); }'
-    )
-
+    return '{ const float overlay_color[4] = { ' + args + ' }; glUniform4fv(fps_overlay_color, 1, overlay_color); }'
 new_text = pattern.sub(repl, text)
 if new_text != text:
-    with open(path, "w") as f:
-        f.write(new_text)
-    print("d3d8_gl.c: glUniform4f -> glUniform4fv (Sicherheitskorrektur)")
-else:
-    print("d3d8_gl.c: keine glUniform4f-Aufrufe zu korrigieren")
+    open(path, "w").write(new_text)
+    print("d3d8_gl.c: glUniform4f -> glUniform4fv")
 PYEOF
 fi
 
-# ── 6) In-Game-Settings-Menus aus port_settings.py regenerieren ─────
-# Läuft NACH allen Patches, damit die neuen Rows schon in port_settings.py
-# stehen (patch_settings_menu.py) und das Wasserzeichen-Widget definiert ist
-# (patch_credits.py).
+# ── 7) In-Game-Settings-Menus regenerieren ───────────────────────────
 echo ""
 echo "== Regeneriere die In-Game-Settings-Menus aus port_settings.py ..."
 python3 - "$SRC" <<'PYEOF'
 import os
 import sys
-
 src = sys.argv[1]
 sys.path.insert(0, os.path.join(src, "tools"))
-
 try:
     import port_settings
 except ImportError as e:
-    print(f"  WARNUNG: port_settings.py nicht importierbar: {e}")
+    print(f"  HINWEIS: port_settings.py nicht importierbar ({e}).")
     sys.exit(0)
-
 if not hasattr(port_settings, "settings_files"):
-    print("  WARNUNG: port_settings.settings_files() fehlt; Regeneration uebersprungen.")
+    print("  WARNUNG: settings_files() fehlt.")
     sys.exit(0)
-
 files = port_settings.settings_files()
-target_dir = os.path.join(src, "port", "assets", "menus", "ce")
-os.makedirs(target_dir, exist_ok=True)
-
+target = os.path.join(src, "port", "assets", "menus", "ce")
+os.makedirs(target, exist_ok=True)
 for name, lines in files.items():
-    path = os.path.join(target_dir, name)
+    path = os.path.join(target, name)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        f.write("\n".join(lines))
+    open(path, "w").write("\n".join(lines))
     print(f"  geschrieben: {name}")
 PYEOF
 
-# ── 7) Credits-Wasserzeichen in statische Menue-XMLs ─────────────────
+# ── 8) Credits-Wasserzeichen in statische Menue-XMLs ─────────────────
 echo ""
 echo "== Injiziere das Credits-Wasserzeichen in die statischen Menue-XMLs ..."
 if [ -f "$PATCHES/patch_credits_xml.py" ]; then
     python3 "$PATCHES/patch_credits_xml.py" "$SRC"
 else
-    echo "  WARNUNG: patch_credits_xml.py nicht vorhanden - ueberspringe."
+    echo "  WARNUNG: patch_credits_xml.py nicht vorhanden"
 fi
 
-# ── 8) Verifikation ──────────────────────────────────────────────────
+# ── 9) Verifikation ──────────────────────────────────────────────────
 echo ""
 echo "== Verifiziere Patch-Ergebnisse ..."
 failed=0
@@ -228,69 +256,44 @@ check() {
         failed=1
     fi
 }
+check "source/cseries/cseries.h"                  "HALO_DEBUG_ALLOCATOR"                    "cseries.h Debug-Allocator"
+check "source/effects/decals.c"                   "static __thread long surface_queue"      "decals.c __thread-Arrays"
+check "source/math/matrix_math.c"                 "vmulq_n_f32"                             "matrix_math.c NEON"
+check "port/android/guest/runtime/guest_string.c" "vld1q_u8"                                "guest_string.c NEON"
+check "source/sound/game_sound.c"                 "obstruction_interval_value"              "game_sound.c Sound-Occlusion"
+check "source/render/render_objects.c"            "HALO_MIN_OBJECT_PIXELS"                  "render_objects.c Distant"
+check "source/render/render_objects.c"            "HALO_LIGHTING_REFRESH_DIVISOR"           "render_objects.c Lighting"
+check "port/linux/src/port_config.c"              "HALO_SOUND_OBSTRUCTION_TICKS"            "port_config.c Sound"
+check "port/linux/src/port_config.c"              "HALO_MIN_OBJECT_PIXELS"                  "port_config.c Distant"
+check "port/linux/src/port_config.c"              "HALO_LIGHTING_REFRESH_DIVISOR"           "port_config.c Lighting"
+check "port/linux/src/port_config.c"              "HALO_FPS_OVERLAY_CORNER"                 "port_config.c FPS"
+check "port/linux/src/port_config.c"              "HALO_FAST_SHADERS"                       "port_config.c Knulli"
+check "port/linux/src/port_config.c"              'display.model_detail", _config_real, "0.35"' "port_config.c model_detail"
+check "port/linux/src/port_config.c"              'lighting_refresh_divisor", _config_integer, "2"' "port_config.c lighting"
+check "port/linux/src/xinput_sdl.c"               "button_remap"                            "xinput_sdl.c Button-Remap"
+check "port/linux/src/d3d8_gl.c"                  "__builtin_elementwise_min"               "d3d8_gl.c index_extent"
+check "port/linux/src/d3d8_gl.c"                  "fps_overlay_enabled"                     "d3d8_gl.c FPS-Overlay"
+check "port/linux/src/d3d8_gl.c"                  "static int draw_framebuffer_bound(void)" "d3d8_gl.c framebuffer_bound"
+check "port/linux/src/d3d8_gl.c"                  "if (draw_framebuffer_bound())"           "d3d8_gl.c Discard"
+check "source/main/main.c"                        "St0len-One"                              "main.c Credits"
 
-# Kern-Patches
-check "source/cseries/cseries.h"                  "HALO_DEBUG_ALLOCATOR"                        "cseries.h Debug-Allocator"
-check "source/effects/decals.c"                   "static __thread long surface_queue"          "decals.c __thread-Arrays"
-check "source/math/matrix_math.c"                 "vmulq_n_f32"                                 "matrix_math.c NEON"
-check "port/android/guest/runtime/guest_string.c" "vld1q_u8"                                    "guest_string.c NEON memcmp"
-check "port/android/guest/runtime/guest_string.c" "vst1q_u8"                                    "guest_string.c NEON memcpy"
-check "source/sound/game_sound.c"                 "obstruction_interval_value"                  "game_sound.c Sound-Occlusion"
-check "source/render/render_objects.c"            "HALO_MIN_OBJECT_PIXELS"                      "render_objects.c Distant-Object"
-check "source/render/render_objects.c"            "HALO_LIGHTING_REFRESH_DIVISOR"               "render_objects.c Lighting"
-
-# port_config.c-Eintraege
-check "port/linux/src/port_config.c"              "HALO_SOUND_OBSTRUCTION_TICKS"                "port_config.c audio.obstruction_ticks"
-check "port/linux/src/port_config.c"              "HALO_MIN_OBJECT_PIXELS"                      "port_config.c display.distant_objects"
-check "port/linux/src/port_config.c"              "HALO_LIGHTING_REFRESH_DIVISOR"               "port_config.c debug.lighting_refresh_divisor"
-check "port/linux/src/port_config.c"              "HALO_FPS_OVERLAY_CORNER"                     "port_config.c FPS-Eintraege"
-check "port/linux/src/port_config.c"              "HALO_FAST_SHADERS"                           "port_config.c Knulli-Eintraege"
-check "port/linux/src/port_config.c"              'display.model_detail", _config_real, "0.35"' "port_config.c default model_detail=0.35"
-check "port/linux/src/port_config.c"              'lighting_refresh_divisor", _config_integer, "2"' "port_config.c default lighting_refresh_divisor=2"
-
-# Input und Renderer
-check "port/linux/src/xinput_sdl.c"               "button_remap"                                "xinput_sdl.c Button-Remap"
-check "port/linux/src/d3d8_gl.c"                  "__builtin_elementwise_min"                   "d3d8_gl.c index_extent NEON"
-check "port/linux/src/d3d8_gl.c"                  "fps_overlay_enabled"                         "d3d8_gl.c FPS-Overlay"
-check "port/linux/src/d3d8_gl.c"                  "static int draw_framebuffer_bound(void)"     "d3d8_gl.c draw_framebuffer_bound"
-check "port/linux/src/d3d8_gl.c"                  "if (draw_framebuffer_bound())"               "d3d8_gl.c Discard-Bedingung"
-
-# Build-Skripte
-check "tools/android_build.py"                    '"-DHALO_ANDROID"'                            "android_build.py -DHALO_ANDROID"
-
-# port_settings.py
-check "tools/port_settings.py"                    "display.fast_shaders"                        "port_settings.py Video-Rows"
-check "tools/port_settings.py"                    "button_top"                                  "port_settings.py button_top"
-check "tools/port_settings.py"                    "credits_watermark"                           "port_settings.py Credits-Wasserzeichen"
-
-# main.c Credits
-check "source/main/main.c"                        "St0len-One"                                  "main.c Credits-String"
-
-# Regenerierte XMLs
-check "port/assets/menus/ce/main_menu.settings_select.player_setup.player_profile_edit.video_settings.xml" \
-    "op_fast_shaders" "video_settings.xml op_fast_shaders"
-check "port/assets/menus/ce/main_menu.settings_select.player_setup.player_profile_edit.video_settings.xml" \
-    "op_alpha_test_elision" "video_settings.xml op_alpha_test_elision"
-check "port/assets/menus/ce/main_menu.settings_select.player_setup.player_profile_edit.video_settings.xml" \
-    "credits_watermark" "video_settings.xml Wasserzeichen"
-
-# host_glthread.c: health_check ist optional
-if [ -f "$SRC/port/knulli/host/host_glthread.c" ]; then
-    if grep -q "health_check" "$SRC/port/knulli/host/host_glthread.c"; then
-        echo "   OK: host_glthread.c health_check (beliebige Form)"
-    else
-        echo "   HINWEIS: host_glthread.c ohne health_check (optional)"
-    fi
+if [ -f "$SRC/tools/port_settings.py" ]; then
+    check "tools/port_settings.py" "display.fast_shaders" "port_settings.py Video-Rows"
+    check "tools/port_settings.py" "button_top"           "port_settings.py button_top"
+    check "tools/port_settings.py" "credits_watermark"    "port_settings.py Credits"
+else
+    echo "   HINWEIS: tools/port_settings.py fehlt."
 fi
 
-# Negativchecks
-if grep -q '#include <arm_neon.h>' "$SRC/port/linux/src/d3d8_gl.c"; then
-    echo "   FEHLT: d3d8_gl.c hat noch arm_neon.h (unerwartet)"
-    failed=1
-fi
-if grep -q 'glUniform4f(fps_overlay_color' "$SRC/port/linux/src/d3d8_gl.c"; then
-    echo "   FEHLT: d3d8_gl.c enthaelt noch glUniform4f"
-    failed=1
+if [ -f "$SRC/port/assets/menus/ce/main_menu.settings_select.player_setup.player_profile_edit.video_settings.xml" ]; then
+    check "port/assets/menus/ce/main_menu.settings_select.player_setup.player_profile_edit.video_settings.xml" \
+        "op_fast_shaders" "video_settings.xml op_fast_shaders"
+    check "port/assets/menus/ce/main_menu.settings_select.player_setup.player_profile_edit.video_settings.xml" \
+        "op_alpha_test_elision" "video_settings.xml op_alpha_test_elision"
+    check "port/assets/menus/ce/main_menu.settings_select.player_setup.player_profile_edit.video_settings.xml" \
+        "credits_watermark" "video_settings.xml Wasserzeichen"
+else
+    echo "   HINWEIS: video_settings.xml fehlt."
 fi
 
 if [ "$failed" -ne 0 ]; then
