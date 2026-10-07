@@ -6,18 +6,21 @@ set -euo pipefail
 # Build-Skript: Host (aarch64) + Guest (arm64_32 ILP32 AArch64)
 #
 # Option A: -fno-omit-frame-pointer wird aus GUEST_CODE_FLAGS entfernt,
-#           damit -fomit-frame-pointer aus GUEST_ABI_FLAGS wirkt. Das
-#           spart auf dem Cortex-A35 etwas Codegroesse und ein paar
-#           Instruktionen pro Funktionsprolog. Backtraces ueber
-#           Frame-Pointer sind dafuer nicht mehr zuverlaessig; im
-#           Release werden Log-Marker und host_fatal verwendet.
+#           damit -fomit-frame-pointer aus GUEST_ABI_FLAGS wirkt.
+#
+# Fix 2e: -DHALO_ANDROID wird sowohl im Guest als auch im Host gesetzt,
+#         damit die ES-Optimierungen (Vita, Shader-Praezision,
+#         Async-Texturen, Instance-Models, ES-Pixel-Precision) aktiv
+#         werden. Ohne dieses Flag sind die #ifdef HALO_ANDROID-Bloecke
+#         im Quellcode unerreichbar und der Port ignoriert die in
+#         Halo.sh gesetzten HALO_MIN_OBJECT_PIXELS, HALO_LIGHTING_
+#         REFRESH_DIVISOR usw.
 # ══════════════════════════════════════════════════════════════════════
 # PGO-MODUS
 # ══════════════════════════════════════════════════════════════════════
 #   use    → Release-Build mit PGO (Linux-Profil) und LTO  [DEFAULT]
 #   off    → ohne PGO, LTO an
 #   train  → instrumentierter Android-Guest, erzeugt .profraw
-#            (nur zur Neuerzeugung eines Profils noetig)
 PGO_MODE=${PGO_MODE:-use}
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -172,7 +175,6 @@ if old not in text:
     match = pattern.search(text)
     if not match:
         print("FEHLER: Pageflip-Code nicht gefunden", file=sys.stderr)
-        print("Bitte pruefen: SDL_kmsdrmopengles.c KMSDRM_GLES_SwapWindow", file=sys.stderr)
         sys.exit(1)
     text = text[:match.start()] + new + text[match.end():]
 else:
@@ -421,8 +423,7 @@ if count_flags == 0:
 else:
     text = text.replace(old_flags, new_flags, 1)
 
-# 3) Option A: -fno-omit-frame-pointer aus GUEST_CODE_FLAGS entfernen,
-#    damit -fomit-frame-pointer aus GUEST_ABI_FLAGS wirkt.
+# 3) Option A: -fno-omit-frame-pointer aus GUEST_CODE_FLAGS entfernen.
 if '"-fno-omit-frame-pointer"' in text:
     text = text.replace('    "-fno-omit-frame-pointer",\n', '')
     print("Guest-Code-Flags: -fno-omit-frame-pointer entfernt (Option A)")
@@ -432,6 +433,40 @@ else:
 with open(path, 'w') as f:
     f.write(text)
 print(f"android_build.py gepatcht: {count_mcpu}x mcpu, {count_flags}x O-Flags")
+PYEOF
+
+# ── Fix 2e: -DHALO_ANDROID in tools/android_build.py ────────────────
+# (WICHTIG: -DHALO_ANDROID aktiviert die ES-Optimierungen im GUEST.
+#  Ohne dieses Flag sind Vita-Optimierungen, Shader-Praezision,
+#  Async-Texturen usw. wirkungslos, weil sie in #ifdef HALO_ANDROID
+#  eingeschlossen sind.)
+python3 - "$SRC/tools/android_build.py" <<'PYEOF'
+import sys
+path = sys.argv[1]
+with open(path) as f:
+    text = f.read()
+
+if '"-DHALO_ANDROID"' in text:
+    print("android_build.py: -DHALO_ANDROID bereits vorhanden")
+    sys.exit(0)
+
+# Anker: entweder das -DHALO_RELEASE oder das erste Element der Flag-Liste
+anchor = '"-DHALO_RELEASE"'
+if anchor in text:
+    text = text.replace(anchor, '"-DHALO_ANDROID",\n    "-DHALO_RELEASE"', 1)
+    print("android_build.py: -DHALO_ANDROID vor -DHALO_RELEASE eingefuegt")
+else:
+    # Fallback: vor GUEST_ABI_FLAGS-Element "-O3" einfügen
+    fallback = '"-O3",\n    "-fomit-frame-pointer"'
+    if fallback in text:
+        text = text.replace(fallback, '"-DHALO_ANDROID",\n    ' + fallback, 1)
+        print("android_build.py: -DHALO_ANDROID vor -O3 eingefuegt")
+    else:
+        print("FEHLER: kein Anker fuer -DHALO_ANDROID gefunden", file=sys.stderr)
+        sys.exit(1)
+
+with open(path, 'w') as f:
+    f.write(text)
 PYEOF
 
 # ── Fix 2b: clang-Builtin-Shim ───────────────────────────────────────
@@ -648,29 +683,54 @@ with open(path, 'w') as f:
 print(f"linux_build.py: {count_opt}x O2->O3, {count_abi}x zusaetzliche Flags")
 PYEOF
 
+# ── Fix 3b: -DHALO_ANDROID im Host-Build (port/knulli/build.sh) ─────
+# Wird NACH dem Kopieren von port/knulli angewendet, weil build.sh
+# den Port-Ordner frisch aus dem Repo kopiert. Ohne dieses Flag sind
+# alle ES-Optimierungen im Host (d3d8_gl.c, xgpu.h) wirkungslos.
+echo ""
+echo "== Fix 3b: -DHALO_ANDROID in port/knulli/build.sh ..."
+if [ -f "$HERE/port/knulli/build.sh" ]; then
+    python3 - "$HERE/port/knulli/build.sh" <<'PYEOF'
+import sys
+path = sys.argv[1]
+with open(path) as f:
+    text = f.read()
+if "-DHALO_ANDROID" in text:
+    print("port/knulli/build.sh: -DHALO_ANDROID bereits vorhanden")
+    sys.exit(0)
+old = '-D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS \\'
+new = '-D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS \\\n        -DHALO_ANDROID \\'
+if old not in text:
+    print("FEHLER: CFLAGS-Marker in port/knulli/build.sh fehlt", file=sys.stderr)
+    sys.exit(1)
+text = text.replace(old, new, 1)
+with open(path, 'w') as f:
+    f.write(text)
+print("port/knulli/build.sh: -DHALO_ANDROID in CFLAGS eingefuegt")
+PYEOF
+else
+    echo "WARNUNG: port/knulli/build.sh fehlt, Fix 3b uebersprungen"
+fi
+
 # ── Fix 4: Python-Patches (memory, neon, vita, button, index, fps) ───
 echo ""
 echo "== Fix 4: Quellcode-Optimierungen ..."
 for patch_script in patch_memory_pools.py patch_neon_math.py \
                     patch_vita_optimizations.py patch_button_remap.py \
-                    patch_index_extent_neon.py patch_fps_overlay.py; do
+                    patch_index_extent_neon.py patch_fps_overlay.py \
+                    patch_draw_framebuffer_bound.py \
+                    patch_glthread_health_check.py; do
     if [ -f "$HERE/patches/$patch_script" ]; then
         echo "== Wende $patch_script an ..."
         if ! python3 "$HERE/patches/$patch_script" "$SRC"; then
             echo "WARNUNG: $patch_script fehlgeschlagen"
         fi
     else
-        echo "== $patch_script nicht vorhanden"
+        echo "== $patch_script nicht vorhanden (ueberspringe)"
     fi
 done
 
 # ── Fix 4a: Sicherheitskorrektur fuer das FPS-Overlay ────────────────
-# Falls eine vorherige Build-Ausfuehrung eine d3d8_gl.c mit dem alten
-# glUniform4f-Aufruf hinterlassen hat (der nicht in der Import-Liste
-# des Guests steht und den Linker mit "undefined symbol: glUniform4f"
-# abbricht), ersetzt dies jeden solchen Aufruf durch die v-Variante
-# glUniform4fv, die in port/linux/src/gl.h deklariert ist.
-# Idempotent: beim zweiten Lauf findet er nichts mehr zu korrigieren.
 if [ -f "$SRC/port/linux/src/d3d8_gl.c" ]; then
     python3 - "$SRC/port/linux/src/d3d8_gl.c" <<'PYEOF'
 import re
@@ -681,7 +741,6 @@ with open(path) as f:
     text = f.read()
 
 if "fps_overlay_enabled" not in text:
-    # FPS-Overlay nicht im Code; nichts zu tun.
     sys.exit(0)
 
 pattern = re.compile(
@@ -733,6 +792,13 @@ check_patch "port/linux/src/port_config.c"                "HALO_FPS_OVERLAY_CORN
 check_patch "port/linux/src/xinput_sdl.c"                 "button_remap"                       "xinput_sdl.c Button-Remap"
 check_patch "port/linux/src/d3d8_gl.c"                    "__builtin_elementwise_min"          "d3d8_gl.c index_extent NEON (Builtins)"
 check_patch "port/linux/src/d3d8_gl.c"                    "fps_overlay_enabled"                "d3d8_gl.c FPS-Overlay"
+check_patch "port/linux/src/d3d8_gl.c"                    "static int draw_framebuffer_bound(void)" "d3d8_gl.c draw_framebuffer_bound"
+check_patch "port/linux/src/d3d8_gl.c"                    "if (draw_framebuffer_bound())"       "d3d8_gl.c Discard-Bedingung"
+check_patch "port/knulli/host/host_glthread.c"            "static void health_check(void)"      "host_glthread.c health_check"
+check_patch "port/knulli/host/host_glthread.c"            "static int draw_framebuffer_bound(void)" "host_glthread.c draw_framebuffer_bound"
+check_patch "port/knulli/host/host_glthread.c"            "health_check();"                    "host_glthread.c health_check-Aufruf"
+check_patch "tools/android_build.py"                      '"-DHALO_ANDROID"'                   "android_build.py -DHALO_ANDROID"
+check_patch "port/knulli/build.sh"                        "-DHALO_ANDROID"                     "port/knulli/build.sh -DHALO_ANDROID"
 if grep -q '#include <arm_neon.h>' "$SRC/port/linux/src/d3d8_gl.c"; then
     echo "   FEHLT: d3d8_gl.c hat noch arm_neon.h (unerwartet)"
     verification_failed=1
@@ -817,14 +883,17 @@ cp -a "$HERE/port/knulli" "$SRC/port/knulli"
 rm -rf "$SRC/port/knulli/__pycache__"
 chmod +x "$SRC/port/knulli/build.sh" 2>/dev/null || true
 
+# (Fix 3b hat bereits $HERE/port/knulli/build.sh gepatcht; das Kopieren
+#  uebernimmt das Flag in den Quellbaum.)
+
 stamp=$({
     cat "$PATCH"
-    cat "$HERE/patches/patch_memory_pools.py" 2>/dev/null || true
-    cat "$HERE/patches/patch_neon_math.py"    2>/dev/null || true
-    cat "$HERE/patches/patch_vita_optimizations.py" 2>/dev/null || true
-    cat "$HERE/patches/patch_button_remap.py" 2>/dev/null || true
-    cat "$HERE/patches/patch_index_extent_neon.py" 2>/dev/null || true
-    cat "$HERE/patches/patch_fps_overlay.py" 2>/dev/null || true
+    for p in patch_memory_pools.py patch_neon_math.py \
+             patch_vita_optimizations.py patch_button_remap.py \
+             patch_index_extent_neon.py patch_fps_overlay.py \
+             patch_draw_framebuffer_bound.py patch_glthread_health_check.py; do
+        cat "$HERE/patches/$p" 2>/dev/null || true
+    done
     if [ -f "$HERE/pgo/halo_linux.profdata" ]; then
         sha256sum "$HERE/pgo/halo_linux.profdata" | cut -d' ' -f1
     fi
@@ -835,6 +904,9 @@ stamp=$({
     echo "frame-pointer=option-a"
     echo "index-extent=neon-builtins-v2"
     echo "fps-overlay=uniform4fv"
+    echo "halo-android=on"
+    echo "draw-framebuffer-bound=on"
+    echo "glthread-health-check=on"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 if [ -f "$SRC/.port-stamp" ] && [ "$(cat "$SRC/.port-stamp")" = "$stamp" ]; then
@@ -921,9 +993,16 @@ Spiel direkt starten – kein Auto-Exit, keine Profil-Dateien.
 
 Hinweis: Der Guest wird ohne Frame-Pointer gebaut (-fomit-frame-pointer).
 Bei einem Absturz stehen im Log die Marker und host_fatal-Meldungen zur
-Verfuegung, aber keine Stack-Backtraces ueber den Frame-Pointer. Fuer
-Debug-Builds kann in tools/android_build.py "-fno-omit-frame-pointer"
-wieder in GUEST_CODE_FLAGS aufgenommen werden.
+Verfuegung, aber keine Stack-Backtraces ueber den Frame-Pointer.
+
+Aktiv in diesem Build:
+  - HALO_ANDROID aktiv (Guest + Host): alle ES-Optimierungen,
+    Vita-Optimierungen (HALO_MIN_OBJECT_PIXELS,
+    HALO_LIGHTING_REFRESH_DIVISOR), mediump-Shader, Async-Texturen,
+    Instance-Models, Batch-Quads, Sorted-Models, Two-Pass-Shadows.
+  - draw_framebuffer_bound: kein GL_INVALID_OPERATION mehr beim
+    End-of-Frame-Discard.
+  - GL-Thread health_check verfuegbar (HALO_GL_HEALTH_CHECK=1).
 
 FERTIG.
 ────────────────────────────────────────────────────────────────────────
