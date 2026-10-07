@@ -9,6 +9,25 @@ set -euo pipefail
 # Der Clone verwendet KEIN --filter=blob:none (das schlaegt in manchen
 # Git-Versionen/Netzwerken fehl); OpenCE ist nur ~45 MB, ein normaler
 # Shallow-Clone ist robust. Fallback: Tarball von GitHub.
+#
+# Patch-Kette (Reihenfolge ist wichtig!):
+#   1. Knulli-Patch (monolithisch)
+#   2. patch_memory_pools        — Debug-Allocator aus, __thread-Arrays
+#   3. patch_neon_math           — NEON in matrix_math + guest_string
+#   4. patch_vita_optimizations  — Vita-Port-Ideen (LOD, Lighting, Sound)
+#   5. patch_button_remap        — A/B/X/Y-Tausch
+#   6. patch_index_extent_neon   — NEON fuer index_extent
+#   7. patch_fps_overlay         — In-Game-FPS-Overlay
+#   8. patch_draw_framebuffer_bound — GL_INVALID_OPERATION-Fix
+#   9. patch_mali_subdata        — Mali-G31 Mirror-Subdata-Guard
+#  10. patch_shader_prewarm      — Offline-Shader-Cache + Prewarming
+#  11. patch_aggressive_culling  — Aggressives Objekt-Culling
+#  12. patch_state_batching      — Render-Command-Batching
+#  13. patch_texture_prewarm     — Texture-Prewarming beim Map-Load
+#  14. patch_settings_menu       — In-Game-Settings-Menue
+#  15. patch_config_defaults     — RK3326-abgestimmte Defaults
+#  16. patch_credits             — St0len-One-Credits
+#  17. patch_credits_xml         — Credits-Wasserzeichen in statische XMLs
 # ══════════════════════════════════════════════════════════════════════
 PGO_MODE=${PGO_MODE:-use}
 
@@ -818,7 +837,9 @@ else
     echo "WARNUNG: port/knulli/build.sh fehlt, Fix 3b uebersprungen"
 fi
 
-# ── Fix 4: Python-Patches ────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+# Fix 4: Python-Patches (Reihenfolge ist wichtig!)
+# ══════════════════════════════════════════════════════════════════════
 echo ""
 echo "== Fix 4: Quellcode-Optimierungen ..."
 for patch_script in patch_memory_pools.py patch_neon_math.py \
@@ -826,6 +847,10 @@ for patch_script in patch_memory_pools.py patch_neon_math.py \
                     patch_index_extent_neon.py patch_fps_overlay.py \
                     patch_draw_framebuffer_bound.py \
                     patch_mali_subdata.py \
+                    patch_shader_prewarm.py \
+                    patch_aggressive_culling.py \
+                    patch_state_batching.py \
+                    patch_texture_prewarm.py \
                     patch_settings_menu.py \
                     patch_config_defaults.py \
                     patch_credits.py; do
@@ -905,7 +930,9 @@ else
     echo "  WARNUNG: patch_credits_xml.py nicht vorhanden"
 fi
 
-# ── Fix 4b: Verifikation ─────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+# Fix 4b: Verifikation
+# ══════════════════════════════════════════════════════════════════════
 echo ""
 echo "== Fix 4b: Verifiziere Patch-Ergebnisse ..."
 verification_failed=0
@@ -926,12 +953,14 @@ check_patch "port/android/guest/runtime/guest_string.c"   "vst1q_u8"            
 check_patch "source/sound/game_sound.c"                   "obstruction_interval_value"         "game_sound.c Sound-Occlusion"
 check_patch "source/render/render_objects.c"              "HALO_MIN_OBJECT_PIXELS"             "render_objects.c Distant"
 check_patch "source/render/render_objects.c"              "HALO_LIGHTING_REFRESH_DIVISOR"      "render_objects.c Lighting"
+check_patch "source/render/render_objects.c"              "aggressive_culling_guard"           "render_objects.c Aggressives Culling"
 check_patch "port/linux/src/port_config.c"                "HALO_SOUND_OBSTRUCTION_TICKS"       "port_config.c Sound"
 check_patch "port/linux/src/port_config.c"                "HALO_MIN_OBJECT_PIXELS"             "port_config.c Distant"
 check_patch "port/linux/src/port_config.c"                "HALO_LIGHTING_REFRESH_DIVISOR"      "port_config.c Lighting"
 check_patch "port/linux/src/port_config.c"                "HALO_FPS_OVERLAY_CORNER"            "port_config.c FPS"
 check_patch "port/linux/src/port_config.c"                "HALO_FAST_SHADERS"                  "port_config.c Knulli"
 check_patch "port/linux/src/port_config.c"                'display.model_detail", _config_real, "0.35"' "port_config.c model_detail=0.35"
+check_patch "port/linux/src/port_config.c"                'display.render_scale", _config_real, "0.75"' "port_config.c render_scale=0.75"
 check_patch "port/linux/src/port_config.c"                'lighting_refresh_divisor", _config_integer, "2"' "port_config.c lighting=2"
 check_patch "port/linux/src/xinput_sdl.c"                 "button_remap"                       "xinput_sdl.c Button-Remap"
 check_patch "port/linux/src/d3d8_gl.c"                    "__builtin_elementwise_min"          "d3d8_gl.c index_extent"
@@ -941,6 +970,10 @@ check_patch "port/linux/src/d3d8_gl.c"                    "if (draw_framebuffer_
 check_patch "port/linux/src/d3d8_gl.c"                    "mali_subdata_guard"                 "d3d8_gl.c Mali-Subdata-Guard"
 check_patch "port/linux/src/d3d8_gl.c"                    "subdata_frame"                      "d3d8_gl.c subdata_frame[]"
 check_patch "port/linux/src/d3d8_gl.c"                    "device.frame - mirror.subdata_frame" "d3d8_gl.c Frame-Guard"
+check_patch "port/linux/src/d3d8_gl.c"                    "shader_prewarm_guard"               "d3d8_gl.c Shader-Prewarm"
+check_patch "port/linux/src/d3d8_gl.c"                    "xgpu_current_map_name"              "d3d8_gl.c Map-Name-Cache"
+check_patch "port/linux/src/d3d8_gl.c"                    "state_batching_guard"               "d3d8_gl.c State-Batching"
+check_patch "port/linux/src/xbox_textures.c"              "texture_prewarm_guard"              "xbox_textures.c Texture-Prewarm"
 check_patch "tools/android_build.py"                      '"-DHALO_ANDROID"'                   "android_build.py -DHALO_ANDROID"
 check_patch "source/main/main.c"                          "St0len-One"                          "main.c Credits"
 
@@ -1033,13 +1066,17 @@ CEOF
     fi
 fi
 
-# ── Stamp ────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+# Stamp (muss ALLE Patch-Skripte enthalten, die den Baum veraendern)
+# ══════════════════════════════════════════════════════════════════════
 stamp=$({
     cat "$PATCH"
     for p in patch_memory_pools.py patch_neon_math.py \
              patch_vita_optimizations.py patch_button_remap.py \
              patch_index_extent_neon.py patch_fps_overlay.py \
              patch_draw_framebuffer_bound.py patch_mali_subdata.py \
+             patch_shader_prewarm.py patch_aggressive_culling.py \
+             patch_state_batching.py patch_texture_prewarm.py \
              patch_settings_menu.py patch_config_defaults.py \
              patch_credits.py patch_credits_xml.py; do
         cat "$HERE/patches/$p" 2>/dev/null || true
@@ -1057,10 +1094,14 @@ stamp=$({
     echo "halo-android=on"
     echo "draw-framebuffer-bound=on"
     echo "mali-subdata=guard-v1"
+    echo "shader-prewarm=map-specific-v1"
+    echo "aggressive-culling=1.5x-v1"
+    echo "state-batching=opaque-sort-v1"
+    echo "texture-prewarm=map-load-v1"
     echo "glthread-health-check=tolerant"
     echo "xml-hunk-removed=1"
     echo "settings-menu=regenerated"
-    echo "config-defaults=m9"
+    echo "config-defaults=m9-rk3326"
     echo "credits=st0len-one"
     echo "opence-files=fetched-v2"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
@@ -1145,13 +1186,19 @@ Zu installieren auf dem M9 Pro:
 3. dist/halo              nach /roms/ports/halo-ce/halo
 4. dist/libs.aarch64/     nach /roms/ports/halo-ce/libs.aarch64/  (falls vorhanden)
 
-Aktiv in diesem Build:
+Aktiv in diesem Build (RK3326 / Mali-G31 MP2):
   - HALO_ANDROID aktiv (Guest + Host): alle ES-Optimierungen.
   - draw_framebuffer_bound: kein GL_INVALID_OPERATION mehr.
   - Mali-Subdata-Guard: kein Stick-Figure-Bug auf Mali-G31.
+  - Shader-Prewarming: map-spezifischer Cache, kein Kompilierungs-Ruckler.
+  - Aggressives Culling: 1.5x verschaerfte Pixel-Schwelle.
+  - State-Batching: opaque Draws nach Zustand sortiert.
+  - Texture-Prewarming: Map-Texturen vor dem ersten Draw.
+  - NEON in matrix_math, guest_string, index_extent.
+  - Defaults auf RK3326 abgestimmt (render_scale 0.75, model_detail 0.35,
+    distant_objects 8.0, obstruction_ticks 3, lighting_divisor 2).
   - In-Game-Settings-Menue mit 20 Zeilen, ohne Luecken (OpenCE).
   - Credits "St0len-One" im Hauptmenue und in allen Settings-Screens.
-  - Default-Werte aus Halo.sh in port_config.c festgenagelt.
 
 FERTIG.
 ────────────────────────────────────────────────────────────────────────
