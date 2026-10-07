@@ -212,6 +212,7 @@ jobs:
                    patches/patch_index_extent_neon.py \
                    patches/patch_fps_overlay.py \
                    patches/patch_draw_framebuffer_bound.py \
+                   patches/patch_mali_subdata.py \
                    patches/patch_settings_menu.py \
                    patches/patch_config_defaults.py \
                    patches/patch_credits.py \
