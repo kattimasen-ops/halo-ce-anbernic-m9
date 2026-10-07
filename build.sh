@@ -9,8 +9,7 @@ set -euo pipefail
 #         damit die ES-Optimierungen (Vita, Shader-Praezision,
 #         Async-Texturen, Instance-Models) aktiv werden.
 #
-# Fix 3b: -DHALO_ANDROID in port/knulli/build.sh, damit die ES-
-#         Optimierungen im Host greifen.
+# Fix 3b: -DHALO_ANDROID in port/knulli/build.sh.
 #
 # Reihenfolge-Hinweis: port/knulli wird VOR den Python-Patches (Fix 4)
 # in den Quellbaum kopiert, damit die Patches host_glthread.c und
@@ -374,7 +373,6 @@ path = sys.argv[1]
 with open(path) as f:
     text = f.read()
 
-# 1) -mcpu=cortex-a35 (kein a53, kein dotprod)
 old_mcpu = '"-mcpu=cortex-a53"'
 new_mcpu = '"-mcpu=cortex-a35",\n    "-mtune=cortex-a35"'
 count_mcpu = text.count(old_mcpu)
@@ -389,7 +387,6 @@ else:
     else:
         text = text.replace(old_mcpu, new_mcpu)
 
-# 2) -O2 -> -O3 in GUEST_ABI_FLAGS, plus Optimierungsflags
 old_flags = '"-ffp-contract=off",\n    "-O2",'
 new_flags = '''"-ffp-contract=off",
     "-O3",
@@ -418,7 +415,6 @@ if count_flags == 0:
 else:
     text = text.replace(old_flags, new_flags, 1)
 
-# 3) Option A: -fno-omit-frame-pointer aus GUEST_CODE_FLAGS entfernen.
 if '"-fno-omit-frame-pointer"' in text:
     text = text.replace('    "-fno-omit-frame-pointer",\n', '')
     print("Guest-Code-Flags: -fno-omit-frame-pointer entfernt (Option A)")
@@ -541,7 +537,6 @@ else:
             print("FEHLER: _find_ndk-Anker fehlt", file=sys.stderr); sys.exit(1)
         text = text.replace(anchor, anchor + "\n\n" + new_fn, 1)
 
-# Robuste guest_abi-Erkennung mit Regex
 if "_clang_builtin_shim(guest_cc)" not in text:
     pattern = re.compile(
         r'(\bguest_abi\s*=\s*"[^"]*"\s*\.join\(\s*\n?\s*GUEST_ABI_FLAGS\b)',
@@ -551,7 +546,6 @@ if "_clang_builtin_shim(guest_cc)" not in text:
         text = pattern.sub(r'\1\n        + _clang_builtin_shim(guest_cc)', text, count=1)
         print("clang-Builtin-Shim in guest_abi eingebaut (Regex)")
     else:
-        # Fallback: suche nach jeder .join(GUEST_ABI_FLAGS-Zeile
         pattern2 = re.compile(
             r'(\.join\(\s*\n?\s*GUEST_ABI_FLAGS\b)',
             re.MULTILINE,
@@ -608,8 +602,7 @@ old = '''    n.rule(
         rspfile="$out.rsp",
         rspfile_content="$in_newline",
     )'''
-new = '''    # PGO-Training: die Profiling-Runtime an den Guest-Link anhaengen.
-    guest_profile_runtime = ""
+new = '''    guest_profile_runtime = ""
     for _cc_candidate in (guest_cc, str(ndk_bin / "clang")):
         if not _cc_candidate:
             continue
@@ -810,7 +803,6 @@ check_patch "port/linux/src/d3d8_gl.c"                    "if (draw_framebuffer_
 check_patch "tools/android_build.py"                      '"-DHALO_ANDROID"'                   "android_build.py -DHALO_ANDROID"
 check_patch "port/knulli/build.sh"                        "-DHALO_ANDROID"                     "port/knulli/build.sh -DHALO_ANDROID"
 
-# host_glthread.c nur prüfen, wenn die Datei existiert
 if [ -f "$SRC/port/knulli/host/host_glthread.c" ]; then
     check_patch "port/knulli/host/host_glthread.c"            "static void health_check(void)"      "host_glthread.c health_check"
     check_patch "port/knulli/host/host_glthread.c"            "static int draw_framebuffer_bound(void)" "host_glthread.c draw_framebuffer_bound"
