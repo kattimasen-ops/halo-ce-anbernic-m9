@@ -5,13 +5,11 @@ set -euo pipefail
 # Halo CE Universal — M9 Pro (RK3326 / Cortex-A35 + Mali-G31 MP2)
 # Build-Skript: Host (aarch64) + Guest (arm64_32 ILP32 AArch64)
 #
-# Vollautomatisch: klont Upstream, laedt SDL2/SDL3, wendet alle Patches
-# an, baut Guest + Host, kopiert nach dist/.
-#
-# AENDERUNG: patch_glthread_health_check.py ist ENTFERNT. Die
-# Verifikation von host_glthread.c akzeptiert jede Form von
-# health_check (oder keine), damit der Build unabhaengig von der
-# Repo-Version von host_glthread.c durchlaeuft.
+# NEU: Vor dem Anwenden des Knulli-Patches wird der XML-Hunk aus dem
+# Patch entfernt, weil port/assets/menus/ce/.../video_settings.xml durch
+# die vom Nutzer eingefügte Version (mit allen neuen Spinner-Zeilen)
+# ersetzt wurde. Ohne diesen Schritt bricht git apply mit "patch does
+# not apply" ab.
 # ══════════════════════════════════════════════════════════════════════
 PGO_MODE=${PGO_MODE:-use}
 
@@ -69,6 +67,44 @@ mkdir -p "$WORK" "$DIST"
 WORK=$(cd "$WORK" && pwd)
 DIST=$(cd "$DIST" && pwd)
 SRC=$WORK/halo-ce-universal
+
+# ══════════════════════════════════════════════════════════════════════
+# NEU: XML-Hunk aus dem Knulli-Patch entfernen
+#
+# Der Knulli-Patch ändert eine Zeile in video_settings.xml. Der Nutzer
+# hat diese Datei aber komplett ersetzt (mit den neuen Spinner-Zeilen).
+# Damit passt der Hunk nicht mehr. Wir entfernen ihn aus dem Patch,
+# BEVOR git apply ihn sieht.
+#
+# Idempotent: wenn der Hunk schon entfernt wurde, passiert nichts.
+# ══════════════════════════════════════════════════════════════════════
+echo ""
+echo "== Entferne den video_settings.xml-Hunk aus dem Knulli-Patch (einmalig) ..."
+python3 - "$PATCH" <<'PYEOF'
+import re
+import sys
+
+path = sys.argv[1]
+text = open(path).read()
+
+# Der Diff-Block für die XML-Datei endet beim nächsten "diff --git " oder
+# am Dateiende.
+pattern = re.compile(
+    r'diff --git a/port/assets/menus/ce/'
+    r'main_menu\.settings_select\.player_setup\.player_profile_edit\.'
+    r'video_settings\.xml[^\n]*\n'
+    r'(?:(?!diff --git ).)*',
+    re.DOTALL,
+)
+
+if not pattern.search(text):
+    print("  XML-Hunk war nicht vorhanden (bereits entfernt).")
+    sys.exit(0)
+
+new_text = pattern.sub('', text)
+open(path, 'w').write(new_text)
+print("  XML-Hunk entfernt; Patch ist jetzt %d Bytes kleiner." % (len(text) - len(new_text)))
+PYEOF
 
 # ── SDL3 ─────────────────────────────────────────────────────────────
 if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
@@ -712,8 +748,6 @@ else
 fi
 
 # ── Fix 4: Python-Patches ────────────────────────────────────────────
-# patch_glthread_health_check.py ist NICHT dabei (host_glthread.c hat
-# health_check(uint32_t frame) bereits eingebaut in der Soll-Version).
 echo ""
 echo "== Fix 4: Quellcode-Optimierungen ..."
 for patch_script in patch_memory_pools.py patch_neon_math.py \
@@ -789,6 +823,7 @@ check_patch "port/linux/src/port_config.c"                "HALO_SOUND_OBSTRUCTIO
 check_patch "port/linux/src/port_config.c"                "HALO_MIN_OBJECT_PIXELS"             "port_config.c display.distant_objects"
 check_patch "port/linux/src/port_config.c"                "HALO_LIGHTING_REFRESH_DIVISOR"      "port_config.c debug.lighting_refresh_divisor"
 check_patch "port/linux/src/port_config.c"                "HALO_FPS_OVERLAY_CORNER"            "port_config.c FPS-Eintraege"
+check_patch "port/linux/src/port_config.c"                "HALO_FAST_SHADERS"                  "port_config.c Knulli-Eintraege"
 check_patch "port/linux/src/xinput_sdl.c"                 "button_remap"                       "xinput_sdl.c Button-Remap"
 check_patch "port/linux/src/d3d8_gl.c"                    "__builtin_elementwise_min"          "d3d8_gl.c index_extent NEON"
 check_patch "port/linux/src/d3d8_gl.c"                    "fps_overlay_enabled"                "d3d8_gl.c FPS-Overlay"
@@ -796,14 +831,12 @@ check_patch "port/linux/src/d3d8_gl.c"                    "static int draw_frame
 check_patch "port/linux/src/d3d8_gl.c"                    "if (draw_framebuffer_bound())"       "d3d8_gl.c Discard-Bedingung"
 check_patch "tools/android_build.py"                      '"-DHALO_ANDROID"'                   "android_build.py -DHALO_ANDROID"
 
-# host_glthread.c: jede Form von health_check ist OK (oder gar keins).
-# Die Funktion ist rein diagnostisch (GL-Fehler, Speicher-Warnungen) und
-# fuer den Release-Build nicht kritisch.
+# host_glthread.c: jede Form von health_check ist OK (oder gar keins)
 if [ -f "$SRC/port/knulli/host/host_glthread.c" ]; then
     if grep -q "health_check" "$SRC/port/knulli/host/host_glthread.c"; then
         echo "   OK: host_glthread.c health_check (beliebige Form)"
     else
-        echo "   HINWEIS: host_glthread.c hat keinen health_check (optional, nicht kritisch)"
+        echo "   HINWEIS: host_glthread.c hat keinen health_check (optional)"
     fi
 fi
 
@@ -904,6 +937,7 @@ stamp=$({
     echo "halo-android=on"
     echo "draw-framebuffer-bound=on"
     echo "glthread-health-check=tolerant"
+    echo "xml-hunk-removed=1"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 if [ -f "$SRC/.port-stamp" ] && [ "$(cat "$SRC/.port-stamp")" = "$stamp" ]; then
@@ -989,12 +1023,9 @@ Zu installieren auf dem M9 Pro:
 Spiel direkt starten – kein Auto-Exit, keine Profil-Dateien.
 
 Aktiv in diesem Build:
-  - HALO_ANDROID aktiv (Guest + Host): alle ES-Optimierungen,
-    Vita-Optimierungen, mediump-Shader, Async-Texturen,
-    Instance-Models, Batch-Quads, Sorted-Models, Two-Pass-Shadows.
+  - HALO_ANDROID aktiv (Guest + Host): alle ES-Optimierungen.
   - draw_framebuffer_bound: kein GL_INVALID_OPERATION mehr.
-  - host_glthread.c: health_check wird akzeptiert, egal in welcher Form
-    (oder auch nicht vorhanden).
+  - Das In-Game-Settings-Menue zeigt jetzt alle verfuegbaren Optionen.
 
 FERTIG.
 ────────────────────────────────────────────────────────────────────────
