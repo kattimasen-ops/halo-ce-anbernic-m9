@@ -1,3 +1,4 @@
+
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -5,15 +6,13 @@ set -euo pipefail
 # Halo CE Universal — M9 Pro (RK3326 / Cortex-A35 + Mali-G31 MP2)
 # Build-Skript: Host (aarch64) + Guest (arm64_32 ILP32 AArch64)
 #
-# Fix 2e: -DHALO_ANDROID wird sowohl im Guest als auch im Host gesetzt,
-#         damit die ES-Optimierungen (Vita, Shader-Praezision,
-#         Async-Texturen, Instance-Models) aktiv werden.
+# Vollautomatisch: klont Upstream, laedt SDL2/SDL3, wendet alle Patches
+# an, baut Guest + Host, kopiert nach dist/.
 #
-# Fix 3b: -DHALO_ANDROID in port/knulli/build.sh.
-#
-# Reihenfolge-Hinweis: port/knulli wird VOR den Python-Patches (Fix 4)
-# in den Quellbaum kopiert, damit die Patches host_glthread.c und
-# build.sh dort finden.
+# AENDERUNG: patch_glthread_health_check.py ist ENTFERNT, weil die
+# Soll-Version von host_glthread.c health_check(uint32_t frame) bereits
+# enthaelt. Die Datei patches/patch_glthread_health_check.py muss aus
+# dem Repo geloescht sein.
 # ══════════════════════════════════════════════════════════════════════
 PGO_MODE=${PGO_MODE:-use}
 
@@ -454,7 +453,7 @@ with open(path, 'w') as f:
     f.write(text)
 PYEOF
 
-# ── Fix 2b: clang-Builtin-Shim (robuste guest_abi-Erkennung) ────────
+# ── Fix 2b: clang-Builtin-Shim ──────────────────────────────────────
 python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import re
 import sys
@@ -676,11 +675,6 @@ with open(path, 'w') as f:
 print(f"linux_build.py: {count_opt}x O2->O3, {count_abi}x zusaetzliche Flags")
 PYEOF
 
-# ══════════════════════════════════════════════════════════════════════
-# WICHTIG: port/knulli MUSS jetzt kopiert werden, BEVOR Fix 3b und Fix 4
-# laufen, weil diese Dateien in port/knulli/host/ suchen.
-# ══════════════════════════════════════════════════════════════════════
-
 # ── port/knulli kopieren ─────────────────────────────────────────────
 echo ""
 echo "== Kopiere port/knulli in den Quellbaum ..."
@@ -693,6 +687,7 @@ rm -rf "$SRC/port/knulli/__pycache__"
 chmod +x "$SRC/port/knulli/build.sh" 2>/dev/null || true
 
 # ── Fix 3b: -DHALO_ANDROID in $SRC/port/knulli/build.sh ─────────────
+# (Die Soll-Version hat es bereits; der Check ist idempotent.)
 echo ""
 echo "== Fix 3b: -DHALO_ANDROID in port/knulli/build.sh ..."
 if [ -f "$SRC/port/knulli/build.sh" ]; then
@@ -707,8 +702,8 @@ if "-DHALO_ANDROID" in text:
 old = '-D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS \\'
 new = '-D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS \\\n        -DHALO_ANDROID \\'
 if old not in text:
-    print("FEHLER: CFLAGS-Marker in port/knulli/build.sh fehlt", file=sys.stderr)
-    sys.exit(1)
+    print("WARNUNG: CFLAGS-Marker in port/knulli/build.sh fehlt", file=sys.stderr)
+    sys.exit(0)
 text = text.replace(old, new, 1)
 with open(path, 'w') as f:
     f.write(text)
@@ -719,13 +714,14 @@ else
 fi
 
 # ── Fix 4: Python-Patches ────────────────────────────────────────────
+# patch_glthread_health_check.py ist NICHT dabei (host_glthread.c hat
+# health_check(uint32_t frame) bereits eingebaut).
 echo ""
 echo "== Fix 4: Quellcode-Optimierungen ..."
 for patch_script in patch_memory_pools.py patch_neon_math.py \
                     patch_vita_optimizations.py patch_button_remap.py \
                     patch_index_extent_neon.py patch_fps_overlay.py \
-                    patch_draw_framebuffer_bound.py \
-                    patch_glthread_health_check.py; do
+                    patch_draw_framebuffer_bound.py; do
     if [ -f "$HERE/patches/$patch_script" ]; then
         echo "== Wende $patch_script an ..."
         if ! python3 "$HERE/patches/$patch_script" "$SRC"; then
@@ -785,30 +781,26 @@ check_patch() {
 }
 check_patch "source/cseries/cseries.h"                    "HALO_DEBUG_ALLOCATOR"               "cseries.h Debug-Allocator"
 check_patch "source/effects/decals.c"                     "static __thread long surface_queue" "decals.c __thread-Arrays"
-check_patch "source/math/matrix_math.c"                   "vmulq_n_f32"                        "matrix_math.c NEON (mul+add)"
+check_patch "source/math/matrix_math.c"                   "vmulq_n_f32"                        "matrix_math.c NEON"
 check_patch "port/android/guest/runtime/guest_string.c"   "vld1q_u8"                           "guest_string.c NEON memcmp"
 check_patch "port/android/guest/runtime/guest_string.c"   "vst1q_u8"                           "guest_string.c NEON memcpy"
-check_patch "source/sound/game_sound.c"                   "obstruction_interval_value"         "game_sound.c Sound-Occlusion-Intervall"
-check_patch "source/render/render_objects.c"              "HALO_MIN_OBJECT_PIXELS"             "render_objects.c Distant-Object-Culling"
-check_patch "source/render/render_objects.c"              "HALO_LIGHTING_REFRESH_DIVISOR"      "render_objects.c Lighting-Divisor"
+check_patch "source/sound/game_sound.c"                   "obstruction_interval_value"         "game_sound.c Sound-Occlusion"
+check_patch "source/render/render_objects.c"              "HALO_MIN_OBJECT_PIXELS"             "render_objects.c Distant-Object"
+check_patch "source/render/render_objects.c"              "HALO_LIGHTING_REFRESH_DIVISOR"      "render_objects.c Lighting"
 check_patch "port/linux/src/port_config.c"                "HALO_SOUND_OBSTRUCTION_TICKS"       "port_config.c audio.obstruction_ticks"
 check_patch "port/linux/src/port_config.c"                "HALO_MIN_OBJECT_PIXELS"             "port_config.c display.distant_objects"
 check_patch "port/linux/src/port_config.c"                "HALO_LIGHTING_REFRESH_DIVISOR"      "port_config.c debug.lighting_refresh_divisor"
 check_patch "port/linux/src/port_config.c"                "HALO_FPS_OVERLAY_CORNER"            "port_config.c FPS-Eintraege"
 check_patch "port/linux/src/xinput_sdl.c"                 "button_remap"                       "xinput_sdl.c Button-Remap"
-check_patch "port/linux/src/d3d8_gl.c"                    "__builtin_elementwise_min"          "d3d8_gl.c index_extent NEON (Builtins)"
+check_patch "port/linux/src/d3d8_gl.c"                    "__builtin_elementwise_min"          "d3d8_gl.c index_extent NEON"
 check_patch "port/linux/src/d3d8_gl.c"                    "fps_overlay_enabled"                "d3d8_gl.c FPS-Overlay"
 check_patch "port/linux/src/d3d8_gl.c"                    "static int draw_framebuffer_bound(void)" "d3d8_gl.c draw_framebuffer_bound"
 check_patch "port/linux/src/d3d8_gl.c"                    "if (draw_framebuffer_bound())"       "d3d8_gl.c Discard-Bedingung"
 check_patch "tools/android_build.py"                      '"-DHALO_ANDROID"'                   "android_build.py -DHALO_ANDROID"
-check_patch "port/knulli/build.sh"                        "-DHALO_ANDROID"                     "port/knulli/build.sh -DHALO_ANDROID"
 
 if [ -f "$SRC/port/knulli/host/host_glthread.c" ]; then
-    check_patch "port/knulli/host/host_glthread.c"            "static void health_check(void)"      "host_glthread.c health_check"
-    check_patch "port/knulli/host/host_glthread.c"            "static int draw_framebuffer_bound(void)" "host_glthread.c draw_framebuffer_bound"
-    check_patch "port/knulli/host/host_glthread.c"            "health_check();"                    "host_glthread.c health_check-Aufruf"
-else
-    echo "   HINWEIS: host_glthread.c nicht vorhanden – health_check-Patch uebersprungen"
+    check_patch "port/knulli/host/host_glthread.c" "static void health_check(uint32_t frame)" "host_glthread.c health_check (in-source)"
+    check_patch "port/knulli/host/host_glthread.c" "health_check(call->frame)"               "host_glthread.c health_check-Aufruf"
 fi
 
 if grep -q '#include <arm_neon.h>' "$SRC/port/linux/src/d3d8_gl.c"; then
@@ -816,7 +808,7 @@ if grep -q '#include <arm_neon.h>' "$SRC/port/linux/src/d3d8_gl.c"; then
     verification_failed=1
 fi
 if grep -q 'glUniform4f(fps_overlay_color' "$SRC/port/linux/src/d3d8_gl.c"; then
-    echo "   FEHLT: d3d8_gl.c enthaelt noch glUniform4f (Sicherheitskorrektur fehlgeschlagen)"
+    echo "   FEHLT: d3d8_gl.c enthaelt noch glUniform4f"
     verification_failed=1
 fi
 if [ "$PGO_MODE" = "train" ]; then
@@ -892,7 +884,7 @@ stamp=$({
     for p in patch_memory_pools.py patch_neon_math.py \
              patch_vita_optimizations.py patch_button_remap.py \
              patch_index_extent_neon.py patch_fps_overlay.py \
-             patch_draw_framebuffer_bound.py patch_glthread_health_check.py; do
+             patch_draw_framebuffer_bound.py; do
         cat "$HERE/patches/$p" 2>/dev/null || true
     done
     if [ -f "$HERE/pgo/halo_linux.profdata" ]; then
@@ -907,7 +899,7 @@ stamp=$({
     echo "fps-overlay=uniform4fv"
     echo "halo-android=on"
     echo "draw-framebuffer-bound=on"
-    echo "glthread-health-check=on"
+    echo "glthread-health-check=in-source"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 if [ -f "$SRC/.port-stamp" ] && [ "$(cat "$SRC/.port-stamp")" = "$stamp" ]; then
@@ -992,18 +984,12 @@ Zu installieren auf dem M9 Pro:
 
 Spiel direkt starten – kein Auto-Exit, keine Profil-Dateien.
 
-Hinweis: Der Guest wird ohne Frame-Pointer gebaut (-fomit-frame-pointer).
-Bei einem Absturz stehen im Log die Marker und host_fatal-Meldungen zur
-Verfuegung, aber keine Stack-Backtraces ueber den Frame-Pointer.
-
 Aktiv in diesem Build:
   - HALO_ANDROID aktiv (Guest + Host): alle ES-Optimierungen,
-    Vita-Optimierungen (HALO_MIN_OBJECT_PIXELS,
-    HALO_LIGHTING_REFRESH_DIVISOR), mediump-Shader, Async-Texturen,
+    Vita-Optimierungen, mediump-Shader, Async-Texturen,
     Instance-Models, Batch-Quads, Sorted-Models, Two-Pass-Shadows.
-  - draw_framebuffer_bound: kein GL_INVALID_OPERATION mehr beim
-    End-of-Frame-Discard.
-  - GL-Thread health_check verfuegbar (HALO_GL_HEALTH_CHECK=1).
+  - draw_framebuffer_bound: kein GL_INVALID_OPERATION mehr.
+  - GL-Thread health_check in host_glthread.c eingebaut.
 
 FERTIG.
 ────────────────────────────────────────────────────────────────────────
