@@ -5,9 +5,10 @@ set -euo pipefail
 # Halo CE Universal — M9 Pro (RK3326 / Cortex-A35 + Mali-G31 MP2)
 # Build-Skript: Host (aarch64) + Guest (arm64_32 ILP32 AArch64)
 #
-# Zieht die port_settings.py und den Menue-Ordner aus dem OpenCE-Fork,
-# weil der cybersecurity-Upstream sie nicht hat. Der Knulli-Patch wird
-# danach mit "git apply --check" geprueft, damit er sauber laeuft.
+# Zieht port_settings.py und den Menue-Ordner aus dem OpenCE-Fork.
+# Der Clone verwendet KEIN --filter=blob:none (das schlaegt in manchen
+# Git-Versionen/Netzwerken fehl); OpenCE ist nur ~45 MB, ein normaler
+# Shallow-Clone ist robust. Fallback: Tarball von GitHub.
 # ══════════════════════════════════════════════════════════════════════
 PGO_MODE=${PGO_MODE:-use}
 
@@ -23,6 +24,7 @@ HOST_CC=${HOST_CC:-aarch64-linux-gnu-gcc}
 JOBS=${JOBS:-$(nproc)}
 
 OPEN_CE_URL=${OPEN_CE_URL:-https://github.com/OpenCommunityEdition/OpenCE.git}
+OPEN_CE_TARBALL_URL=${OPEN_CE_TARBALL_URL:-https://github.com/OpenCommunityEdition/OpenCE/archive/refs/heads/main.tar.gz}
 
 die() { echo "build.sh: $*" >&2; exit 1; }
 need() { command -v "$1" > /dev/null 2>&1 || die "$1 not found: $2"; }
@@ -68,26 +70,33 @@ WORK=$(cd "$WORK" && pwd)
 DIST=$(cd "$DIST" && pwd)
 SRC=$WORK/halo-ce-universal
 
-# ── OpenCE-Dateien holen (port_settings.py + Menue-Ordner) ──────────
-# Wird VOR dem Anwenden des Knulli-Patches ausgefuehrt. Sparse-Checkout
-# ueber einen shallow Clone, damit keine GitHub-API-Limits getroffen
-# werden.
+# ── OpenCE-Dateien holen ─────────────────────────────────────────────
 fetch_opence_files() {
     local opence_dir="$WORK/opence-source"
+    local opence_tarball="$WORK/opence-main.tar.gz"
 
     echo ""
     echo "== Hole OpenCE-Dateien (port_settings.py + Menue-Ordner) ..."
     rm -rf "$opence_dir"
 
-    # Shallow Clone mit Blob-Filter und Sparse-Checkout
-    if ! git clone --depth 1 --filter=blob:none --sparse \
-        "$OPEN_CE_URL" "$opence_dir" > /dev/null 2>&1; then
-        die "Konnte OpenCE nicht klonen ($OPEN_CE_URL)."
-    fi
-
-    if ! git -C "$opence_dir" sparse-checkout set \
-        tools port/assets/menus/ce > /dev/null 2>&1; then
-        die "Sparse-Checkout in OpenCE fehlgeschlagen."
+    # OpenCE ist ~45 MB. Ein normaler Shallow-Clone ist robuster als
+    # --filter=blob:none --sparse, das in manchen Git-Versionen oder
+    # bei instabilen Netzwerken fehlschlaegt.
+    if git clone --depth 1 "$OPEN_CE_URL" "$opence_dir" > /dev/null 2>&1; then
+        echo "   + Git-Clone erfolgreich."
+    else
+        # Fallback: Repository-Archiv als Tarball von GitHub laden
+        echo "   Git-Clone fehlgeschlagen, versuche Tarball ..."
+        rm -f "$opence_tarball"
+        if ! curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 30 \
+            -o "$opence_tarball" "$OPEN_CE_TARBALL_URL"; then
+            die "Konnte OpenCE nicht klonen ($OPEN_CE_URL) und auch nicht als Tarball laden."
+        fi
+        mkdir -p "$opence_dir"
+        if ! tar -xzf "$opence_tarball" -C "$opence_dir" --strip-components=1; then
+            die "Konnte OpenCE-Tarball nicht entpacken."
+        fi
+        echo "   + Tarball erfolgreich."
     fi
 
     # 1. tools/port_settings.py
@@ -99,7 +108,7 @@ fetch_opence_files() {
         die "OpenCE hat keine tools/port_settings.py."
     fi
 
-    # 2. tools/ce_menus.py (Generator, von port_settings.py benutzt)
+    # 2. tools/ce_menus.py (Generator)
     if [ -f "$opence_dir/tools/ce_menus.py" ]; then
         cp "$opence_dir/tools/ce_menus.py" "$SRC/tools/"
         echo "   + tools/ce_menus.py"
@@ -125,7 +134,7 @@ fetch_opence_files() {
         fi
     done
 
-    # 5. tools, die von ce_menus.py aufgerufen werden
+    # 5. Weitere tools
     for t in tools/menu_art.py tools/menu_files.py; do
         if [ -f "$opence_dir/$t" ]; then
             cp "$opence_dir/$t" "$SRC/tools/"
@@ -134,7 +143,7 @@ fetch_opence_files() {
     done
 
     # Aufraeumen
-    rm -rf "$opence_dir"
+    rm -rf "$opence_dir" "$opence_tarball"
     echo "== OpenCE-Dateien geholt."
 }
 
@@ -921,17 +930,16 @@ check_patch "port/linux/src/port_config.c"                "HALO_MIN_OBJECT_PIXEL
 check_patch "port/linux/src/port_config.c"                "HALO_LIGHTING_REFRESH_DIVISOR"      "port_config.c Lighting"
 check_patch "port/linux/src/port_config.c"                "HALO_FPS_OVERLAY_CORNER"            "port_config.c FPS"
 check_patch "port/linux/src/port_config.c"                "HALO_FAST_SHADERS"                  "port_config.c Knulli"
-check_patch "port/linux/src/port_config.c"                'display.model_detail", _config_real, "0.35"' "port_config.c default model_detail=0.35"
-check_patch "port/linux/src/port_config.c"                'lighting_refresh_divisor", _config_integer, "2"' "port_config.c default lighting=2"
+check_patch "port/linux/src/port_config.c"                'display.model_detail", _config_real, "0.35"' "port_config.c model_detail=0.35"
+check_patch "port/linux/src/port_config.c"                'lighting_refresh_divisor", _config_integer, "2"' "port_config.c lighting=2"
 check_patch "port/linux/src/xinput_sdl.c"                 "button_remap"                       "xinput_sdl.c Button-Remap"
 check_patch "port/linux/src/d3d8_gl.c"                    "__builtin_elementwise_min"          "d3d8_gl.c index_extent"
 check_patch "port/linux/src/d3d8_gl.c"                    "fps_overlay_enabled"                "d3d8_gl.c FPS-Overlay"
-check_patch "port/linux/src/d3d8_gl.c"                    "static int draw_framebuffer_bound(void)" "d3d8_gl.c draw_framebuffer_bound"
+check_patch "port/linux/src/d3d8_gl.c"                    "static int draw_framebuffer_bound(void)" "d3d8_gl.c framebuffer_bound"
 check_patch "port/linux/src/d3d8_gl.c"                    "if (draw_framebuffer_bound())"       "d3d8_gl.c Discard"
 check_patch "tools/android_build.py"                      '"-DHALO_ANDROID"'                   "android_build.py -DHALO_ANDROID"
 check_patch "source/main/main.c"                          "St0len-One"                          "main.c Credits"
 
-# OpenCE-abhaengige Dateien: nur pruefen, wenn vorhanden
 if [ -f "$SRC/tools/port_settings.py" ]; then
     check_patch "tools/port_settings.py" "display.fast_shaders"  "port_settings.py Video-Rows"
     check_patch "tools/port_settings.py" "button_top"            "port_settings.py button_top"
@@ -1049,7 +1057,7 @@ stamp=$({
     echo "settings-menu=regenerated"
     echo "config-defaults=m9"
     echo "credits=st0len-one"
-    echo "opence-files=fetched"
+    echo "opence-files=fetched-v2"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 if [ -f "$SRC/.port-stamp" ] && [ "$(cat "$SRC/.port-stamp")" = "$stamp" ]; then
