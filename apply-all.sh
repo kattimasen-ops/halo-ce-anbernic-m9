@@ -7,10 +7,12 @@
 #
 # Reihenfolge:
 #   1. git apply patches/halo-ce-universal-knulli.patch    (Upstream + Knulli)
-#   2. Kopiere port/knulli in den Quellbaum
-#   3. Python-Patches (ohne patch_glthread_health_check.py, das ist obsolet)
-#   4. Fix 4a: glUniform4f -> glUniform4fv
-#   5. Verifikation
+#   2. port/knulli in den Quellbaum kopieren
+#   3. Fix 3b: -DHALO_ANDROID in port/knulli/build.sh
+#   4. Python-Patches (patch_glthread_health_check.py ist ENTFERNT:
+#      host_glthread.c hat health_check(uint32_t frame) bereits eingebaut)
+#   5. Fix 4a: glUniform4f -> glUniform4fv
+#   6. Verifikation
 #
 set -euo pipefail
 
@@ -52,9 +54,31 @@ else
     echo "== port/knulli im Repo nicht vorhanden – überspringe"
 fi
 
-# ── 3) Python-Patches ────────────────────────────────────────────────
-# patch_glthread_health_check.py ist NICHT dabei:
-#   die neue host_glthread.c hat health_check() bereits eingebaut.
+# ── 3) Fix 3b: -DHALO_ANDROID in port/knulli/build.sh ────────────────
+if [ -f "$SRC/port/knulli/build.sh" ]; then
+    if grep -q -- "-DHALO_ANDROID" "$SRC/port/knulli/build.sh"; then
+        echo "port/knulli/build.sh: -DHALO_ANDROID bereits vorhanden"
+    else
+        python3 - "$SRC/port/knulli/build.sh" <<'PYEOF'
+import sys
+path = sys.argv[1]
+with open(path) as f:
+    text = f.read()
+if "-DHALO_ANDROID" in text:
+    sys.exit(0)
+old = '-D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS \\'
+new = '-D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS \\\n        -DHALO_ANDROID \\'
+if old not in text:
+    sys.exit(0)
+text = text.replace(old, new, 1)
+with open(path, 'w') as f:
+    f.write(text)
+print("port/knulli/build.sh: -DHALO_ANDROID in CFLAGS eingefuegt")
+PYEOF
+    fi
+fi
+
+# ── 4) Python-Patches (ohne glthread_health_check) ───────────────────
 for script in \
     patch_memory_pools.py \
     patch_neon_math.py \
@@ -73,7 +97,7 @@ for script in \
     fi
 done
 
-# ── 4) Fix 4a: glUniform4f -> glUniform4fv ───────────────────────────
+# ── 5) Fix 4a: glUniform4f -> glUniform4fv ───────────────────────────
 if [ -f "$SRC/port/linux/src/d3d8_gl.c" ]; then
     python3 - "$SRC/port/linux/src/d3d8_gl.c" <<'PYEOF'
 import re
@@ -107,7 +131,7 @@ else:
 PYEOF
 fi
 
-# ── 5) Verifikation ──────────────────────────────────────────────────
+# ── 6) Verifikation ──────────────────────────────────────────────────
 echo ""
 echo "== Verifiziere Patch-Ergebnisse ..."
 failed=0
@@ -136,13 +160,8 @@ check "port/linux/src/d3d8_gl.c"                  "__builtin_elementwise_min"   
 check "port/linux/src/d3d8_gl.c"                  "fps_overlay_enabled"                     "d3d8_gl.c FPS-Overlay"
 check "port/linux/src/d3d8_gl.c"                  "static int draw_framebuffer_bound(void)" "d3d8_gl.c draw_framebuffer_bound"
 check "port/linux/src/d3d8_gl.c"                  "if (draw_framebuffer_bound())"           "d3d8_gl.c Discard-Bedingung"
-
-# host_glthread.c: health_check ist bereits in der Soll-Version
-if [ -f "$SRC/port/knulli/host/host_glthread.c" ]; then
-    check "port/knulli/host/host_glthread.c" "static void health_check(uint32_t frame)" "host_glthread.c health_check"
-    check "port/knulli/host/host_glthread.c" "health_check(call->frame)"               "host_glthread.c health_check-Aufruf"
-    check "port/knulli/host/host_glthread.c" "rockchip,rk3326"                          "host_glthread.c RK3326 (falls gepatcht)"
-fi
+check "port/knulli/host/host_glthread.c"          "static void health_check(uint32_t frame)" "host_glthread.c health_check"
+check "port/knulli/host/host_glthread.c"          "health_check(call->frame)"                "host_glthread.c health_check-Aufruf"
 
 if [ "$failed" -ne 0 ]; then
     echo ""
