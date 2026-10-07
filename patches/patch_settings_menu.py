@@ -1,17 +1,15 @@
 #!/usr/bin/env python3
 """Erweitert tools/port_settings.py um 13 neue Video-Settings-Zeilen.
 
-Ohne Anpassung der Button-Bar-Position wuerde button_bar bei y=414 kleben
-und die neuen Zeilen (y=361+) ueberlappen. Der Patch setzt deshalb
-"button_top" im video_settings-Spec und laesst _screen den Wert aus dem
-Spec lesen.
+Ersetzt die PER-PIXEL-LIGHTING-Zeile, um ihre Plattform auf "desktop" zu
+setzen (der Knulli-Patch macht die Einstellung nur fuer Desktop verfuegbar;
+die XML-Aenderung des Patches wird bei der Regeneration aus dieser Datei
+ueberschrieben).
 
-Wird von build.sh nach dem Knulli-Patch angewendet. Danach regeneriert
-build.sh die XML-Dateien aus port_settings.py.
+Sucht port_settings.py an mehreren Pfaden. Wenn sie fehlt: ueberspringen.
 """
 import os
 import sys
-
 
 NEW_ROWS = """            ("FAST SHADERS:", "display.fast_shaders", ON_OFF,
              "Compute colours in half precision, which Mali\\nGPUs do at twice the rate.", "android"),
@@ -43,6 +41,19 @@ NEW_ROWS = """            ("FAST SHADERS:", "display.fast_shaders", ON_OFF,
              "Draw without the alpha test when it cannot fail,\\nkeeping Mali's hidden surface removal.", "android"),
 """
 
+# Die alte Zeile (in beiden Plattform-Varianten), die ersetzt wird.
+OLD_ROW_NONE = '''            ("PER-PIXEL LIGHTING:", "display.per_pixel_lighting", ON_OFF,
+             "Light models for each pixel, without the facets\\nof the Xbox's lighting for each vertex.", None),
+'''
+OLD_ROW_DESKTOP = '''            ("PER-PIXEL LIGHTING:", "display.per_pixel_lighting", ON_OFF,
+             "Light models for each pixel, without the facets\\nof the Xbox's lighting for each vertex.", "desktop"),
+'''
+
+# Die neue Zeile: Plattform "desktop" plus die neuen Zeilen dahinter.
+NEW_ROW = '''            ("PER-PIXEL LIGHTING:", "display.per_pixel_lighting", ON_OFF,
+             "Light models for each pixel, without the facets\\nof the Xbox's lighting for each vertex.", "desktop"),
+''' + NEW_ROWS
+
 VIDEO_SPEC_ANCHOR = '''    "video_settings": {
         "screen": "video_settings_screen",
         "header": ("header_profile_video_settings", f"{PE}/video_settings/header_profile_video_settings"),
@@ -55,9 +66,6 @@ VIDEO_SPEC_ANCHOR = '''    "video_settings": {
 VIDEO_SPEC_NEW = '''    "video_settings": {
         "screen": "video_settings_screen",
         "header": ("header_profile_video_settings", f"{PE}/video_settings/header_profile_video_settings"),
-        # (closer than the other screens' rows, and the help lower, for all
-        # twelve places to fit above it; button_top weiter unten, seit die
-        # Port-eigenen Zeilen darunter stehen)
         "spacing": 24,
         "help_top": 364,
         "button_top": 750,
@@ -67,62 +75,70 @@ SCREEN_ANCHOR = '''    children.append(f'<child{attributes([("widget", f"{base}/
 SCREEN_NEW = '''    children.append(f'<child{attributes([("widget", f"{base}/button_bar"), ("y", spec.get("button_top", 414))])}/>')'''
 
 
+def find_port_settings(src_root):
+    candidates = [
+        os.path.join(src_root, "tools", "port_settings.py"),
+        os.path.join(src_root, "port", "tools", "port_settings.py"),
+        os.path.join(src_root, "port", "linux", "tools", "port_settings.py"),
+        os.path.join(src_root, "port", "pc", "tools", "port_settings.py"),
+        os.path.join(src_root, "port", "windows", "tools", "port_settings.py"),
+    ]
+    for p in candidates:
+        if os.path.exists(p):
+            return p
+    return None
+
+
 def apply_patch(src_root):
     print("== Patch: In-Game-Settings-Menue erweitern ==")
-    path = os.path.join(src_root, "tools", "port_settings.py")
-    if not os.path.exists(path):
-        print(f"WARNUNG: {path} nicht gefunden - ueberspringe.")
+    path = find_port_settings(src_root)
+    if not path:
+        print("  HINWEIS: port_settings.py nicht gefunden (Upstream ohne CE-Menus).")
+        print("           Das In-Game-Menue wird nicht erweitert - der Rest des Builds laeuft.")
         return
-
+    print(f"  port_settings.py: {path}")
     with open(path) as f:
         text = f.read()
 
     if "display.fast_shaders" in text:
-        print("port_settings.py: neue Video-Rows bereits vorhanden - ueberspringe.")
+        print("  neue Video-Rows bereits vorhanden - ueberspringe.")
         return
 
-    # 1. Neue Rows einfuegen (der Knulli-Patch hat PER-PIXEL LIGHTING auf
-    # "desktop" gesetzt; ohne Patch steht dort noch None).
-    anchors = [
-        '            ("PER-PIXEL LIGHTING:", "display.per_pixel_lighting", ON_OFF,\n'
-        '             "Light models for each pixel, without the facets\\nof the Xbox\'s lighting for each vertex.", "desktop"),\n',
-        '            ("PER-PIXEL LIGHTING:", "display.per_pixel_lighting", ON_OFF,\n'
-        '             "Light models for each pixel, without the facets\\nof the Xbox\'s lighting for each vertex.", None),\n',
-    ]
-    inserted = False
-    for anchor in anchors:
-        if anchor in text:
-            text = text.replace(anchor, anchor + NEW_ROWS, 1)
-            inserted = True
-            break
-    if not inserted:
-        print("FEHLER: PER-PIXEL LIGHTING-Anker nicht gefunden.", file=sys.stderr)
+    # 1. PER-PIXEL-LIGHTING-Zeile ersetzen: Plattform auf "desktop" + neue Zeilen.
+    replaced_row = False
+    if OLD_ROW_NONE in text:
+        text = text.replace(OLD_ROW_NONE, NEW_ROW, 1)
+        replaced_row = True
+        print("  - PER-PIXEL LIGHTING: Plattform None -> desktop, 13 neue Zeilen eingefuegt.")
+    elif OLD_ROW_DESKTOP in text:
+        text = text.replace(OLD_ROW_DESKTOP, NEW_ROW, 1)
+        replaced_row = True
+        print("  - 13 neue Zeilen nach PER-PIXEL LIGHTING eingefuegt.")
+    if not replaced_row:
+        print("  FEHLER: PER-PIXEL LIGHTING-Anker nicht gefunden.", file=sys.stderr)
         sys.exit(1)
-    print("  - 13 neue Video-Rows eingefuegt.")
 
     # 2. button_top im video_settings-Spec ergaenzen.
     if "button_top" not in text:
-        if VIDEO_SPEC_ANCHOR not in text:
-            print("FEHLER: video_settings-Spec-Anker nicht gefunden.", file=sys.stderr)
-            sys.exit(1)
-        text = text.replace(VIDEO_SPEC_ANCHOR, VIDEO_SPEC_NEW, 1)
-        print("  - button_top im video_settings-Spec ergaenzt.")
+        if VIDEO_SPEC_ANCHOR in text:
+            text = text.replace(VIDEO_SPEC_ANCHOR, VIDEO_SPEC_NEW, 1)
+            print("  - button_top im video_settings-Spec ergaenzt.")
+        else:
+            print("  WARNUNG: video_settings-Spec-Anker nicht gefunden.")
     else:
         print("  - button_top bereits vorhanden.")
 
     # 3. _screen: button_top aus dem Spec lesen.
     if 'spec.get("button_top", 414)' not in text:
-        if SCREEN_ANCHOR not in text:
-            print("FEHLER: _screen-button_bar-Anker nicht gefunden.", file=sys.stderr)
-            sys.exit(1)
-        text = text.replace(SCREEN_ANCHOR, SCREEN_NEW, 1)
-        print("  - _screen liest jetzt button_top aus dem Spec.")
-    else:
-        print("  - _screen verwendet bereits button_top.")
+        if SCREEN_ANCHOR in text:
+            text = text.replace(SCREEN_ANCHOR, SCREEN_NEW, 1)
+            print("  - _screen liest jetzt button_top aus dem Spec.")
+        else:
+            print("  WARNUNG: _screen-button_bar-Anker nicht gefunden.")
 
     with open(path, "w") as f:
         f.write(text)
-    print("port_settings.py: fertig.")
+    print("  port_settings.py: fertig.")
 
 
 if __name__ == "__main__":
