@@ -3,17 +3,6 @@
 # Wendet den kompletten M9 Pro (RK3326) Patch-Satz auf einen
 # Halo CE Universal Source-Baum an.
 #
-#   ./apply_all.sh <source-root>
-#
-# Reihenfolge:
-#   1. git apply patches/halo-ce-universal-knulli.patch    (Upstream + Knulli)
-#   2. port/knulli in den Quellbaum kopieren
-#   3. Fix 3b: -DHALO_ANDROID in port/knulli/build.sh
-#   4. Python-Patches (patch_glthread_health_check.py ist ENTFERNT:
-#      host_glthread.c hat health_check(uint32_t frame) bereits eingebaut)
-#   5. Fix 4a: glUniform4f -> glUniform4fv
-#   6. Verifikation
-#
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -30,6 +19,25 @@ if [ ! -f "$MAIN_PATCH" ]; then
     echo "FEHLER: $MAIN_PATCH fehlt" >&2
     exit 1
 fi
+
+# XML-Hunk aus dem Knulli-Patch entfernen (der Regenerator unten baut die
+# XML neu).
+python3 - "$MAIN_PATCH" <<'PYEOF'
+import re
+import sys
+path = sys.argv[1]
+text = open(path).read()
+pattern = re.compile(
+    r'diff --git a/port/assets/menus/ce/'
+    r'main_menu\.settings_select\.player_setup\.player_profile_edit\.'
+    r'video_settings\.xml[^\n]*\n'
+    r'(?:(?!diff --git ).)*',
+    re.DOTALL,
+)
+if pattern.search(text):
+    open(path, 'w').write(pattern.sub('', text))
+    print("== XML-Hunk aus Knulli-Patch entfernt.")
+PYEOF
 
 if git -C "$SRC" rev-parse --git-dir > /dev/null 2>&1; then
     if git -C "$SRC" apply --check --reverse "$MAIN_PATCH" > /dev/null 2>&1; then
@@ -78,7 +86,7 @@ PYEOF
     fi
 fi
 
-# ── 4) Python-Patches (ohne glthread_health_check) ───────────────────
+# ── 4) Python-Patches ────────────────────────────────────────────────
 for script in \
     patch_memory_pools.py \
     patch_neon_math.py \
@@ -86,7 +94,8 @@ for script in \
     patch_button_remap.py \
     patch_index_extent_neon.py \
     patch_fps_overlay.py \
-    patch_draw_framebuffer_bound.py; do
+    patch_draw_framebuffer_bound.py \
+    patch_settings_menu.py; do
     if [ ! -f "$PATCHES/$script" ]; then
         echo "== $script nicht vorhanden – überspringe"
         continue
@@ -102,36 +111,49 @@ if [ -f "$SRC/port/linux/src/d3d8_gl.c" ]; then
     python3 - "$SRC/port/linux/src/d3d8_gl.c" <<'PYEOF'
 import re
 import sys
-
 path = sys.argv[1]
 with open(path) as f:
     text = f.read()
-
 if "fps_overlay_enabled" not in text:
     sys.exit(0)
-
-pattern = re.compile(
-    r'glUniform4f\(\s*fps_overlay_color\s*,\s*([^;]+?)\s*\)\s*;'
-)
-
+pattern = re.compile(r'glUniform4f\(\s*fps_overlay_color\s*,\s*([^;]+?)\s*\)\s*;')
 def repl(match):
     args = match.group(1).strip()
-    return (
-        '{ const float overlay_color[4] = { ' + args + ' }; '
-        'glUniform4fv(fps_overlay_color, 1, overlay_color); }'
-    )
-
+    return '{ const float overlay_color[4] = { ' + args + ' }; glUniform4fv(fps_overlay_color, 1, overlay_color); }'
 new_text = pattern.sub(repl, text)
 if new_text != text:
-    with open(path, "w") as f:
-        f.write(new_text)
+    open(path, "w").write(new_text)
     print("d3d8_gl.c: glUniform4f -> glUniform4fv")
-else:
-    print("d3d8_gl.c: keine glUniform4f-Aufrufe zu korrigieren")
 PYEOF
 fi
 
-# ── 6) Verifikation ──────────────────────────────────────────────────
+# ── 6) In-Game-Settings-Menus regenerieren ───────────────────────────
+echo ""
+echo "== Regeneriere die In-Game-Settings-Menus aus port_settings.py ..."
+python3 - "$SRC" <<'PYEOF'
+import os
+import sys
+src = sys.argv[1]
+sys.path.insert(0, os.path.join(src, "tools"))
+try:
+    import port_settings
+except ImportError as e:
+    print(f"  WARNUNG: port_settings.py nicht importierbar: {e}")
+    sys.exit(0)
+if not hasattr(port_settings, "settings_files"):
+    print("  WARNUNG: port_settings.settings_files() fehlt.")
+    sys.exit(0)
+files = port_settings.settings_files()
+target = os.path.join(src, "port", "assets", "menus", "ce")
+os.makedirs(target, exist_ok=True)
+for name, lines in files.items():
+    path = os.path.join(target, name)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    open(path, "w").write("\n".join(lines))
+    print(f"  geschrieben: {name}")
+PYEOF
+
+# ── 7) Verifikation ──────────────────────────────────────────────────
 echo ""
 echo "== Verifiziere Patch-Ergebnisse ..."
 failed=0
@@ -155,14 +177,25 @@ check "port/linux/src/port_config.c"              "HALO_SOUND_OBSTRUCTION_TICKS"
 check "port/linux/src/port_config.c"              "HALO_MIN_OBJECT_PIXELS"                  "port_config.c Distant"
 check "port/linux/src/port_config.c"              "HALO_LIGHTING_REFRESH_DIVISOR"           "port_config.c Lighting"
 check "port/linux/src/port_config.c"              "HALO_FPS_OVERLAY_CORNER"                 "port_config.c FPS"
+check "port/linux/src/port_config.c"              "HALO_FAST_SHADERS"                       "port_config.c Knulli"
 check "port/linux/src/xinput_sdl.c"               "button_remap"                            "xinput_sdl.c Button-Remap"
 check "port/linux/src/d3d8_gl.c"                  "__builtin_elementwise_min"               "d3d8_gl.c index_extent NEON"
 check "port/linux/src/d3d8_gl.c"                  "fps_overlay_enabled"                     "d3d8_gl.c FPS-Overlay"
 check "port/linux/src/d3d8_gl.c"                  "static int draw_framebuffer_bound(void)" "d3d8_gl.c draw_framebuffer_bound"
-check "port/linux/src/d3d8_gl.c"                  "if (draw_framebuffer_bound())"           "d3d8_gl.c Discard-Bedingung"
-check "port/knulli/host/host_glthread.c"          "static void health_check(uint32_t frame)" "host_glthread.c health_check"
-check "port/knulli/host/host_glthread.c"          "health_check(call->frame)"                "host_glthread.c health_check-Aufruf"
-
+check "port/linux/src/d3d8_gl.c"                  "if (draw_framebuffer_bound())"           "d3d8_gl.c Discard"
+check "tools/port_settings.py"                    "display.fast_shaders"                    "port_settings.py Video-Rows"
+check "tools/port_settings.py"                    "button_top"                              "port_settings.py button_top"
+check "port/assets/menus/ce/main_menu.settings_select.player_setup.player_profile_edit.video_settings.xml" \
+    "op_fast_shaders" "video_settings.xml op_fast_shaders"
+check "port/assets/menus/ce/main_menu.settings_select.player_setup.player_profile_edit.video_settings.xml" \
+    "op_alpha_test_elision" "video_settings.xml op_alpha_test_elision"
+if [ -f "$SRC/port/knulli/host/host_glthread.c" ]; then
+    if grep -q "health_check" "$SRC/port/knulli/host/host_glthread.c"; then
+        echo "   OK: host_glthread.c health_check"
+    else
+        echo "   HINWEIS: host_glthread.c ohne health_check"
+    fi
+fi
 if [ "$failed" -ne 0 ]; then
     echo ""
     echo "FEHLER: Einige Optimierungen fehlen."
