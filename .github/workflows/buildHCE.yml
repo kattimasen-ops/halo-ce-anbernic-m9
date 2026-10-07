@@ -22,12 +22,19 @@ jobs:
       PGO_MODE: use
 
     steps:
+      - name: Install ca-certificates over HTTP first
+        run: |
+          # WICHTIG: In diesem Schritt bleibt die sources.list auf HTTP,
+          # damit apt-get ca-certificates ohne Zertifikate installieren kann.
+          # Erst danach wird auf HTTPS umgestellt.
+          apt-get update -o Acquire::Retries=2
+          apt-get install -y --no-install-recommends ca-certificates
+          update-ca-certificates
+
       - name: Configure apt for HTTPS and unreliable networks
         run: |
-          # 1. Wechselt alle HTTP-Archiveinträge auf HTTPS um, um die
-          #    aktuellen Probleme mit den HTTP-Endpunkten zu umgehen.
-          # 2. Setzt aggressive Timeouts und Wiederholungen, damit APT
-          #    nicht ewig auf einen toten Mirror wartet.
+          # Jetzt, mit installierten CA-Zertifikaten, kann auf HTTPS
+          # umgestellt werden.
           sed -i 's|http://archive.ubuntu.com|https://archive.ubuntu.com|g' /etc/apt/sources.list
           sed -i 's|http://security.ubuntu.com|https://security.ubuntu.com|g' /etc/apt/sources.list
           tee /etc/apt/apt.conf.d/99-ci-timeouts > /dev/null <<'EOF'
