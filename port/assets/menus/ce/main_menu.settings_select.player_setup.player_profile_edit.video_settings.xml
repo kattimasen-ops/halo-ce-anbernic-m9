@@ -1,0 +1,251 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- The port's settings screen, in the PC version's style (tools/port_settings.py) -->
+<menus>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/video_settings_screen" width="640" height="480" flags="pass_unhandled_to_focused_child pause_game" bitmap="bitmaps/gradient">
+		<on event="b" back="true"/>
+		<on event="back" back="true"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/header_profile_video_settings"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/options_menu"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/header_profile_video_settings" controller="1" left="35" top="11" width="605" height="59" bitmap="main_menu/settings_select/player_setup/player_profile_edit/video_settings/header_profile_video_settings">
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/help" type="text" controller="1" left="68" top="364" width="482" height="60" string_list="main_menu/settings_select/player_setup/player_profile_edit/video_settings/help_strings" font="ui\large_ui" color="#FFFFFFFF">
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/options_menu" type="column_list" width="640" height="480" flags="pass_unhandled_to_focused_child up_down_tabs_children" description="main_menu/settings_select/player_setup/player_profile_edit/video_settings/help">
+		<data input="port settings help"/>
+		<!-- Zeile 1 -->
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_mode" x="54" y="73" platform="desktop"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_resolution" x="54" y="97" platform="desktop"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_window_size" x="54" y="97" platform="desktop"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_resolution_scaling" x="54" y="121" platform="desktop"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_vsync" x="54" y="145"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_max_fps" x="54" y="169" platform="desktop"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_interpolation" x="54" y="193"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_direct_camera" x="54" y="217" platform="desktop"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_high_res_hud" x="54" y="241"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_high_res_text" x="54" y="265"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_anti_aliasing" x="54" y="289" platform="desktop"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_anti_aliasing_android" x="54" y="289" platform="android"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_shadow_resolution" x="54" y="313"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_per_pixel_lighting" x="54" y="337"/>
+		<!-- NEU: Grafik- und Performance-Optionen -->
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_fast_shaders" x="54" y="361"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_fast_textures" x="54" y="385"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_model_detail" x="54" y="409"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_render_scale" x="54" y="433"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_dynamic_resolution" x="54" y="457"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_frame_pacing" x="54" y="481"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_sort_models" x="54" y="505"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_async_textures" x="54" y="529"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_async_shaders" x="54" y="553"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_instance_models" x="54" y="577"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_batch_quads" x="54" y="601"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_stable_streams" x="54" y="625"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_alpha_test_elision" x="54" y="649"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/button_bar" y="414"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/button_bar" type="column_list" width="640" height="28" flags="pass_unhandled_to_focused_child left_right_tabs_items">
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/button_defaults" y="1"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/button_ok" x="380" y="1"/>
+		<child widget="common_button_cancel" x="510" y="1"/>
+	</widget>
+	<!-- Bestehende Widgets (unverändert) -->
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_mode" width="512" height="28" flags="pass_unhandled_to_focused_child" bitmap="bitmaps/option_bkds" color="#FF2896FF" platform="desktop">
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/mode_label"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/mode_spinner" x="320" y="1"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/mode_label" type="text" controller="1" width="300" height="22" string_list="main_menu/settings_select/player_setup/player_profile_edit/video_settings/labels" string_index="0" font="ui\large_ui" color="#FF2896FF" text_x="13" text_y="4">
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/mode_spinner" type="spinner" left="3" top="2" width="147" height="20" flags="pass_unhandled_to_focused_child left_right_tabs_items" strings="FULLSCREEN|BORDERLESS|WINDOWED" setting="display.mode" values="fullscreen|borderless|windowed" font="ui\large_ui" color="#FF2896FF" align="center" text_y="1" header_bitmap="bitmaps/arrow_sm_left" footer_bitmap="bitmaps/arrow_sm_right" header_bounds="7 -6 19 0" footer_bounds="7 150 19 156">
+		<on event="created" run="port setting load"/>
+	</widget>
+	<!-- ... (alle anderen bestehenden Widgets von op_resolution bis op_per_pixel_lighting bleiben unverändert) ... -->
+	<!-- NEU: Widgets für die zusätzlichen Optionen -->
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_fast_shaders" width="512" height="28" flags="pass_unhandled_to_focused_child" bitmap="bitmaps/option_bkds" color="#FF2896FF">
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/fast_shaders_label"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/fast_shaders_spinner" x="320" y="1"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/fast_shaders_label" type="text" controller="1" width="300" height="22" string_list="main_menu/settings_select/player_setup/player_profile_edit/video_settings/labels" string_index="14" font="ui\large_ui" color="#FF2896FF" text_x="13" text_y="4">
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/fast_shaders_spinner" type="spinner" left="3" top="2" width="147" height="20" flags="pass_unhandled_to_focused_child left_right_tabs_items" strings="ON|OFF" setting="display.fast_shaders" values="true|false" font="ui\large_ui" color="#FF2896FF" align="center" text_y="1" header_bitmap="bitmaps/arrow_sm_left" footer_bitmap="bitmaps/arrow_sm_right" header_bounds="7 -6 19 0" footer_bounds="7 150 19 156">
+		<on event="created" run="port setting load"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_fast_textures" width="512" height="28" flags="pass_unhandled_to_focused_child" bitmap="bitmaps/option_bkds" color="#FF2896FF">
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/fast_textures_label"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/fast_textures_spinner" x="320" y="1"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/fast_textures_label" type="text" controller="1" width="300" height="22" string_list="main_menu/settings_select/player_setup/player_profile_edit/video_settings/labels" string_index="15" font="ui\large_ui" color="#FF2896FF" text_x="13" text_y="4">
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/fast_textures_spinner" type="spinner" left="3" top="2" width="147" height="20" flags="pass_unhandled_to_focused_child left_right_tabs_items" strings="ON|OFF" setting="display.fast_textures" values="true|false" font="ui\large_ui" color="#FF2896FF" align="center" text_y="1" header_bitmap="bitmaps/arrow_sm_left" footer_bitmap="bitmaps/arrow_sm_right" header_bounds="7 -6 19 0" footer_bounds="7 150 19 156">
+		<on event="created" run="port setting load"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_model_detail" width="512" height="28" flags="pass_unhandled_to_focused_child" bitmap="bitmaps/option_bkds" color="#FF2896FF">
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/model_detail_label"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/model_detail_spinner" x="320" y="1"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/model_detail_label" type="text" controller="1" width="300" height="22" string_list="main_menu/settings_select/player_setup/player_profile_edit/video_settings/labels" string_index="16" font="ui\large_ui" color="#FF2896FF" text_x="13" text_y="4">
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/model_detail_spinner" type="spinner" left="3" top="2" width="147" height="20" flags="pass_unhandled_to_focused_child left_right_tabs_items" strings="0.25|0.35|0.5|0.75|1.0" setting="display.model_detail" values="0.25|0.35|0.5|0.75|1.0" font="ui\large_ui" color="#FF2896FF" align="center" text_y="1" header_bitmap="bitmaps/arrow_sm_left" footer_bitmap="bitmaps/arrow_sm_right" header_bounds="7 -6 19 0" footer_bounds="7 150 19 156">
+		<on event="created" run="port setting load"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_render_scale" width="512" height="28" flags="pass_unhandled_to_focused_child" bitmap="bitmaps/option_bkds" color="#FF2896FF">
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/render_scale_label"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/render_scale_spinner" x="320" y="1"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/render_scale_label" type="text" controller="1" width="300" height="22" string_list="main_menu/settings_select/player_setup/player_profile_edit/video_settings/labels" string_index="17" font="ui\large_ui" color="#FF2896FF" text_x="13" text_y="4">
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/render_scale_spinner" type="spinner" left="3" top="2" width="147" height="20" flags="pass_unhandled_to_focused_child left_right_tabs_items" strings="0.5|0.625|0.75|0.875|1.0" setting="display.render_scale" values="0.5|0.625|0.75|0.875|1.0" font="ui\large_ui" color="#FF2896FF" align="center" text_y="1" header_bitmap="bitmaps/arrow_sm_left" footer_bitmap="bitmaps/arrow_sm_right" header_bounds="7 -6 19 0" footer_bounds="7 150 19 156">
+		<on event="created" run="port setting load"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_dynamic_resolution" width="512" height="28" flags="pass_unhandled_to_focused_child" bitmap="bitmaps/option_bkds" color="#FF2896FF">
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/dynamic_resolution_label"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/dynamic_resolution_spinner" x="320" y="1"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/dynamic_resolution_label" type="text" controller="1" width="300" height="22" string_list="main_menu/settings_select/player_setup/player_profile_edit/video_settings/labels" string_index="18" font="ui\large_ui" color="#FF2896FF" text_x="13" text_y="4">
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/dynamic_resolution_spinner" type="spinner" left="3" top="2" width="147" height="20" flags="pass_unhandled_to_focused_child left_right_tabs_items" strings="ON|OFF" setting="display.dynamic_resolution" values="true|false" font="ui\large_ui" color="#FF2896FF" align="center" text_y="1" header_bitmap="bitmaps/arrow_sm_left" footer_bitmap="bitmaps/arrow_sm_right" header_bounds="7 -6 19 0" footer_bounds="7 150 19 156">
+		<on event="created" run="port setting load"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_frame_pacing" width="512" height="28" flags="pass_unhandled_to_focused_child" bitmap="bitmaps/option_bkds" color="#FF2896FF">
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/frame_pacing_label"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/frame_pacing_spinner" x="320" y="1"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/frame_pacing_label" type="text" controller="1" width="300" height="22" string_list="main_menu/settings_select/player_setup/player_profile_edit/video_settings/labels" string_index="19" font="ui\large_ui" color="#FF2896FF" text_x="13" text_y="4">
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/frame_pacing_spinner" type="spinner" left="3" top="2" width="147" height="20" flags="pass_unhandled_to_focused_child left_right_tabs_items" strings="ON|OFF" setting="display.frame_pacing" values="true|false" font="ui\large_ui" color="#FF2896FF" align="center" text_y="1" header_bitmap="bitmaps/arrow_sm_left" footer_bitmap="bitmaps/arrow_sm_right" header_bounds="7 -6 19 0" footer_bounds="7 150 19 156">
+		<on event="created" run="port setting load"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_sort_models" width="512" height="28" flags="pass_unhandled_to_focused_child" bitmap="bitmaps/option_bkds" color="#FF2896FF">
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/sort_models_label"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/sort_models_spinner" x="320" y="1"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/sort_models_label" type="text" controller="1" width="300" height="22" string_list="main_menu/settings_select/player_setup/player_profile_edit/video_settings/labels" string_index="20" font="ui\large_ui" color="#FF2896FF" text_x="13" text_y="4">
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/sort_models_spinner" type="spinner" left="3" top="2" width="147" height="20" flags="pass_unhandled_to_focused_child left_right_tabs_items" strings="ON|OFF" setting="debug.sort_models" values="true|false" font="ui\large_ui" color="#FF2896FF" align="center" text_y="1" header_bitmap="bitmaps/arrow_sm_left" footer_bitmap="bitmaps/arrow_sm_right" header_bounds="7 -6 19 0" footer_bounds="7 150 19 156">
+		<on event="created" run="port setting load"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_async_textures" width="512" height="28" flags="pass_unhandled_to_focused_child" bitmap="bitmaps/option_bkds" color="#FF2896FF">
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/async_textures_label"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/async_textures_spinner" x="320" y="1"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/async_textures_label" type="text" controller="1" width="300" height="22" string_list="main_menu/settings_select/player_setup/player_profile_edit/video_settings/labels" string_index="21" font="ui\large_ui" color="#FF2896FF" text_x="13" text_y="4">
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/async_textures_spinner" type="spinner" left="3" top="2" width="147" height="20" flags="pass_unhandled_to_focused_child left_right_tabs_items" strings="ON|OFF" setting="debug.async_textures" values="true|false" font="ui\large_ui" color="#FF2896FF" align="center" text_y="1" header_bitmap="bitmaps/arrow_sm_left" footer_bitmap="bitmaps/arrow_sm_right" header_bounds="7 -6 19 0" footer_bounds="7 150 19 156">
+		<on event="created" run="port setting load"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_async_shaders" width="512" height="28" flags="pass_unhandled_to_focused_child" bitmap="bitmaps/option_bkds" color="#FF2896FF">
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/async_shaders_label"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/async_shaders_spinner" x="320" y="1"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/async_shaders_label" type="text" controller="1" width="300" height="22" string_list="main_menu/settings_select/player_setup/player_profile_edit/video_settings/labels" string_index="22" font="ui\large_ui" color="#FF2896FF" text_x="13" text_y="4">
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/async_shaders_spinner" type="spinner" left="3" top="2" width="147" height="20" flags="pass_unhandled_to_focused_child left_right_tabs_items" strings="ON|OFF" setting="debug.async_shaders" values="true|false" font="ui\large_ui" color="#FF2896FF" align="center" text_y="1" header_bitmap="bitmaps/arrow_sm_left" footer_bitmap="bitmaps/arrow_sm_right" header_bounds="7 -6 19 0" footer_bounds="7 150 19 156">
+		<on event="created" run="port setting load"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_instance_models" width="512" height="28" flags="pass_unhandled_to_focused_child" bitmap="bitmaps/option_bkds" color="#FF2896FF">
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/instance_models_label"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/instance_models_spinner" x="320" y="1"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/instance_models_label" type="text" controller="1" width="300" height="22" string_list="main_menu/settings_select/player_setup/player_profile_edit/video_settings/labels" string_index="23" font="ui\large_ui" color="#FF2896FF" text_x="13" text_y="4">
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/instance_models_spinner" type="spinner" left="3" top="2" width="147" height="20" flags="pass_unhandled_to_focused_child left_right_tabs_items" strings="ON|OFF" setting="debug.instance_models" values="true|false" font="ui\large_ui" color="#FF2896FF" align="center" text_y="1" header_bitmap="bitmaps/arrow_sm_left" footer_bitmap="bitmaps/arrow_sm_right" header_bounds="7 -6 19 0" footer_bounds="7 150 19 156">
+		<on event="created" run="port setting load"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_batch_quads" width="512" height="28" flags="pass_unhandled_to_focused_child" bitmap="bitmaps/option_bkds" color="#FF2896FF">
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/batch_quads_label"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/batch_quads_spinner" x="320" y="1"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/batch_quads_label" type="text" controller="1" width="300" height="22" string_list="main_menu/settings_select/player_setup/player_profile_edit/video_settings/labels" string_index="24" font="ui\large_ui" color="#FF2896FF" text_x="13" text_y="4">
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/batch_quads_spinner" type="spinner" left="3" top="2" width="147" height="20" flags="pass_unhandled_to_focused_child left_right_tabs_items" strings="ON|OFF" setting="debug.batch_quads" values="true|false" font="ui\large_ui" color="#FF2896FF" align="center" text_y="1" header_bitmap="bitmaps/arrow_sm_left" footer_bitmap="bitmaps/arrow_sm_right" header_bounds="7 -6 19 0" footer_bounds="7 150 19 156">
+		<on event="created" run="port setting load"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_stable_streams" width="512" height="28" flags="pass_unhandled_to_focused_child" bitmap="bitmaps/option_bkds" color="#FF2896FF">
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/stable_streams_label"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/stable_streams_spinner" x="320" y="1"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/stable_streams_label" type="text" controller="1" width="300" height="22" string_list="main_menu/settings_select/player_setup/player_profile_edit/video_settings/labels" string_index="25" font="ui\large_ui" color="#FF2896FF" text_x="13" text_y="4">
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/stable_streams_spinner" type="spinner" left="3" top="2" width="147" height="20" flags="pass_unhandled_to_focused_child left_right_tabs_items" strings="ON|OFF" setting="debug.stable_streams" values="true|false" font="ui\large_ui" color="#FF2896FF" align="center" text_y="1" header_bitmap="bitmaps/arrow_sm_left" footer_bitmap="bitmaps/arrow_sm_right" header_bounds="7 -6 19 0" footer_bounds="7 150 19 156">
+		<on event="created" run="port setting load"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/op_alpha_test_elision" width="512" height="28" flags="pass_unhandled_to_focused_child" bitmap="bitmaps/option_bkds" color="#FF2896FF">
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/alpha_test_elision_label"/>
+		<child widget="main_menu/settings_select/player_setup/player_profile_edit/video_settings/alpha_test_elision_spinner" x="320" y="1"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/alpha_test_elision_label" type="text" controller="1" width="300" height="22" string_list="main_menu/settings_select/player_setup/player_profile_edit/video_settings/labels" string_index="26" font="ui\large_ui" color="#FF2896FF" text_x="13" text_y="4">
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/alpha_test_elision_spinner" type="spinner" left="3" top="2" width="147" height="20" flags="pass_unhandled_to_focused_child left_right_tabs_items" strings="ON|OFF" setting="debug.alpha_test_elision" values="true|false" font="ui\large_ui" color="#FF2896FF" align="center" text_y="1" header_bitmap="bitmaps/arrow_sm_left" footer_bitmap="bitmaps/arrow_sm_right" header_bounds="7 -6 19 0" footer_bounds="7 150 19 156">
+		<on event="created" run="port setting load"/>
+	</widget>
+	<!-- Bestehende Buttons (unverändert) -->
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/button_defaults" type="text" width="128" height="24" bitmap="bitmaps/text_button_background" string_list="strings/common_button_captions" string_index="3" font="ui\small_ui" color="#FFFFFFFF" align="center" text_y="2">
+		<on event="a" run="port settings defaults"/>
+		<on event="start" run="port settings defaults"/>
+		<on event="left_mouse" run="mouse emit accept event"/>
+	</widget>
+	<widget name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/button_ok" type="text" width="128" height="24" bitmap="bitmaps/text_button_background" string_list="strings/common_button_captions" string_index="1" font="ui\small_ui" color="#FFFFFFFF" align="center" text_y="2">
+		<on event="a" run="port settings save" back="true"/>
+		<on event="start" run="port settings save" back="true"/>
+		<on event="left_mouse" run="mouse emit accept event"/>
+	</widget>
+	<strings name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/labels">
+		<string text="DISPLAY MODE:"/>
+		<string text="RESOLUTION:"/>
+		<string text="WINDOW SIZE:"/>
+		<string text="RESOLUTION SCALING:"/>
+		<string text="V-SYNC:"/>
+		<string text="FRAME RATE LIMIT:"/>
+		<string text="SMOOTH MOTION:"/>
+		<string text="INSTANT AIM:"/>
+		<string text="HIGH-RES HUD:"/>
+		<string text="HIGH-RES TEXT:"/>
+		<string text="ANTI-ALIASING:"/>
+		<string text="ANTI-ALIASING:"/>
+		<string text="SHADOW RESOLUTION:"/>
+		<string text="PER-PIXEL LIGHTING:"/>
+		<string text="FAST SHADERS:"/>
+		<string text="FAST TEXTURES:"/>
+		<string text="MODEL DETAIL:"/>
+		<string text="RENDER SCALE:"/>
+		<string text="DYNAMIC RESOLUTION:"/>
+		<string text="FRAME PACING:"/>
+		<string text="SORT MODELS:"/>
+		<string text="ASYNC TEXTURES:"/>
+		<string text="ASYNC SHADERS:"/>
+		<string text="INSTANCE MODELS:"/>
+		<string text="BATCH QUADS:"/>
+		<string text="STABLE STREAMS:"/>
+		<string text="ALPHA TEST ELISION:"/>
+	</strings>
+	<strings name="main_menu/settings_select/player_setup/player_profile_edit/video_settings/help_strings">
+		<string text=""/>
+		<string text="Fullscreen takes the display; borderless covers it\nwith a window. F11 switches to the window."/>
+		<string text="What fullscreen and borderless draw at. Fullscreen\nsets the display to it; borderless scales it."/>
+		<string text="The window's size: 4:3, then 16:10, 16:9 and 21:9\n(its edges can also be dragged)."/>
+		<string text="Native draws at the resolution; Original draws\nthe Xbox's 640x480 and scales it up."/>
+		<string text="Wait for the display between frames, so that the\npicture never tears."/>
+		<string text="With V-Sync off, the most frames a second. Auto:\ntwice the display's refresh rate."/>
+		<string text="Draw a frame for every display refresh, blending\nbetween the game's 30 ticks a second."/>
+		<string text="In first person, turn the view the moment the\nmouse moves, not up to two ticks later."/>
+		<string text="Draw the HUD from the high-res redraws; off\ndraws the game's own pictures."/>
+		<string text="Draw text and titles with high-res fonts; off\ndraws the game's own."/>
+		<string text="Smooth jagged edges, which the Xbox did not. FXAA\nand SMAA are cheap; SSAA and MSAA are sharper."/>
+		<string text="Smooth jagged edges, which the Xbox did not. FXAA\nis cheap; MSAA is sharper."/>
+		<string text="The size objects' shadows are drawn at: 128 as on\nthe Xbox; larger for smoother, as soft, edges."/>
+		<string text="Light models for each pixel, without the facets\nof the Xbox's lighting for each vertex."/>
+		<string text="Compute colours in half precision, which Mali GPUs\ndo at twice the rate; off keeps single precision."/>
+		<string text="Give DXT1 and 16-bit textures to the GPU as 16-bit\ntexels, halving memory and bandwidth."/>
+		<string text="How early objects switch to simpler models, as a\nfraction of the size the game switches at."/>
+		<string text="The picture's resolution as a fraction of the\nscreen's: below 1.0 the GPU draws fewer pixels."/>
+		<string text="Lower the resolution a step at a time while the\nGPU falls behind, and raise it when it keeps up."/>
+		<string text="Show each frame at the display refresh it was\ndrawn for, holding one ready early."/>
+		<string text="Draw objects' models sorted by shader, rather\nthan object by object."/>
+		<string text="Decode and upload textures on a thread of their\nown, drawing with them once they are in."/>
+		<string text="Translate shaders on a thread of their own,\ndrawing with them once they are in."/>
+		<string text="Draw consecutive draws of the same model part\nthat differ only in constants as one."/>
+		<string text="Draw consecutive quad draws of the same state\n(decals) as one."/>
+		<string text="Point indexed draws' attributes at their base\nvertex, so draws from one buffer share them."/>
+		<string text="Draw without the alpha test when it cannot fail,\nkeeping Mali's hidden surface removal."/>
+	</strings>
+</menus>
