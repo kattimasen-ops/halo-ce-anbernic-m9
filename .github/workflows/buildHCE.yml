@@ -19,13 +19,25 @@ jobs:
 
     env:
       DEBIAN_FRONTEND: noninteractive
-      # Release-Build mit PGO (Linux-Profil) und LTO
       PGO_MODE: use
 
     steps:
+      - name: Configure apt for unreliable networks
+        run: |
+          # Kuerzere Timeouts, damit APT schnell auf einen anderen Mirror
+          # ausweicht und nicht ewig auf eine tote Verbindung wartet
+          # (archive.ubuntu.com hat seit einiger Zeit Ausfaelle).
+          tee /etc/apt/apt.conf.d/99-ci-timeouts > /dev/null <<'EOF'
+          Acquire::Retries "2";
+          Acquire::http::Timeout "20";
+          Acquire::https::Timeout "20";
+          Acquire::ftp::Timeout "20";
+          Acquire::http::Pipeline-Depth "0";
+          EOF
+
       - name: Install base tools in container
         run: |
-          apt-get update
+          apt-get update -o Acquire::Retries=2
           apt-get install -y --no-install-recommends \
             ca-certificates software-properties-common gnupg \
             python3 python3-pip ninja-build git curl wget tar unzip xz-utils \
@@ -45,7 +57,7 @@ jobs:
             'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-updates main restricted universe multiverse' \
             'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-security main restricted universe multiverse' \
             > /etc/apt/sources.list
-          apt-get update
+          apt-get update -o Acquire::Retries=2
           apt-get install -y --no-install-recommends \
             libdrm-dev:arm64 \
             libgbm-dev:arm64 \
@@ -171,7 +183,13 @@ jobs:
                    patches/patch_neon_math.py \
                    patches/patch_vita_optimizations.py \
                    patches/patch_button_remap.py \
-                   patches/patch_index_extent_neon.py; do
+                   patches/patch_index_extent_neon.py \
+                   patches/patch_fps_overlay.py \
+                   patches/patch_draw_framebuffer_bound.py \
+                   patches/patch_settings_menu.py \
+                   patches/patch_config_defaults.py \
+                   patches/patch_credits.py \
+                   patches/patch_credits_xml.py; do
             [ -f "$f" ] || { echo "FEHLT: $f"; exit 1; }
           done
           echo "== PGO_MODE: $PGO_MODE"
@@ -201,10 +219,13 @@ jobs:
             work/halo-ce-universal/source/effects/decals.c
             work/halo-ce-universal/source/math/matrix_math.c
             work/halo-ce-universal/source/cseries/cseries.h
+            work/halo-ce-universal/source/main/main.c
             work/halo-ce-universal/port/linux/src/port_config.c
             work/halo-ce-universal/port/linux/src/xinput_sdl.c
             work/halo-ce-universal/port/linux/src/d3d8_gl.c
             work/halo-ce-universal/port/android/guest/runtime/guest_string.c
+            work/halo-ce-universal/tools/port_settings.py
+            work/halo-ce-universal/port/assets/menus/ce/main_menu.settings_select.player_setup.player_profile_edit.video_settings.xml
           if-no-files-found: warn
           retention-days: 7
 
@@ -214,7 +235,7 @@ jobs:
           SIZE_MB=$((SIZE / 1048576))
           echo "== halo_guest.elf: $SIZE Bytes (~${SIZE_MB} MB)"
           if [ "$SIZE" -lt 4000000 ]; then
-            echo "WARNUNG: halo_guest.elf ungewoehnlich klein (${SIZE_MB} MB) – PGO/LTO pruefen"
+            echo "WARNUNG: halo_guest.elf ungewoehnlich klein (${SIZE_MB} MB) - PGO/LTO pruefen"
           fi
           ls -la dist/
 
