@@ -10,6 +10,7 @@ set -euo pipefail
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 SRC=${1:?usage: apply_all.sh <source-root>}
 OPEN_CE_URL=${OPEN_CE_URL:-https://github.com/OpenCommunityEdition/OpenCE.git}
+OPEN_CE_TARBALL_URL=${OPEN_CE_TARBALL_URL:-https://github.com/OpenCommunityEdition/OpenCE/archive/refs/heads/main.tar.gz}
 
 [ -d "$SRC" ] || { echo "FEHLER: $SRC ist kein Verzeichnis" >&2; exit 1; }
 SRC=$(cd "$SRC" && pwd)
@@ -19,25 +20,30 @@ MAIN_PATCH=$PATCHES/halo-ce-universal-knulli.patch
 WORK_TMP=$(mktemp -d)
 trap 'rm -rf "$WORK_TMP"' EXIT
 
-# ── 1) OpenCE-Dateien holen (port_settings.py + Menue-Ordner) ──────
-# Wird VOR dem Knulli-Patch ausgefuehrt. Sparse-Checkout ueber einen
-# shallow Clone, damit keine GitHub-API-Limits getroffen werden.
+# ── 1) OpenCE-Dateien holen ─────────────────────────────────────────
 fetch_opence_files() {
     local opence_dir="$WORK_TMP/opence-source"
+    local opence_tarball="$WORK_TMP/opence-main.tar.gz"
 
     echo "== Hole OpenCE-Dateien (port_settings.py + Menue-Ordner) ..."
     rm -rf "$opence_dir"
 
-    if ! git clone --depth 1 --filter=blob:none --sparse \
-        "$OPEN_CE_URL" "$opence_dir" > /dev/null 2>&1; then
-        echo "FEHLER: Konnte OpenCE nicht klonen ($OPEN_CE_URL)." >&2
-        exit 1
-    fi
-
-    if ! git -C "$opence_dir" sparse-checkout set \
-        tools port/assets/menus/ce > /dev/null 2>&1; then
-        echo "FEHLER: Sparse-Checkout in OpenCE fehlgeschlagen." >&2
-        exit 1
+    if git clone --depth 1 "$OPEN_CE_URL" "$opence_dir" > /dev/null 2>&1; then
+        echo "   + Git-Clone erfolgreich."
+    else
+        echo "   Git-Clone fehlgeschlagen, versuche Tarball ..."
+        rm -f "$opence_tarball"
+        if ! curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 30 \
+            -o "$opence_tarball" "$OPEN_CE_TARBALL_URL"; then
+            echo "FEHLER: Konnte OpenCE nicht klonen und auch nicht als Tarball laden." >&2
+            exit 1
+        fi
+        mkdir -p "$opence_dir"
+        if ! tar -xzf "$opence_tarball" -C "$opence_dir" --strip-components=1; then
+            echo "FEHLER: Konnte OpenCE-Tarball nicht entpacken." >&2
+            exit 1
+        fi
+        echo "   + Tarball erfolgreich."
     fi
 
     if [ -f "$opence_dir/tools/port_settings.py" ]; then
@@ -79,7 +85,7 @@ fetch_opence_files() {
         fi
     done
 
-    rm -rf "$opence_dir"
+    rm -rf "$opence_dir" "$opence_tarball"
     echo "== OpenCE-Dateien geholt."
 }
 
@@ -110,7 +116,6 @@ open(path, 'w').write(new_text)
 print("  XML-Hunk entfernt.")
 PYEOF
 
-# OpenCE-Dateien holen BEVOR der Patch angewendet wird
 fetch_opence_files
 
 if git -C "$SRC" rev-parse --git-dir > /dev/null 2>&1; then
