@@ -8,11 +8,13 @@ Setzt folgende Hooks:
   4. cache_files.c: Tag-Accessors + menu_tags_loaded/unloaded
   5. menu_tags.c: Solo-Pause-Patch (SETTINGS auch in der Kampagne)
   6. menu_files.c: externe Deklaration von config_folder
-     (hud_hires.h wird bereits von menu_files.c eingebunden, daher KEINE
-     manuelle hud_hires_png_texture-Deklaration mehr — sonst Konflikt
-     mit dem const-void-Prototyp im OpenCE-Header)
-  7. tools/linux_build.py + tools/android_build.py: Expat UND zlib
-  8. port/linux/port.json: "dl" in libraries
+  7. port_settings_shim.c: OpenCE-Plattformfunktionen als Shim nach
+     port/linux/game/ kopieren (config_text, config_write,
+     config_default, config_folder, platform_display_apply,
+     platform_request_quit, platform_window_sizes,
+     platform_display_resolutions, ui_widget_port_go_back)
+  8. tools/linux_build.py + tools/android_build.py: Expat UND zlib
+  9. port/linux/port.json: "dl" in libraries
 
 Idempotent ueber Marker-Kommentare.
 """
@@ -26,9 +28,6 @@ import sys
 # Hilfsfunktionen
 # ══════════════════════════════════════════════════════════════════════
 def _find_function_param(args, strict=False):
-    """Sucht in den Argumenten den Parameter, dessen Name 'function'
-    enthaelt. strict=True: nur wenn gefunden (sonst None). strict=False:
-    Fallback auf das letzte Argument."""
     for arg in args:
         parts = arg.split()
         if not parts:
@@ -44,9 +43,6 @@ def _find_function_param(args, strict=False):
 
 
 def _insert_include(text, include_line, anchors):
-    """Fuegt `include_line` (mit Newline am Ende) nach dem ersten
-    passenden Anker ein. Wenn kein Anker passt: am Dateianfang.
-    Gibt (text, wo) zurueck."""
     if include_line.strip() in text:
         return text, "bereits vorhanden"
     for anchor in anchors:
@@ -516,18 +512,7 @@ static void pause_patch_solo(struct cache_file_tag_instance *instances)
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 5b. menu_files.c: externe Deklarationen
-#
-# Die OpenCE-Version von menu_files.c bindet bereits "hud_hires.h" ein
-# (siehe opence/port/linux/src/menu_files.c, Abschnitt 08 der
-# OPENCE-ANALYSE). Damit ist hud_hires_png_texture dort bereits
-# deklariert — eine zweite, manuelle Deklaration fuehrte zum Konflikt
-# "conflicting types for 'hud_hires_png_texture'", weil der OpenCE-Header
-# `const void *` verwendet, die manuelle Deklaration aber
-# `const unsigned char *`.
-#
-# Nur config_folder() fehlt: sie ist im Knulli-Baum nicht in einem
-# oeffentlich sichtbaren Header deklariert.
+# 6. menu_files.c: externe Deklaration von config_folder
 # ══════════════════════════════════════════════════════════════════════
 def patch_menu_files_externs(src_root):
     path = os.path.join(src_root, "port", "linux", "src", "menu_files.c")
@@ -539,7 +524,6 @@ def patch_menu_files_externs(src_root):
     if "settings_only: externals" in text:
         print("  menu_files.c: externals bereits vorhanden.")
         return
-    # Anker: nach dem letzten Include-Block
     anchors = (
         '#include "xgpu.h"\n',
         '#include "port_config.h"\n',
@@ -554,10 +538,6 @@ def patch_menu_files_externs(src_root):
     if anchor is None:
         print("  WARNUNG: menu_files.c Anker nicht gefunden.")
         return
-    # hud_hires_png_texture wird NICHT mehr manuell deklariert:
-    # menu_files.c bindet bereits "hud_hires.h" ein (OpenCE-Version),
-    # die den Prototyp mit `const void *` bereitstellt. Nur
-    # config_folder() fehlt.
     externs = anchor + (
         '\n/* settings_only: externals — config_folder() ist im Knulli-Baum\n'
         'nicht oeffentlich deklariert; hud_hires_png_texture() kommt aus\n'
@@ -571,7 +551,39 @@ def patch_menu_files_externs(src_root):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 6. tools/linux_build.py + tools/android_build.py: Expat UND zlib
+# 7. port_settings_shim.c nach port/linux/game/ kopieren
+# ══════════════════════════════════════════════════════════════════════
+def patch_settings_shim(src_root):
+    """Kopiert port_settings_shim.c aus patches/ nach port/linux/game/.
+
+    Die Datei stellt die 9 OpenCE-Plattformfunktionen bereit, die
+    menu_functions.c, menu_tags.c und menu_files.c aufrufen, im Knulli-
+    Port aber nicht existieren. port/linux/game/*.c wird vom Build
+    automatisch kompiliert (glob "*.c")."""
+    patch_dir = os.path.dirname(os.path.abspath(__file__))
+    src = os.path.join(patch_dir, "port_settings_shim.c")
+    if not os.path.exists(src):
+        print(f"  WARNUNG: {src} fehlt. Link wird mit 9 undefinierten")
+        print("           Symbolen fehlschlagen.")
+        return
+    dst_dir = os.path.join(src_root, "port", "linux", "game")
+    os.makedirs(dst_dir, exist_ok=True)
+    dst = os.path.join(dst_dir, "port_settings_shim.c")
+    with open(src) as f:
+        text = f.read()
+    if os.path.exists(dst):
+        with open(dst) as f:
+            existing = f.read()
+        if existing == text:
+            print("  port_settings_shim.c: bereits aktuell.")
+            return
+    with open(dst, "w") as f:
+        f.write(text)
+    print("  port_settings_shim.c: kopiert nach port/linux/game/.")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 8. tools/linux_build.py + tools/android_build.py: Expat UND zlib
 # ══════════════════════════════════════════════════════════════════════
 def patch_linux_build(src_root):
     path = os.path.join(src_root, "tools", "linux_build.py")
@@ -670,7 +682,7 @@ def patch_android_build(src_root):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 7. port/linux/port.json: "dl" in libraries
+# 9. port/linux/port.json: "dl" in libraries
 # ══════════════════════════════════════════════════════════════════════
 def patch_port_json(src_root):
     path = os.path.join(src_root, "port", "linux", "port.json")
@@ -697,6 +709,7 @@ def apply_patch(src_root):
     patch_cache_files(src_root)
     patch_menu_tags_solo_pause(src_root)
     patch_menu_files_externs(src_root)
+    patch_settings_shim(src_root)
     patch_linux_build(src_root)
     patch_android_build(src_root)
     patch_port_json(src_root)
