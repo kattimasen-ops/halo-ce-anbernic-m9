@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """patch_settings_only.py — haengt das PC-Settings-Menue an den Knulli-Baum.
 
-Nach dem Knulli-Patch werden folgende Hooks gesetzt:
+Setzt folgende Hooks:
   1. ui_widget.c: Forward-Deklaration `pc_menu_tag`
   2. ui_widget_event_handler_functions.c: Dispatcher + Name-Lookup
   3. ui_widget_game_data_input_functions.c: Dispatcher
   4. cache_files.c: Tag-Accessors + menu_tags_loaded/unloaded
-  5. tools/linux_build.py + tools/android_build.py: Expat
-  6. port/linux/port.json: "dl" in libraries
+  5. menu_tags.c: Solo-Pause-Patch (SETTINGS auch in der Kampagne)
+  6. tools/linux_build.py + tools/android_build.py: Expat
+  7. port/linux/port.json: "dl" in libraries
 
 Idempotent ueber Marker-Kommentare.
 """
@@ -45,7 +46,7 @@ def patch_ui_widget(src_root):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 2. ui_widget_event_handler_functions.c: Dispatcher + Name-Lookup
+# 2. ui_widget_event_handler_functions.c
 # ══════════════════════════════════════════════════════════════════════
 def patch_event_dispatcher(src_root):
     path = os.path.join(src_root, "source", "interface",
@@ -59,24 +60,20 @@ def patch_event_dispatcher(src_root):
         print("  ui_widget_event_handler_functions.c: bereits gepatcht.")
         return
 
-    # 1. halo_menus.h Include
     anchor = '#include "text/unicode.h"\n'
     if anchor in text and '#include "halo_menus.h"' not in text:
         text = text.replace(anchor, anchor + '#include "halo_menus.h" /* settings_only */\n', 1)
 
-    # 2. Dispatcher in ui_widget_event_handler_function_invoke
-    # Suche den Anfang der Funktion
     needle = 'boolean ui_widget_event_handler_function_invoke(\n'
     idx = text.find(needle)
     if idx < 0:
         print("FEHLER: ui_widget_event_handler_function_invoke fehlt.", file=sys.stderr)
         sys.exit(1)
-    # Finde die schliessende Klammer des Funktionskopfes, dann die erste Anweisung
     close = text.find(')\n{', idx)
     if close < 0:
         print("FEHLER: Funktion-Rumpf nicht gefunden.", file=sys.stderr)
         sys.exit(1)
-    insert_at = close + 3  # hinter "{\n"
+    insert_at = close + 3
     dispatch = (
         '\n\t/* settings_only: dispatcher */\n'
         '\tif (function_index >= PC_MENU_FUNCTION_BASE && function_index < 0x8000)\n'
@@ -89,7 +86,6 @@ def patch_event_dispatcher(src_root):
     )
     text = text[:insert_at] + dispatch + text[insert_at:]
 
-    # 3. Name-Lookup-Funktion am Ende anhaengen
     text += (
         '\n\n'
         '/* settings_only: name-lookup fuer menu_tags.c */\n'
@@ -105,7 +101,7 @@ def patch_event_dispatcher(src_root):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 3. ui_widget_game_data_input_functions.c: Dispatcher
+# 3. ui_widget_game_data_input_functions.c
 # ══════════════════════════════════════════════════════════════════════
 def patch_game_data_dispatcher(src_root):
     path = os.path.join(src_root, "source", "interface",
@@ -119,12 +115,10 @@ def patch_game_data_dispatcher(src_root):
         print("  ui_widget_game_data_input_functions.c: bereits gepatcht.")
         return
 
-    # halo_menus.h Include
     anchor = '#include "cseries.h"\n'
     if anchor in text and '#include "halo_menus.h"' not in text:
         text = text.replace(anchor, anchor + '#include "halo_menus.h" /* settings_only */\n', 1)
 
-    # Suche die Dispatcher-Funktion
     needle = 'void ui_widget_game_data_input_function_invoke(\n'
     idx = text.find(needle)
     if idx < 0:
@@ -164,7 +158,6 @@ def patch_cache_files(src_root):
         print("  cache_files.c: bereits gepatcht.")
         return
 
-    # 1. global_tag_count Variable
     anchor = 'extern struct cache_file_tag_instance *global_tag_instances;\n'
     if anchor not in text:
         print("FEHLER: global_tag_instances-Anker fehlt.", file=sys.stderr)
@@ -175,13 +168,11 @@ def patch_cache_files(src_root):
     )
     text = text.replace(anchor, add, 1)
 
-    # 2. tag_count -> global_tag_count in tag_loaded und iterator
     text = text.replace(
         'absolute_index < cache_file_globals.tag_header->tag_count',
         'absolute_index < global_tag_count',
     )
 
-    # 3. Accessors einfuegen (vor tag_files_open)
     anchor = 'void tag_files_open(\n\tvoid)\n'
     add = (
         '/* settings_only: cache_files */\n'
@@ -199,7 +190,6 @@ def patch_cache_files(src_root):
     if anchor in text:
         text = text.replace(anchor, add, 1)
 
-    # 4. menu_tags_unloaded in scenario_tags_unload
     anchor = '\tcache_file_globals.tags_loaded = FALSE;\n'
     add = (
         '\t/* settings_only: Menue-Tags zuerst freigeben */\n'
@@ -211,7 +201,6 @@ def patch_cache_files(src_root):
     if anchor in text:
         text = text.replace(anchor, add, 1)
 
-    # 5. menu_tags_loaded in scenario_tags_load (nach tags_loaded = TRUE)
     anchor = '\t\t\tcache_file_globals.tags_loaded = TRUE;\n'
     add = anchor + (
         '\t\t\t/* settings_only: Menue-Tags an die Tag-Tabelle anhaengen */\n'
@@ -229,7 +218,223 @@ def patch_cache_files(src_root):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 5. tools/linux_build.py + android_build.py: Expat
+# 5. menu_tags.c: Solo-Pause-Patch
+#
+# Erweitert die Guard-Bedingung so, dass die Menue-Tags auch auf
+# Solo-Maps geladen werden (nicht nur bei display.menus = "pc" und
+# nicht nur auf Multiplayer-Maps). Der Pause-Patch wird in zwei
+# Funktionen aufgeteilt: pause_patch_multiplayer (unveraendert) und
+# pause_patch_solo (neu, fuer ui\shell\solo_game).
+# ══════════════════════════════════════════════════════════════════════
+def patch_menu_tags_solo_pause(src_root):
+    path = os.path.join(src_root, "port", "linux", "game", "menu_tags.c")
+    if not os.path.exists(path):
+        print(f"FEHLER: {path} nicht gefunden.", file=sys.stderr)
+        sys.exit(1)
+    with open(path) as f:
+        text = f.read()
+    if "settings_only: solo_pause" in text:
+        print("  menu_tags.c: Solo-Pause-Patch bereits aktiv.")
+        return
+
+    # ── 5a. SOLO_COLLECTION define ──────────────────────────────────
+    anchor = '#define MULTIPLAYER_COLLECTION "ui\\\\shell\\\\multiplayer"\n'
+    if anchor not in text:
+        print("FEHLER: MULTIPLAYER_COLLECTION-Anker fehlt.", file=sys.stderr)
+        sys.exit(1)
+    add = anchor + (
+        '/* settings_only: solo_pause — Kampagnen-Pause-Collection */\n'
+        '#define SOLO_COLLECTION "ui\\\\shell\\\\solo_game"\n'
+    )
+    text = text.replace(anchor, add, 1)
+
+    # ── 5b. pause_patch -> pause_patch_multiplayer umbenennen ───────
+    old_def = 'static void pause_patch(struct cache_file_tag_instance *instances)\n'
+    new_def = 'static void pause_patch_multiplayer(struct cache_file_tag_instance *instances) /* settings_only: solo_pause */\n'
+    if old_def not in text:
+        print("FEHLER: pause_patch-Definition nicht gefunden.", file=sys.stderr)
+        sys.exit(1)
+    text = text.replace(old_def, new_def, 1)
+
+    # ── 5c. pause_patch_solo vor menu_tags_loaded einfuegen ─────────
+    anchor = 'void menu_tags_loaded(\n'
+    if anchor not in text:
+        print("FEHLER: menu_tags_loaded-Anker fehlt.", file=sys.stderr)
+        sys.exit(1)
+
+    solo_fn = r'''
+/* settings_only: solo_pause — findet den letzten Button einer Liste, der
+tatsaechlich einen Event-Handler hat. Das ist im Pause-Menue der QUIT-Button. */
+static long pause_last_button(struct ui_widget_definition const *list)
+{
+	struct ui_widget_child_reference const *children = list->child_widgets.address;
+	long child, last = NONE;
+
+	for (child = 0; child < list->child_widgets.count; child++)
+	{
+		struct ui_widget_definition const *button;
+
+		if (children[child].widget_tag.index == NONE)
+			continue;
+		button = tag_get(UI_WIDGET_DEFINITION_TAG, children[child].widget_tag.index);
+		if (button->event_handlers.count > 0)
+			last = child;
+	}
+	return last;
+}
+
+/* settings_only: solo_pause — haengt einen SETTINGS-Button an die
+Pause-Liste der Kampagne (ui\shell\solo_game\pause_game). Der Button
+oeffnet denselben Settings-Screen wie der Multiplayer-Patch. Kein
+END GAME (das gibt es nur im Multiplayer). */
+static void pause_patch_solo(struct cache_file_tag_instance *instances)
+{
+	long collection = tag_loaded('Soul', SOLO_COLLECTION);
+	struct tag_block const *screens;
+	long patched_list = NONE, buttons = 0, screen;
+	boolean box_redrawn = FALSE;
+
+	if (collection == NONE)
+	{
+		platform_log("menus: solo_pause: no solo collection found");
+		return;
+	}
+	screens = tag_get('Soul', collection);
+	platform_log("menus: solo_pause: %ld screens in solo collection", screens->count);
+	for (screen = 0; screen < screens->count; screen++)
+	{
+		long screen_tag = ((struct tag_reference const *)screens->address)[screen].index;
+		struct ui_widget_definition *definition;
+		struct ui_widget_child_reference *children;
+		long child, list_child = NONE, box_child = NONE, quit;
+		short grow, list_top;
+
+		if (screen_tag == NONE)
+			continue;
+		definition = tag_get(UI_WIDGET_DEFINITION_TAG, screen_tag);
+		children = definition->child_widgets.address;
+		for (child = 0; child < definition->child_widgets.count && list_child == NONE; child++)
+		{
+			struct ui_widget_definition *list;
+			long added;
+
+			if (children[child].widget_tag.index == NONE)
+				continue;
+			list = tag_get(UI_WIDGET_DEFINITION_TAG, children[child].widget_tag.index);
+			if (list->type != _widget_type_column_list)
+				continue;
+			if (children[child].widget_tag.index == patched_list)
+			{
+				list_child = child;
+				continue;
+			}
+			quit = pause_last_button(list);
+			if (quit == NONE || patched_list != NONE)
+				continue;
+			added = pause_list_patch(instances, list, quit, FALSE);
+			if (!added)
+				return;
+			buttons = list->child_widgets.count;
+			patched_list = children[child].widget_tag.index;
+			list_child = child;
+		}
+		if (list_child == NONE)
+			continue;
+		for (child = 0; child < definition->child_widgets.count; child++)
+		{
+			if (child != list_child && children[child].widget_tag.index != NONE &&
+				pause_box_stock(tag_get(UI_WIDGET_DEFINITION_TAG, children[child].widget_tag.index)))
+			{
+				box_child = child;
+			}
+		}
+		grow = (short)(1 * PAUSE_BUTTON_SPACING);
+		list_top = children[list_child].vertical_offset;
+		for (child = 0; child < definition->child_widgets.count; child++)
+		{
+			if (box_child != NONE && (child == box_child || child == list_child))
+				children[child].vertical_offset -= grow / 2;
+			else if (children[child].vertical_offset > list_top)
+				children[child].vertical_offset += box_child != NONE ? grow - grow / 2 : grow;
+		}
+		if (box_child != NONE && !box_redrawn)
+		{
+			pause_box_redraw(tag_get(UI_WIDGET_DEFINITION_TAG, children[box_child].widget_tag.index), buttons);
+			box_redrawn = TRUE;
+		}
+	}
+	if (patched_list != NONE)
+		platform_log("menus: the solo pause menu has SETTINGS");
+	else
+		platform_log("menus: solo_pause: no column list patched");
+}
+
+'''
+    text = text.replace(anchor, solo_fn + anchor, 1)
+
+    # ── 5d. Guard in menu_tags_loaded erweitern ─────────────────────
+    old_guard = '''	boolean game_map = strcmp(map_name, "ui") != 0;
+
+	/* (ui.map, and a multiplayer map: its pause menu's SETTINGS) */
+	if ((game_map && tag_loaded('Soul', MULTIPLAYER_COLLECTION) == NONE) ||
+		strcmp(config_string("display.menus"), "pc"))
+	{
+		return;
+	}'''
+    new_guard = '''	boolean game_map = strcmp(map_name, "ui") != 0;
+	/* settings_only: solo_pause — Menue-Tags werden geladen, wenn eine
+	der beiden Pause-Collections vorhanden ist, unabhaengig von
+	display.menus. Auf ui.map nur, wenn PC-Menues aktiv sind. */
+	boolean use_pc_menus = !strcmp(config_string("display.menus"), "pc");
+	boolean has_mp_collection = tag_loaded('Soul', MULTIPLAYER_COLLECTION) != NONE;
+	boolean has_solo_collection = tag_loaded('Soul', SOLO_COLLECTION) != NONE;
+
+	if (!game_map && !use_pc_menus)
+		return;
+	if (game_map && !has_mp_collection && !has_solo_collection)
+		return;'''
+    if old_guard not in text:
+        print("FEHLER: menu_tags_loaded-Guard nicht gefunden.", file=sys.stderr)
+        sys.exit(1)
+    text = text.replace(old_guard, new_guard, 1)
+
+    # ── 5e. pause_patch-Aufruf ersetzen ─────────────────────────────
+    old_call = '''	if (game_map)
+	{
+		pause_patch(instances);
+		if (build.failed)
+			goto failed;
+		/* (those it made) */
+		cache_files_set_tag_instances(instances, build.first_index + build.next);
+	}
+	else if (widget_named(menus->root) != NONE)'''
+    new_call = '''	if (game_map)
+	{
+		if (has_mp_collection)
+			pause_patch_multiplayer(instances);
+		if (has_solo_collection)
+			pause_patch_solo(instances);
+		if (build.failed)
+			goto failed;
+		/* (those it made) */
+		cache_files_set_tag_instances(instances, build.first_index + build.next);
+	}
+	else if (use_pc_menus && widget_named(menus->root) != NONE)'''
+    if old_call not in text:
+        print("FEHLER: pause_patch-Aufruf in menu_tags_loaded nicht gefunden.", file=sys.stderr)
+        sys.exit(1)
+    text = text.replace(old_call, new_call, 1)
+
+    # ── 5f. PC-Menue-Wurzel nur setzen, wenn display.menus = "pc" ───
+    # (bereits durch use_pc_menus in 5e erledigt)
+
+    with open(path, "w") as f:
+        f.write(text)
+    print("  menu_tags.c: Solo-Pause-Patch eingebaut.")
+
+
+# ══════════════════════════════════════════════════════════════════════
+# 6. tools/linux_build.py + tools/android_build.py: Expat
 # ══════════════════════════════════════════════════════════════════════
 def patch_linux_build(src_root):
     path = os.path.join(src_root, "tools", "linux_build.py")
@@ -241,8 +446,6 @@ def patch_linux_build(src_root):
     if "EXPAT_DIR" in text:
         print("  linux_build.py: Expat bereits aktiv.")
         return
-
-    # EXPAT_DIR nach TOML_DIR
     anchor = 'TOML_DIR = Path("port/third_party/tomlc17")\n'
     if anchor in text:
         add = anchor + (
@@ -251,13 +454,9 @@ def patch_linux_build(src_root):
             'EXPAT_SOURCES = ("xmlparse.c", "xmlrole.c", "xmltok.c")\n'
         )
         text = text.replace(anchor, add, 1)
-
-    # -I{EXPAT_DIR} in platform_cflags
     anchor = 'f"-I{TOML_DIR}",\n'
     if anchor in text:
         text = text.replace(anchor, anchor + '            f"-I{EXPAT_DIR}",\n', 1)
-
-    # Expat-Objekte kompilieren
     anchor = '        add_object(TOML_DIR / "tomlc17.c", " ".join([abi, "-std=gnu11", "-w"]))\n'
     if anchor in text:
         add = anchor + (
@@ -266,7 +465,6 @@ def patch_linux_build(src_root):
             '            add_object(EXPAT_DIR / name, " ".join([abi, "-std=gnu11", f"-I{EXPAT_DIR}", "-w"]))\n'
         )
         text = text.replace(anchor, add, 1)
-
     with open(path, "w") as f:
         f.write(text)
     print("  linux_build.py: Expat eingebaut.")
@@ -282,7 +480,6 @@ def patch_android_build(src_root):
     if "EXPAT_DIR" in text:
         print("  android_build.py: Expat bereits aktiv.")
         return
-
     anchor = 'TOML_DIR = Path("port/third_party/tomlc17")\n'
     if anchor in text:
         add = anchor + (
@@ -291,11 +488,9 @@ def patch_android_build(src_root):
             'EXPAT_SOURCES = ("xmlparse.c", "xmlrole.c", "xmltok.c")\n'
         )
         text = text.replace(anchor, add, 1)
-
     anchor = 'f"-I{TOML_DIR}",'
     if anchor in text:
         text = text.replace(anchor, anchor + ' f"-I{EXPAT_DIR}",', 1)
-
     anchor = '    objects.append(guest_object(TOML_DIR / "tomlc17.c", platform_cflags))\n'
     if anchor in text:
         add = anchor + (
@@ -304,14 +499,13 @@ def patch_android_build(src_root):
             '        objects.append(guest_object(EXPAT_DIR / name, platform_cflags))\n'
         )
         text = text.replace(anchor, add, 1)
-
     with open(path, "w") as f:
         f.write(text)
     print("  android_build.py: Expat eingebaut.")
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 6. port/linux/port.json: "dl" in libraries
+# 7. port/linux/port.json: "dl" in libraries
 # ══════════════════════════════════════════════════════════════════════
 def patch_port_json(src_root):
     path = os.path.join(src_root, "port", "linux", "port.json")
@@ -336,6 +530,7 @@ def apply_patch(src_root):
     patch_event_dispatcher(src_root)
     patch_game_data_dispatcher(src_root)
     patch_cache_files(src_root)
+    patch_menu_tags_solo_pause(src_root)  # NEU: Solo-Pause-Patch
     patch_linux_build(src_root)
     patch_android_build(src_root)
     patch_port_json(src_root)
