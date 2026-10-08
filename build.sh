@@ -293,6 +293,11 @@ export SDL2_INCLUDE="$SDL2_INSTALL/include"
 [ -f "$SDL2_INCLUDE/SDL2/SDL.h" ] || die "SDL2_INCLUDE=$SDL2_INCLUDE enthaelt kein SDL2/SDL.h"
 echo "== SDL2_INCLUDE=$SDL2_INCLUDE"
 
+# ── SDL2_LIB_DIR fuer den Host-Build exportieren ──────────────────────
+export SDL2_LIB_DIR="$SDL2_INSTALL/lib"
+echo "== SDL2_LIB_DIR=$SDL2_LIB_DIR"
+[ -f "$SDL2_LIB_DIR/libSDL2.a" ] || die "libSDL2.a fehlt in $SDL2_LIB_DIR"
+
 # ══════════════════════════════════════════════════════════════════════
 # Upstream klonen + Knulli-Patch + OpenCE-Dateien
 # ══════════════════════════════════════════════════════════════════════
@@ -882,7 +887,7 @@ stamp=$({
     done
     [ -f "$HERE/pgo/halo_linux.profdata" ] && sha256sum "$HERE/pgo/halo_linux.profdata" | cut -d' ' -f1
     echo "pgo-mode=$PGO_MODE"
-    echo "static-host=v1"
+    echo "static-host=v2"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 echo "$stamp" > "$SRC/.port-stamp"
@@ -890,7 +895,7 @@ echo "$stamp" > "$SRC/.port-stamp"
 # ══════════════════════════════════════════════════════════════════════
 # Build
 # ══════════════════════════════════════════════════════════════════════
-export ANDROID_NDK SYSROOT_LIB SDL2_INCLUDE GUEST_CC HOST_CC JOBS
+export ANDROID_NDK SYSROOT_LIB SDL2_INCLUDE SDL2_LIB_DIR GUEST_CC HOST_CC JOBS
 cd "$SRC"
 
 echo "== Konfiguriere mit $LTO_FLAG $PGO_FLAG $PGO_EXTRA_ARGS ..."
