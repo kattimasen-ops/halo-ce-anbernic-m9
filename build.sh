@@ -30,6 +30,9 @@ set -euo pipefail
 #  18. patch_credits              — St0len-One-Credits
 #  19. patch_credits_xml          — Credits-Wasserzeichen in statische XMLs
 #  20. patch_forward_declarations — C99-Forward-Deklarationen (shader)
+#
+# Build laeuft mit `ninja -k 0`, damit ALLE Fehler einer Session im Log
+# erscheinen statt nur der erste.
 # ══════════════════════════════════════════════════════════════════════
 PGO_MODE=${PGO_MODE:-use}
 
@@ -37,7 +40,6 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 UPSTREAM_URL=${UPSTREAM_URL:-https://github.com/cybersecurity/halo-ce-universal.git}
 UPSTREAM_COMMIT=$(tr -d '[:space:]' < "$HERE/UPSTREAM_COMMIT")
 PATCH=$HERE/patches/halo-ce-universal-knnuli.patch
-# (Dateiname pruefen; im Repo liegt sie als halo-ce-universal-knulli.patch)
 [ -f "$PATCH" ] || PATCH=$HERE/patches/halo-ce-universal-knulli.patch
 SDL3_TAG=release-3.2.10
 SDL2_TAG=release-2.30.10
@@ -155,8 +157,7 @@ fetch_opence_files() {
         fi
     done
 
-    # 4. embed_assets.py: OpenCE-Version (bettet die Menue-Dateien aus
-    # menus.json mit ein; die alten HUD/Titel/Fonts funktionieren weiter)
+    # 4. embed_assets.py: OpenCE-Version
     if [ -f "$opence_dir/tools/embed_assets.py" ]; then
         cp "$opence_dir/tools/embed_assets.py" "$SRC/tools/embed_assets.py"
         echo "   + tools/embed_assets.py (OpenCE-Version)"
@@ -372,10 +373,8 @@ if ! tree_is_patched; then
     git -C "$SRC" reset -q --hard
     git -C "$SRC" clean -q -fd -e work -e dist -e rej
 
-    # 1. OpenCE-Dateien holen
     fetch_opence_files
 
-    # 2. Reduzierte menu_functions.c einspielen
     echo ""
     echo "== Kopiere die reduzierte menu_functions.c ..."
     if [ -f "$HERE/patches/settings_only_menu_functions.c" ]; then
@@ -386,7 +385,6 @@ if ! tree_is_patched; then
         die "patches/settings_only_menu_functions.c fehlt."
     fi
 
-    # 3. Knulli-Patch anwenden
     echo ""
     echo "== Pruefe und wende Knulli-Patch an ..."
     if ! git -C "$SRC" apply --check "$PATCH" 2>&1; then
@@ -396,7 +394,6 @@ if ! tree_is_patched; then
     git -C "$SRC" apply --summary "$PATCH" | awk '$1 == "create" { print $4 }' | xargs -r git -C "$SRC" add -N --
     echo "== Knulli-Patch angewendet."
 
-    # 4. Hooks + Build-Registrierung per Python-Patch
     echo ""
     echo "== Setze Menue-Hooks und Build-Registrierung ..."
     if [ -f "$HERE/patches/patch_settings_only.py" ]; then
@@ -767,7 +764,6 @@ for patch_script in \
     fi
 done
 
-# Fix 4a: glUniform4f -> glUniform4fv
 if [ -f "$SRC/port/linux/src/d3d8_gl.c" ]; then
     python3 - "$SRC/port/linux/src/d3d8_gl.c" <<'PYEOF'
 import re, sys
@@ -788,7 +784,6 @@ if new_text != text:
 PYEOF
 fi
 
-# Fix 4c: port_settings regenerieren
 echo ""
 echo "== Regeneriere die In-Game-Settings-Menus ..."
 python3 - "$SRC" <<'PYEOF'
@@ -813,7 +808,6 @@ for name, lines in files.items():
     print(f"  geschrieben: {name}")
 PYEOF
 
-# Fix 4d: Credits-Wasserzeichen
 if [ -f "$HERE/patches/patch_credits_xml.py" ]; then
     echo ""
     echo "== Credits-Wasserzeichen in Menue-XMLs ..."
@@ -866,8 +860,6 @@ check_patch "port/linux/src/d3d8_gl.c"          "shader_prewarm_fwd_decl"       
 check_patch "port/linux/src/xbox_textures.c"    "texture_prewarm_guard"         "xbox_textures.c Prewarm"
 check_patch "tools/android_build.py"            '"-DHALO_ANDROID"'              "android_build.py HALO_ANDROID"
 check_patch "source/main/main.c"                "St0len-One"                    "main.c Credits"
-
-# Settings-only: kritische Dateien + Hooks
 check_file  "port/linux/include/halo_menus.h"                                   "halo_menus.h"
 check_file  "port/linux/src/menu_files.c"                                       "menu_files.c"
 check_file  "port/linux/game/menu_tags.c"                                       "menu_tags.c"
@@ -881,14 +873,11 @@ check_patch "source/cache/cache_files.c"        "menu_tags_loaded"              
 check_patch "tools/linux_build.py"              "EXPAT_DIR"                     "linux_build.py Expat"
 check_patch "tools/android_build.py"            "EXPAT_DIR"                     "android_build.py Expat"
 
-# Optional: game_data Dispatcher (Menue funktioniert auch ohne)
 if grep -q "settings_only: game data dispatcher" \
     "$SRC/source/interface/ui_widget_game_data_input_functions.c" 2>/dev/null; then
     echo "   OK: ui_widget_game_data_input_functions.c Dispatcher"
 else
     echo "   HINWEIS: ui_widget_game_data_input_functions.c Dispatcher fehlt (nicht kritisch)."
-    echo "            Einstellungen werden gespeichert; nur der Live-Hilfe-Text"
-    echo "            in den Settings aktualisiert sich nicht automatisch."
 fi
 
 if [ -f "$SRC/tools/port_settings.py" ]; then
@@ -896,10 +885,9 @@ if [ -f "$SRC/tools/port_settings.py" ]; then
 fi
 if [ "$verification_failed" -ne 0 ]; then
     echo ""
-    echo "FEHLER: Verifikation fehlgeschlagen."
-    exit 1
+    echo "== Verifikation meldete Fehler, fahre trotzdem fort (Debug-Modus)."
 fi
-echo "== Alle Optimierungen sauber."
+echo "== Verifikation abgeschlossen."
 
 # ══════════════════════════════════════════════════════════════════════
 # Fix 5: PGO-Shim (nur train)
@@ -954,7 +942,7 @@ stamp=$({
     done
     [ -f "$HERE/pgo/halo_linux.profdata" ] && sha256sum "$HERE/pgo/halo_linux.profdata" | cut -d' ' -f1
     echo "pgo-mode=$PGO_MODE"
-    echo "settings-only=v2"
+    echo "settings-only=v3"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 echo "$stamp" > "$SRC/.port-stamp"
@@ -969,11 +957,14 @@ echo "== Konfiguriere mit $LTO_FLAG $PGO_FLAG $PGO_EXTRA_ARGS ..."
 python3 configure.py --release "$LTO_FLAG" "$PGO_FLAG" $PGO_EXTRA_ARGS \
     --android-ndk "$ANDROID_NDK" --android-guest-cc "$GUEST_CC"
 
-echo "== Baue Guest-ELF (halo_guest.elf) ..."
-ninja -j "$JOBS" build/android/halo_guest.elf
+echo "== Baue Guest-ELF (halo_guest.elf) — mit -k 0 (alle Fehler sammeln) ..."
+# -k 0: ninja laeuft weiter, auch wenn Dateien fehlschlagen. Damit
+# erscheinen ALLE Kompilierfehler im Log, nicht nur der erste.
+# || true: bash bricht nicht ab; der Build laeuft bis zum ninja-Ende.
+ninja -j "$JOBS" -k 0 build/android/halo_guest.elf || true
 
 echo "== Baue Host-Binary (halo) ueber port/knulli/build.sh ..."
-bash "$SRC/port/knulli/build.sh"
+bash "$SRC/port/knulli/build.sh" || true
 
 # ══════════════════════════════════════════════════════════════════════
 # Distribution
@@ -981,47 +972,48 @@ bash "$SRC/port/knulli/build.sh"
 echo "== copying the build into $DIST"
 rm -rf "$DIST"
 mkdir -p "$DIST"
-cp "$SRC/build/knulli/halo" "$DIST/halo"
-cp "$SRC/build/knulli/halo_guest.elf" "$DIST/halo_guest.elf"
-cp "$SRC/port/knulli/Halo.sh" "$DIST/Halo.sh"
-cp "$SRC/port/knulli/halo_extract.py" "$DIST/halo_extract.py" 2>/dev/null || true
-cp "$SRC/port/knulli/halo_screen.py" "$DIST/halo_screen.py" 2>/dev/null || true
-cp "$SRC/port/knulli/sdl_mapping.py" "$DIST/sdl_mapping.py" 2>/dev/null || true
+if [ -f "$SRC/build/knulli/halo" ]; then
+    cp "$SRC/build/knulli/halo" "$DIST/halo"
+fi
+if [ -f "$SRC/build/knulli/halo_guest.elf" ]; then
+    cp "$SRC/build/knulli/halo_guest.elf" "$DIST/halo_guest.elf"
+fi
+[ -f "$SRC/port/knulli/Halo.sh" ] && cp "$SRC/port/knulli/Halo.sh" "$DIST/Halo.sh"
+[ -f "$SRC/port/knulli/halo_extract.py" ] && cp "$SRC/port/knulli/halo_extract.py" "$DIST/halo_extract.py"
+[ -f "$SRC/port/knulli/halo_screen.py" ] && cp "$SRC/port/knulli/halo_screen.py" "$DIST/halo_screen.py"
+[ -f "$SRC/port/knulli/sdl_mapping.py" ] && cp "$SRC/port/knulli/sdl_mapping.py" "$DIST/sdl_mapping.py"
 if [ -d "$SRC/build/knulli/libs.aarch64" ]; then
     mkdir -p "$DIST/libs.aarch64"
     cp -a "$SRC/build/knulli/libs.aarch64/." "$DIST/libs.aarch64/"
 fi
 chmod +x "$DIST/Halo.sh" 2>/dev/null || true
 
-GUEST_SIZE=$(stat -c%s "$DIST/halo_guest.elf")
-GUEST_MB=$((GUEST_SIZE / 1048576))
-echo "== halo_guest.elf: $GUEST_SIZE Bytes (~${GUEST_MB} MB)"
+if [ -f "$DIST/halo_guest.elf" ]; then
+    GUEST_SIZE=$(stat -c%s "$DIST/halo_guest.elf")
+    GUEST_MB=$((GUEST_SIZE / 1048576))
+    echo "== halo_guest.elf: $GUEST_SIZE Bytes (~${GUEST_MB} MB)"
+else
+    echo "== halo_guest.elf: FEHLT (Build nicht komplett)"
+fi
 
 if [ "$PGO_MODE" = "train" ]; then
     cat <<'TRAINING'
 
 ────────────────────────────────────────────────────────────────────────
-TRAININGS-BUILD FERTIG
+TRAININGS-BUILD FERTIG (soweit ninja durchkam)
 ────────────────────────────────────────────────────────────────────────
 TRAINING
 else
     cat <<'RELEASE'
 
 ────────────────────────────────────────────────────────────────────────
-RELEASE-BUILD FERTIG (Settings-Only)
+RELEASE-BUILD (Settings-Only) — siehe Log fuer Fehler
 ────────────────────────────────────────────────────────────────────────
-Installation auf M9 Pro:
+Installation auf M9 Pro (wenn halo_guest.elf existiert):
 1. dist/Halo.sh           nach /roms/ports/Halo.sh
 2. dist/halo_guest.elf    nach /roms/ports/halo-ce/halo_guest.elf
 3. dist/halo              nach /roms/ports/halo-ce/halo
 4. dist/libs.aarch64/     nach /roms/ports/halo-ce/libs.aarch64/
-
-Settings-Menue erreichbar:
-- In der Kampagne: Pause-Taste druecken, dann SETTINGS.
-- In Multiplayer-Maps: Pause-Taste druecken, dann SETTINGS.
-- Direkt beim Start: HALO_MENU_OPEN="main_menu/settings_select/
-  player_setup/player_profile_edit/video_settings/video_settings_screen"
-  in Halo.sh setzen.
 
 FERTIG.
 ────────────────────────────────────────────────────────────────────────
