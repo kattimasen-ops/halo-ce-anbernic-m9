@@ -5,8 +5,13 @@ set -euo pipefail
 # Halo CE Universal — M9 Pro (RK3326 / Cortex-A35 + Mali-G31 MP2)
 #
 # Laeuft in einem Ubuntu-20.04-Docker-Container (glibc 2.31, wie der
-# M9 Pro). Host-Loader wird dynamisch gelinkt, wie es vor der
-# glibc-Kompatibilitaetskrise funktionierte.
+# M9 Pro). Host-Loader + SDL2 werden mit Clang 22 (Wrapper: aarch64-clang)
+# gebaut, weil GCC 9 aus Ubuntu 20.04 trotz -mcpu=cortex-a35 LSE-Atomics
+# (ARMv8.1) erzeugt und der RK3326 (ARMv8.0) darauf mit SIGILL stirbt.
+# ──────────────────────────────────────────────────────────────────────
+# Der Wrapper aarch64-clang wird vom Workflow angelegt und setzt:
+#   --target=aarch64-linux-gnu --sysroot=/usr/aarch64-linux-gnu
+#   -march=armv8-a -mno-outline-atomics
 # ══════════════════════════════════════════════════════════════════════
 PGO_MODE=${PGO_MODE:-use}
 
@@ -19,7 +24,7 @@ SDL3_TAG=release-3.2.10
 SDL2_TAG=release-2.30.10
 SDL2_ARCHIVE=https://github.com/libsdl-org/SDL/archive/refs/tags/$SDL2_TAG.tar.gz
 GUEST_CC=${GUEST_CC:-clang-22}
-HOST_CC=${HOST_CC:-aarch64-linux-gnu-gcc}
+HOST_CC=${HOST_CC:-aarch64-clang}
 JOBS=${JOBS:-$(nproc)}
 OPEN_CE_URL=${OPEN_CE_URL:-https://github.com/OpenCommunityEdition/OpenCE.git}
 
@@ -32,7 +37,7 @@ need ninja "install ninja-build"
 need curl "install curl"
 need tar "install tar"
 need cmake "install cmake"
-need "$HOST_CC" "install gcc-aarch64-linux-gnu, or set HOST_CC"
+need "$HOST_CC" "install clang-22 and create /usr/local/bin/aarch64-clang (see workflow)"
 need "$GUEST_CC" "install clang-22 from apt.llvm.org, or set GUEST_CC"
 "$GUEST_CC" -print-targets 2> /dev/null | grep -q aarch64_32 ||
     die "$GUEST_CC has no arm64_32 (aarch64_32) target; use clang 22 from apt.llvm.org"
@@ -43,7 +48,8 @@ ANDROID_NDK=$(cd "$ANDROID_NDK" && pwd)
 [ -d "$SYSROOT_LIB" ] || die "SYSROOT_LIB=$SYSROOT_LIB is not a folder"
 SYSROOT_LIB=$(cd "$SYSROOT_LIB" && pwd)
 
-for library in libdecor-0.so.0 libmali.so.0; do
+# libmali wird NICHT gelinkt, aber geprueft, damit ein leeres sysroot auffaellt.
+for library in libdecor-0.so.0; do
     compgen -G "$SYSROOT_LIB/$library*" > /dev/null ||
         die "no $library* in SYSROOT_LIB=$SYSROOT_LIB"
 done
@@ -60,7 +66,12 @@ esac
 echo "== Upstream: $UPSTREAM_URL @ $UPSTREAM_COMMIT"
 echo "== PGO-Modus: $PGO_MODE"
 echo "== glibc-Version des Build-Containers:"
-ldd --version 2>/dev/null | head -1 || true
+( ldd --version 2>/dev/null || true ) | head -1 || true
+echo "== Host-Compiler: $HOST_CC"
+"$HOST_CC" --version 2>&1 | head -2 || true
+echo "== Host-Compiler target:"
+printf 'int main(void){return 0;}\n' > /tmp/probe.c
+"$HOST_CC" -v -o /tmp/probe /tmp/probe.c 2>&1 | grep -E "Target|target" | head -3 || true
 
 WORK=${WORK:-$HERE/work}
 DIST=${DIST:-$HERE/dist}
@@ -188,10 +199,10 @@ print("  XML-Hunk entfernt; Patch ist jetzt %d Bytes kleiner." % (len(text) - le
 PYEOF
 
 # ══════════════════════════════════════════════════════════════════════
-# SDL3 (nur bauen, wenn .so fehlt)
+# SDL3 (nur bauen, wenn .so fehlt) — mit aarch64-clang, ARMv8.0
 # ══════════════════════════════════════════════════════════════════════
 if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
-    echo "== SDL3 $SDL3_TAG: kompiliere aus dem Quellcode"
+    echo "== SDL3 $SDL3_TAG: kompiliere aus dem Quellcode (aarch64-clang, ARMv8.0)"
     SDL3_SRC=$WORK/SDL3-${SDL3_TAG#release-}
     SDL3_BUILD=$WORK/sdl3-build
     SDL3_INSTALL=$WORK/sdl3-install
@@ -204,7 +215,8 @@ if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
     mkdir -p "$SDL3_BUILD" "$SDL3_INSTALL"
     cmake -S "$SDL3_SRC" -B "$SDL3_BUILD" \
         -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
-        -DCMAKE_C_COMPILER="$HOST_CC" \
+        -DCMAKE_C_COMPILER=aarch64-clang \
+        -DCMAKE_C_FLAGS="-march=armv8-a -mno-outline-atomics" \
         -DCMAKE_FIND_ROOT_PATH=/usr/aarch64-linux-gnu \
         -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
         -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
@@ -226,14 +238,14 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════════
-# SDL2 (Header immer; .so nur kopieren, wenn fehlt)
+# SDL2 (Header immer; .so nur kopieren, wenn fehlt) — mit aarch64-clang
 # ══════════════════════════════════════════════════════════════════════
 SDL2_SRC=$WORK/SDL2-src
 SDL2_BUILD=$WORK/sdl2-build
 SDL2_INSTALL=$WORK/sdl2-install
 
 if [ ! -d "$SDL2_INSTALL/include/SDL2" ]; then
-    echo "== SDL2 $SDL2_TAG: Quellcode holen und Header bereitstellen"
+    echo "== SDL2 $SDL2_TAG: Quellcode holen und mit aarch64-clang bauen"
     rm -rf "$SDL2_SRC" "$SDL2_BUILD" "$SDL2_INSTALL"
     mkdir -p "$SDL2_SRC" "$SDL2_BUILD" "$SDL2_INSTALL"
     curl -L -o "$WORK/sdl2.tar.gz" "$SDL2_ARCHIVE"
@@ -296,7 +308,8 @@ PATCH_EOF
 
     cmake -S "$SDL2_SRC" -B "$SDL2_BUILD" \
         -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
-        -DCMAKE_C_COMPILER="$HOST_CC" \
+        -DCMAKE_C_COMPILER=aarch64-clang \
+        -DCMAKE_C_FLAGS="-march=armv8-a -mno-outline-atomics" \
         -DCMAKE_FIND_ROOT_PATH=/usr/aarch64-linux-gnu \
         -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
         -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
@@ -330,6 +343,16 @@ fi
 export SDL2_INCLUDE="$SDL2_INSTALL/include"
 [ -f "$SDL2_INCLUDE/SDL2/SDL.h" ] || die "SDL2_INCLUDE=$SDL2_INCLUDE enthaelt kein SDL2/SDL.h"
 echo "== SDL2_INCLUDE=$SDL2_INCLUDE"
+
+# ── SDL2_LIB_DIR fuer den Host-Build exportieren (nur wenn vorhanden) ─
+if [ -f "$SDL2_INSTALL/lib/libSDL2.a" ]; then
+    export SDL2_LIB_DIR="$SDL2_INSTALL/lib"
+    echo "== SDL2_LIB_DIR=$SDL2_LIB_DIR (statisch verfuegbar)"
+else
+    # Nicht-statisch gebaut; setze trotzdem auf das lib-Verzeichnis.
+    export SDL2_LIB_DIR="$SDL2_INSTALL/lib"
+    echo "== SDL2_LIB_DIR=$SDL2_LIB_DIR (nur Header, keine .a)"
+fi
 
 # ══════════════════════════════════════════════════════════════════════
 # Upstream klonen + Knulli-Patch + OpenCE-Dateien
@@ -920,7 +943,7 @@ stamp=$({
     done
     [ -f "$HERE/pgo/halo_linux.profdata" ] && sha256sum "$HERE/pgo/halo_linux.profdata" | cut -d' ' -f1
     echo "pgo-mode=$PGO_MODE"
-    echo "ubuntu-2004-dynamic=v1"
+    echo "armv8.0-clang-host=v1"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 echo "$stamp" > "$SRC/.port-stamp"
@@ -928,7 +951,7 @@ echo "$stamp" > "$SRC/.port-stamp"
 # ══════════════════════════════════════════════════════════════════════
 # Build
 # ══════════════════════════════════════════════════════════════════════
-export ANDROID_NDK SYSROOT_LIB SDL2_INCLUDE GUEST_CC HOST_CC JOBS
+export ANDROID_NDK SYSROOT_LIB SDL2_INCLUDE SDL2_LIB_DIR GUEST_CC HOST_CC JOBS
 cd "$SRC"
 
 echo "== Konfiguriere mit $LTO_FLAG $PGO_FLAG $PGO_EXTRA_ARGS ..."
@@ -938,7 +961,7 @@ python3 configure.py --release "$LTO_FLAG" "$PGO_FLAG" $PGO_EXTRA_ARGS \
 echo "== Baue Guest-ELF (halo_guest.elf) — mit -k 0 (alle Fehler sammeln) ..."
 ninja -j "$JOBS" -k 0 build/android/halo_guest.elf || true
 
-echo "== Baue Host-Binary (halo, dynamisch) ueber port/knulli/build.sh ..."
+echo "== Baue Host-Binary (halo, dynamisch, clang/ARMv8.0) ueber port/knulli/build.sh ..."
 bash "$SRC/port/knulli/build.sh" || true
 
 # ══════════════════════════════════════════════════════════════════════
@@ -977,6 +1000,14 @@ else
     echo "== halo_guest.elf: FEHLT (Build nicht komplett)"
 fi
 
+if [ -f "$DIST/halo" ]; then
+    HOST_SIZE=$(stat -c%s "$DIST/halo")
+    echo "== halo: $HOST_SIZE Bytes"
+    if command -v file > /dev/null 2>&1; then
+        file "$DIST/halo" || true
+    fi
+fi
+
 if [ "$PGO_MODE" = "train" ]; then
     cat <<'TRAINING'
 
@@ -988,7 +1019,7 @@ else
     cat <<'RELEASE'
 
 ────────────────────────────────────────────────────────────────────────
-RELEASE-BUILD (Settings-Only, Ubuntu 20.04, dynamisch)
+RELEASE-BUILD (Settings-Only, Ubuntu 20.04, Clang/ARMv8.0, ohne libmali)
 ────────────────────────────────────────────────────────────────────────
 Installation auf M9 Pro (wenn halo_guest.elf existiert):
 1. dist/Halo.sh           nach /roms/ports/Halo.sh
