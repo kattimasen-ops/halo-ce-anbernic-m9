@@ -5,6 +5,13 @@
 #   libs.aarch64/   the runtime libraries the device may not have
 #
 # Bewusst POSIX-sh-kompatibel (dash): set -eu statt set -euo pipefail.
+#
+# WICHTIG: libmali wird NICHT mitgeliefert und NICHT gelinkt. Auf dem
+# M9 Pro kommt sie aus dem System (Halo.sh legt /tmp/halo-mali mit
+# Symlinks auf /usr/local/lib/aarch64-linux-gnu/libmali-bifrost-g31-rxp0-gbm.so
+# an und setzt diesen Pfad in LD_LIBRARY_PATH vor libs.aarch64). Damit
+# brauchen wir weder eine gueltige libmali im Repo noch das -lmali-
+# Flag beim Linken; die EGL/GLES-Symbole werden zur Laufzeit gefunden.
 set -eu
 
 folder() {
@@ -54,8 +61,8 @@ copy_runtime_lib() {
     return 0
 }
 
+# libmali absichtlich NICHT kopieren (siehe Kommentar oben).
 copy_runtime_lib "libSDL3"   "libSDL3.so.0"
-copy_runtime_lib "libmali"   "libmali.so.0"
 copy_runtime_lib "libSDL2"   "libSDL2-2.0.so.0"
 copy_runtime_lib "libdecor"  "libdecor-0.so.0"
 
@@ -89,25 +96,10 @@ link_library() {
     return 0
 }
 
-link_library "libSDL2*" "libSDL2.so"    || exit 1
-link_library "libSDL3*" "libSDL3.so"    || exit 1
-link_library "libmali*" "libmali.so"    || exit 1
-link_library "libdecor*" "libdecor.so"  || exit 1
-
-# ── Diagnose: ist libmali.so.0 wirklich eine gueltige ELF? ───────────
-echo "== Diagnose libmali.so.0:"
-if [ -f "$OUT/libs.aarch64/libmali.so.0" ]; then
-    ls -la "$OUT/libs.aarch64/libmali.so.0"
-    if command -v file > /dev/null 2>&1; then
-        file "$OUT/libs.aarch64/libmali.so.0" || true
-    fi
-    echo -n "  Erste 16 Bytes: "
-    head -c 16 "$OUT/libs.aarch64/libmali.so.0" 2>/dev/null | od -An -tx1 || true
-    if command -v readelf > /dev/null 2>&1; then
-        echo "  readelf -h:"
-        readelf -h "$OUT/libs.aarch64/libmali.so.0" 2>&1 | head -8 || true
-    fi
-fi
+# libmali absichtlich NICHT linken (siehe Kommentar oben).
+link_library "libSDL2*"  "libSDL2.so"    || exit 1
+link_library "libSDL3*"  "libSDL3.so"    || exit 1
+link_library "libdecor*" "libdecor.so"   || exit 1
 
 CFLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -fPIC -Wall -Wno-unused-function \
         -D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS \
@@ -180,23 +172,25 @@ compile port/third_party/tomlc17/tomlc17.c -w
 compile build/android/host/host_import_table.c
 
 echo "LINK $OUT/halo"
-# WICHTIG: KEIN -lmali / -l:libmali.so.0.
-# Der BFD-ld kann die 9,3-MB-Datei aus dem Repo nicht lesen ("file too
-# short" = ungueltiger/truncated ELF-Header). Zur Laufzeit laedt SDL2
-# die echte Mali-Bibliothek ueber LD_LIBRARY_PATH (Halo.sh setzt
-# /tmp/halo-mali vor libs.aarch64). EGL/GLES-Symbole, die unsere
-# Host-Objekte referenzieren, werden mit --unresolved-symbols=ignore-all
-# beim Linken offen gelassen und zur Laufzeit aufgeloest.
+# Nur -lSDL2, nicht -lSDL3 (siehe vorige Version: SDL_Init etc. sind in
+# beiden; -lSDL3 zuerst wuerde den KMSDRM-Videopfad brechen).
 #
-# Nur -lSDL2, nicht -lSDL3 (siehe vorige Version).
+# KEIN -lmali: die EGL/GLES-Symbole, die host_gl.c und host_glthread_gen.c
+# referenzieren, werden zur Laufzeit aus der System-Mali aufgeloest
+# (Halo.sh: LD_LIBRARY_PATH=/tmp/halo-mali:... vor libs.aarch64). Der
+# BFD-ld wuerde die 9,3-MB-Datei aus dem Repo sonst nur lesen wollen und
+# meldet dann "file too short", obwohl die Datei gar nicht gebraucht wird.
+#
+# --unresolved-symbols=ignore-all laesst die EGL/GLES-Symbole beim
+# Linken offen; sie landen als normale undefinierte Symbole in der
+# dynamischen Symboltabelle und werden beim Start vom Loader ueber
+# LD_LIBRARY_PATH und die DT_NEEDED-Eintraege (libEGL.so.1, libGLESv2.so.2)
+# aufgeloest.
 $CC -o "$OUT/halo" $objects \
     -L"$OUT/lib" \
-    -L"$OUT/libs.aarch64" \
     -Wl,-rpath-link,"$OUT/lib" \
-    -Wl,-rpath-link,"$OUT/libs.aarch64" \
     -Wl,--allow-shlib-undefined \
     -Wl,--unresolved-symbols=ignore-all \
-    -Wl,--warn-unresolved-symbols \
     -Wl,-O1 -Wl,--as-needed -Wl,--gc-sections \
     -flto \
     -lSDL2 -lpthread -ldl -lm
