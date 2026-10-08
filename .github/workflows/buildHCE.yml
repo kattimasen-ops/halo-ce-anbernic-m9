@@ -1,3 +1,79 @@
+name: Build Halo CE for RK3326
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+    paths-ignore:
+      - 'docs/**'
+      - '*.md'
+      - 'README.md'
+      - 'llms.txt'
+
+jobs:
+  build:
+    name: Build guest + host (arm64_32 + aarch64)
+    runs-on: ubuntu-22.04
+    container: ubuntu:20.04
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      SYSROOT_LIB: ${{ github.workspace }}/sysroot
+      ANDROID_NDK: ${{ github.workspace }}/ndk-r28c
+      GUEST_CC: clang-22
+      HOST_CC: aarch64-linux-gnu-gcc
+      PGO_MODE: use
+      JOBS: "4"
+      DEBIAN_FRONTEND: noninteractive
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: "glibc-Version im Container pruefen"
+        run: |
+          echo "== glibc im Container:"
+          ldd --version 2>/dev/null | head -1 || true
+          echo "== Architektur:"
+          uname -m
+          echo "== Shell:"
+          echo "$SHELL"
+
+      - name: "System-Pakete installieren (Ubuntu 20.04)"
+        run: |
+          set -e
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential \
+            cmake \
+            ninja-build \
+            git \
+            curl \
+            wget \
+            tar \
+            python3 \
+            python3-pip \
+            python3-yaml \
+            ca-certificates \
+            xz-utils \
+            unzip \
+            pkg-config \
+            gnupg \
+            lsb-release \
+            software-properties-common \
+            file \
+            gcc-aarch64-linux-gnu \
+            g++-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
+            libc6-dev-arm64-cross \
+            libstdc++-9-dev-arm64-cross
+
       - name: "clang-22 + lld-22 installieren"
         run: |
           set -e
@@ -10,8 +86,6 @@
             clang-22 lld-22 llvm-22
           ln -sf /usr/bin/clang-22 /usr/local/bin/clang-22
           ln -sf /usr/bin/ld.lld-22 /usr/local/bin/ld.lld-22
-          # WICHTIG: GCC sucht "ld.lld" an mehreren Stellen. Wir legen
-          # den Symlink überall an, damit -fuse-ld=lld zuverlässig greift.
           ln -sf /usr/bin/ld.lld-22 /usr/bin/ld.lld
           ln -sf /usr/bin/ld.lld-22 /usr/local/bin/ld.lld
           mkdir -p /usr/aarch64-linux-gnu/bin
@@ -21,9 +95,202 @@
           clang-22 -print-targets | grep -q aarch64_32 \
             && echo "OK: arm64_32 target verfuegbar" \
             || { echo "FEHLER: clang-22 hat kein arm64_32-Target"; exit 1; }
-          # Diagnose: Wo sucht GCC nach dem Linker?
           echo "== GCC sucht ld.lld hier:"
-          aarch64-linux-gnu-gcc --print-prog-name=ld.lld
+          aarch64-linux-gnu-gcc --print-prog-name=ld.lld || true
           echo "== Test: Verwendet GCC lld?"
-          echo 'int main(void){return 0;}' > /tmp/test.c
-          aarch64-linux-gnu-gcc -fuse-ld=lld -o /tmp/test /tmp/test.c -v 2>&1 | grep -E "ld.lld|/ld " | tail -2
+          printf 'int main(void){return 0;}\n' > /tmp/test.c
+          aarch64-linux-gnu-gcc -fuse-ld=lld -o /tmp/test /tmp/test.c -v 2>&1 \
+            | grep -E "ld\.lld|/ld " | tail -2 || true
+
+      - name: "Python-Pakete installieren"
+        run: |
+          set -e
+          python3 -m pip install --upgrade pip
+          python3 -m pip install --no-cache-dir Pillow numpy scipy
+
+      - name: "Android NDK r28c installieren"
+        run: |
+          set -e
+          cd "$GITHUB_WORKSPACE"
+          NDK_ZIP="android-ndk-r28c-linux.zip"
+          if [ ! -f "$NDK_ZIP" ]; then
+            curl -fL --retry 3 --retry-delay 5 -o "$NDK_ZIP" \
+              "https://dl.google.com/android/repository/android-ndk-r28c-linux.zip"
+          fi
+          unzip -q "$NDK_ZIP" -d "$GITHUB_WORKSPACE"
+          mv "$GITHUB_WORKSPACE/android-ndk-r28c" "$ANDROID_NDK"
+          rm -f "$NDK_ZIP"
+          test -d "$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64"
+          echo "NDK: $ANDROID_NDK"
+
+      - name: "SYSROOT_LIB prüfen + libmali Diagnose"
+        run: |
+          set -e
+          echo "== SYSROOT_LIB=$SYSROOT_LIB"
+          ls -la "$SYSROOT_LIB" || true
+
+          echo ""
+          echo "== libmali.so.0 Details (fuer Diagnose):"
+          file "$SYSROOT_LIB/libmali.so.0" || true
+          echo -n "  Erste 16 Bytes: "
+          head -c 16 "$SYSROOT_LIB/libmali.so.0" | od -An -tx1 || true
+          if command -v readelf > /dev/null 2>&1; then
+            readelf -h "$SYSROOT_LIB/libmali.so.0" 2>&1 | head -12 || true
+          fi
+
+          missing=0
+          for lib in libmali.so.0 libdecor-0.so.0; do
+            if ls "$SYSROOT_LIB/$lib"* > /dev/null 2>&1; then
+              echo "  OK: $lib"
+            else
+              echo "  FEHLT (harte Voraussetzung): $lib"
+              missing=1
+            fi
+          done
+          for lib in libSDL3.so.0 libSDL2-2.0.so.0; do
+            if ls "$SYSROOT_LIB/$lib"* > /dev/null 2>&1; then
+              echo "  OK: $lib"
+            else
+              echo "  HINWEIS: $lib fehlt, build.sh baut sie aus dem Quellcode."
+            fi
+          done
+
+          if [ "$missing" -ne 0 ]; then
+            echo ""
+            echo "FEHLER: libmali.so.0 und libdecor-0.so.0 müssen in sysroot/ liegen."
+            exit 1
+          fi
+
+      - name: "rej/-Ordner vorbereiten"
+        run: mkdir -p rej
+
+      - name: "Build ausführen (build.sh)"
+        id: build
+        run: |
+          set -e
+          chmod +x build.sh
+          bash build.sh 2>&1 | tee build.log
+
+      - name: "Fehleranalyse sammeln"
+        if: always()
+        run: |
+          set +e
+          {
+            echo "════════════════════════════════════════════════════════════"
+            echo "BUILD-FEHLER-ANALYSE"
+            echo "════════════════════════════════════════════════════════════"
+            echo "Datum: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "Repo: ${{ github.repository }}"
+            echo "Commit: ${{ github.sha }}"
+            echo ""
+            echo "════════════════════════════════════════════════════════════"
+            echo "1. ALLE error:-Zeilen"
+            echo "════════════════════════════════════════════════════════════"
+            grep -nE "error:|error :|fatal error:|FAILED:" build.log 2>/dev/null | head -500 || echo "(keine error-Zeilen)"
+            echo ""
+            echo "════════════════════════════════════════════════════════════"
+            echo "2. error:-Zeilen mit Kontext"
+            echo "════════════════════════════════════════════════════════════"
+            grep -nA5 "error:" build.log 2>/dev/null | head -3000 || echo "(keine error-Zeilen)"
+            echo ""
+            echo "════════════════════════════════════════════════════════════"
+            echo "3. Fehlerklassen-Zusammenfassung"
+            echo "════════════════════════════════════════════════════════════"
+            echo "  undefined reference:  $(grep -c "undefined reference" build.log 2>/dev/null || echo 0)"
+            echo "  undeclared identifier: $(grep -c "use of undeclared identifier" build.log 2>/dev/null || echo 0)"
+            echo "  implicit declaration: $(grep -c "implicit-function-declaration" build.log 2>/dev/null || echo 0)"
+            echo "  no member named:       $(grep -c "no member named" build.log 2>/dev/null || echo 0)"
+            echo "  incompatible:          $(grep -c "incompatible" build.log 2>/dev/null || echo 0)"
+            echo "  conflicting types:     $(grep -c "conflicting types" build.log 2>/dev/null || echo 0)"
+            echo "  fatal error:           $(grep -c "fatal error:" build.log 2>/dev/null || echo 0)"
+            echo "  FAILED:                $(grep -c "^FAILED:" build.log 2>/dev/null || echo 0)"
+            echo ""
+            echo "════════════════════════════════════════════════════════════"
+            echo "4. Betroffene Dateien (unique)"
+            echo "════════════════════════════════════════════════════════════"
+            grep -oE "^[a-zA-Z0-9_/.-]+\.c:[0-9]+:[0-9]+: error:" build.log 2>/dev/null \
+              | cut -d: -f1 | sort -u || echo "(keine Dateien)"
+            echo ""
+            echo "════════════════════════════════════════════════════════════"
+            echo "5. Letzte 500 Zeilen build.log"
+            echo "════════════════════════════════════════════════════════════"
+            tail -n 500 build.log 2>/dev/null || echo "(kein build.log)"
+            echo ""
+            echo "════════════════════════════════════════════════════════════"
+            echo "6. ninja-Status"
+            echo "════════════════════════════════════════════════════════════"
+            tail -n 30 build.log 2>/dev/null | grep -E "ninja|FAILED|stopped" || true
+            echo ""
+            echo "════════════════════════════════════════════════════════════"
+            echo "7. libmali Diagnose nach Build"
+            echo "════════════════════════════════════════════════════════════"
+            file /__w/halo-ce-rk3326-Port/halo-ce-rk3326-Port/sysroot/libmali.so.0 2>&1 || true
+            echo ""
+            echo "════════════════════════════════════════════════════════════"
+            echo "8. Linker-Verwendung (lld vs. BFD)"
+            echo "════════════════════════════════════════════════════════════"
+            grep -E "ld\.lld|LLD|GNU ld|Linker-Version|fuse-ld" build.log 2>/dev/null | head -20 || true
+            echo ""
+            echo "════════════════════════════════════════════════════════════"
+            echo "ENDE DER FEHLERANALYSE"
+            echo "════════════════════════════════════════════════════════════"
+          } > build-error-analysis.txt
+          cp build-error-analysis.txt rej/ 2>/dev/null || true
+          cp build.log rej/ 2>/dev/null || true
+          echo "Analyse geschrieben: build-error-analysis.txt"
+
+      - name: "Upload Konflikt- und Fehleranalyse"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rej-and-error-analysis
+          path: |
+            rej/
+            build-error-analysis.txt
+            build.log
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: "Upload Build-Ergebnis (bei Erfolg)"
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: halo-ce-rk3326-build
+          path: |
+            dist/halo
+            dist/halo_guest.elf
+            dist/Halo.sh
+            dist/halo_extract.py
+            dist/halo_screen.py
+            dist/sdl_mapping.py
+            dist/libs.aarch64/
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: "Kurze Zusammenfassung im Log"
+        if: always()
+        run: |
+          echo "════════════════════════════════════════════════════════════"
+          echo "  BUILD-ZUSAMMENFASSUNG"
+          echo "════════════════════════════════════════════════════════════"
+          echo ""
+          if [ -f build.log ]; then
+            ERRORS=$(grep -c "error:" build.log 2>/dev/null || echo 0)
+            FAILED=$(grep -c "^FAILED:" build.log 2>/dev/null || echo 0)
+            echo "Fehler: $ERRORS, fehlgeschlagene Targets: $FAILED"
+          fi
+          if [ -f dist/halo_guest.elf ]; then
+            GUEST_SIZE=$(stat -c%s dist/halo_guest.elf 2>/dev/null || echo 0)
+            echo "Guest-ELF: $GUEST_SIZE Bytes"
+          else
+            echo "Guest-ELF: FEHLT"
+          fi
+          if [ -f dist/halo ]; then
+            HOST_SIZE=$(stat -c%s dist/halo 2>/dev/null || echo 0)
+            echo "Host-Binary: $HOST_SIZE Bytes"
+          else
+            echo "Host-Binary: FEHLT"
+          fi
+          echo ""
+          echo "Fehleranalyse in Artefakt 'rej-and-error-analysis'."
+          echo "════════════════════════════════════════════════════════════"
