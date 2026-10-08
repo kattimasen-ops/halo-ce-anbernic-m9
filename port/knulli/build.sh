@@ -7,11 +7,10 @@
 # POSIX-sh-kompatibel (dash): set -eu statt set -euo pipefail.
 #
 # HOST-Compiler: aarch64-clang (Wrapper um clang-22 mit
-# --target=aarch64-linux-gnu --sysroot=/usr/aarch64-linux-gnu).
+# --target=aarch64-linux-gnu --sysroot=/ --gcc-toolchain=/usr).
 # WICHTIG: -march=armv8-a -mno-outline-atomics, weil der RK3326
 # (Cortex-A35) ARMv8.0 ist und die LSE-Atomics aus ARMv8.1 nicht
-# ausfuehren kann. GCC 9 aus Ubuntu 20.04 erzeugt sie trotzdem und
-# fuehrt so zum SIGILL-Crash auf dem Geraet.
+# ausfuehren kann.
 #
 # libmali wird NICHT gelinkt; EGL/GLES kommen zur Laufzeit aus der
 # System-Mali (/tmp/halo-mali).
@@ -89,9 +88,6 @@ link_library "libSDL2*"  "libSDL2.so"    || exit 1
 link_library "libSDL3*"  "libSDL3.so"    || exit 1
 link_library "libdecor*" "libdecor.so"   || exit 1
 
-# -march=armv8-a -mno-outline-atomics: RK3326 ist ARMv8.0-A, keine LSE.
-# Der Wrapper aarch64-clang setzt das bereits, wir wiederholen es hier
-# explizit, damit es in den FLAGS im Log sichtbar ist.
 CFLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -march=armv8-a -mno-outline-atomics \
         -fPIC -Wall -Wno-unused-function \
         -D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS \
