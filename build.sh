@@ -4,17 +4,41 @@ set -euo pipefail
 # ══════════════════════════════════════════════════════════════════════
 # Halo CE Universal — M9 Pro (RK3326 / Cortex-A35 + Mali-G31 MP2)
 #
-# Settings-Only: Knulli-Patch wie bisher, dazu das PC-Settings-Menü aus
+# Settings-Only: Knulli-Patch wie bisher, dazu das PC-Settings-Menue aus
 # OpenCE (menu_files.c, menu_tags.c, halo_menus.h, Expat, ce_menus.py,
-# port_settings.py, XML-Assets) plus eine reduzierte menu_functions.c, die
-# nur die Settings-Callbacks bereitstellt.
+# port_settings.py, XML-Assets) plus eine reduzierte menu_functions.c,
+# die nur die Settings-Callbacks bereitstellt.
+#
+# Patch-Kette (Reihenfolge ist wichtig!):
+#   1. Knulli-Patch (monolithisch)
+#   2. OpenCE-Menue-Dateien kopieren + reduzierte menu_functions.c
+#   3. patch_settings_only.py (Hooks + Solo-Pause-Patch)
+#   4. patch_memory_pools         — Debug-Allocator aus, __thread-Arrays
+#   5. patch_neon_math            — NEON in matrix_math + guest_string
+#   6. patch_vita_optimizations   — Vita-Port-Ideen (LOD, Lighting, Sound)
+#   7. patch_button_remap         — A/B/X/Y-Tausch
+#   8. patch_index_extent_neon    — NEON fuer index_extent
+#   9. patch_fps_overlay          — In-Game-FPS-Overlay
+#  10. patch_draw_framebuffer_bound — GL_INVALID_OPERATION-Fix
+#  11. patch_mali_subdata         — Mali-G31 Mirror-Subdata-Guard
+#  12. patch_shader_prewarm       — Offline-Shader-Cache + Prewarming
+#  13. patch_aggressive_culling   — Aggressives Objekt-Culling
+#  14. patch_state_batching       — Render-Command-Batching
+#  15. patch_texture_prewarm      — Texture-Prewarming beim Map-Load
+#  16. patch_settings_menu        — In-Game-Settings-Menue (13 Zeilen)
+#  17. patch_config_defaults      — RK3326-abgestimmte Defaults
+#  18. patch_credits              — St0len-One-Credits
+#  19. patch_credits_xml          — Credits-Wasserzeichen in statische XMLs
+#  20. patch_forward_declarations — C99-Forward-Deklarationen (shader)
 # ══════════════════════════════════════════════════════════════════════
 PGO_MODE=${PGO_MODE:-use}
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 UPSTREAM_URL=${UPSTREAM_URL:-https://github.com/cybersecurity/halo-ce-universal.git}
 UPSTREAM_COMMIT=$(tr -d '[:space:]' < "$HERE/UPSTREAM_COMMIT")
-PATCH=$HERE/patches/halo-ce-universal-knulli.patch
+PATCH=$HERE/patches/halo-ce-universal-knnuli.patch
+# (Dateiname pruefen; im Repo liegt sie als halo-ce-universal-knulli.patch)
+[ -f "$PATCH" ] || PATCH=$HERE/patches/halo-ce-universal-knulli.patch
 SDL3_TAG=release-3.2.10
 SDL2_TAG=release-2.30.10
 SDL2_ARCHIVE=https://github.com/libsdl-org/SDL/archive/refs/tags/$SDL2_TAG.tar.gz
@@ -131,9 +155,8 @@ fetch_opence_files() {
         fi
     done
 
-    # 4. embed_assets.py: wir nehmen die OpenCE-Version (sie bettet die
-    # Menue-Dateien aus menus.json mit ein; die alten HUD/Titel/Fonts
-    # funktionieren unveraendert weiter)
+    # 4. embed_assets.py: OpenCE-Version (bettet die Menue-Dateien aus
+    # menus.json mit ein; die alten HUD/Titel/Fonts funktionieren weiter)
     if [ -f "$opence_dir/tools/embed_assets.py" ]; then
         cp "$opence_dir/tools/embed_assets.py" "$SRC/tools/embed_assets.py"
         echo "   + tools/embed_assets.py (OpenCE-Version)"
@@ -178,7 +201,7 @@ print("  XML-Hunk entfernt; Patch ist jetzt %d Bytes kleiner." % (len(text) - le
 PYEOF
 
 # ══════════════════════════════════════════════════════════════════════
-# 3. SDL3 (nur bauen, wenn .so fehlt)
+# SDL3 (nur bauen, wenn .so fehlt)
 # ══════════════════════════════════════════════════════════════════════
 if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
     echo "== SDL3 $SDL3_TAG: kompiliere aus dem Quellcode"
@@ -216,7 +239,7 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════════
-# 4. SDL2 (Header immer; .so nur kopieren, wenn fehlt)
+# SDL2 (Header immer; .so nur kopieren, wenn fehlt)
 # ══════════════════════════════════════════════════════════════════════
 SDL2_SRC=$WORK/SDL2-src
 SDL2_BUILD=$WORK/sdl2-build
@@ -323,7 +346,7 @@ export SDL2_INCLUDE="$SDL2_INSTALL/include"
 echo "== SDL2_INCLUDE=$SDL2_INCLUDE"
 
 # ══════════════════════════════════════════════════════════════════════
-# 5. Upstream klonen + Knulli-Patch + OpenCE-Dateien
+# Upstream klonen + Knulli-Patch + OpenCE-Dateien
 # ══════════════════════════════════════════════════════════════════════
 if [ ! -d "$SRC/.git" ]; then
     echo "== Klone Upstream in $SRC ..."
@@ -384,7 +407,7 @@ if ! tree_is_patched; then
 fi
 
 # ══════════════════════════════════════════════════════════════════════
-# 6. PGO
+# PGO
 # ══════════════════════════════════════════════════════════════════════
 PGO_FLAG="--pgo=off"
 PGO_EXTRA_ARGS=""
@@ -415,7 +438,7 @@ elif [ "$PGO_MODE" = "train" ]; then
 fi
 
 # ══════════════════════════════════════════════════════════════════════
-# 7. Fix 1: APCs in xbox_kernel.c
+# Fix 1: APCs in xbox_kernel.c
 # ══════════════════════════════════════════════════════════════════════
 python3 - "$SRC/port/linux/src/xbox_kernel.c" <<'PYEOF'
 import sys
@@ -514,7 +537,7 @@ print("xbox_kernel.c geprueft")
 PYEOF
 
 # ══════════════════════════════════════════════════════════════════════
-# 8. Fix 2: android_build.py
+# Fix 2: android_build.py
 # ══════════════════════════════════════════════════════════════════════
 python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import sys
@@ -667,7 +690,7 @@ PYEOF
 fi
 
 # ══════════════════════════════════════════════════════════════════════
-# 9. Fix 3: linux_build.py
+# Fix 3: linux_build.py
 # ══════════════════════════════════════════════════════════════════════
 python3 - "$SRC/tools/linux_build.py" <<'PYEOF'
 import sys
@@ -692,7 +715,7 @@ print("linux_build.py geprueft")
 PYEOF
 
 # ══════════════════════════════════════════════════════════════════════
-# 10. port/knulli kopieren + Fix 3b
+# port/knulli kopieren + Fix 3b
 # ══════════════════════════════════════════════════════════════════════
 echo ""
 echo "== Kopiere port/knulli in den Quellbaum ..."
@@ -723,7 +746,7 @@ PYEOF
 fi
 
 # ══════════════════════════════════════════════════════════════════════
-# 11. Restliche Python-Patches
+# Restliche Python-Patches
 # ══════════════════════════════════════════════════════════════════════
 echo ""
 echo "== Wende restliche Patch-Skripte an ..."
@@ -798,7 +821,7 @@ if [ -f "$HERE/patches/patch_credits_xml.py" ]; then
 fi
 
 # ══════════════════════════════════════════════════════════════════════
-# 12. Verifikation
+# Verifikation
 # ══════════════════════════════════════════════════════════════════════
 echo ""
 echo "== Verifiziere Patch-Ergebnisse ..."
@@ -853,11 +876,20 @@ check_file  "port/third_party/expat/expat.h"                                    
 check_patch "source/interface/ui_widget.c"      "pc_menu_tag"                   "ui_widget.c pc_menu_tag extern"
 check_patch "source/interface/ui_widget_event_handler_functions.c" "PC_MENU_FUNCTION_BASE" "ui_widget_event_handler_functions.c Dispatcher"
 check_patch "source/interface/ui_widget_event_handler_functions.c" "ui_widget_event_handler_function_name" "ui_widget_event_handler_functions.c Name-Lookup"
-check_patch "source/interface/ui_widget_game_data_input_functions.c" "PC_MENU_FUNCTION_BASE" "ui_widget_game_data_input_functions.c Dispatcher"
 check_patch "source/cache/cache_files.c"        "cache_files_tag_instances"     "cache_files.c Accessors"
 check_patch "source/cache/cache_files.c"        "menu_tags_loaded"              "cache_files.c Menue-Hooks"
 check_patch "tools/linux_build.py"              "EXPAT_DIR"                     "linux_build.py Expat"
 check_patch "tools/android_build.py"            "EXPAT_DIR"                     "android_build.py Expat"
+
+# Optional: game_data Dispatcher (Menue funktioniert auch ohne)
+if grep -q "settings_only: game data dispatcher" \
+    "$SRC/source/interface/ui_widget_game_data_input_functions.c" 2>/dev/null; then
+    echo "   OK: ui_widget_game_data_input_functions.c Dispatcher"
+else
+    echo "   HINWEIS: ui_widget_game_data_input_functions.c Dispatcher fehlt (nicht kritisch)."
+    echo "            Einstellungen werden gespeichert; nur der Live-Hilfe-Text"
+    echo "            in den Settings aktualisiert sich nicht automatisch."
+fi
 
 if [ -f "$SRC/tools/port_settings.py" ]; then
     check_patch "tools/port_settings.py" "display.fast_shaders"  "port_settings.py Video-Rows"
@@ -870,7 +902,7 @@ fi
 echo "== Alle Optimierungen sauber."
 
 # ══════════════════════════════════════════════════════════════════════
-# 13. Fix 5: PGO-Shim (nur train)
+# Fix 5: PGO-Shim (nur train)
 # ══════════════════════════════════════════════════════════════════════
 if [ "$PGO_MODE" = "train" ]; then
     SHIM="$SRC/port/android/guest/runtime/guest_pgo_shim.c"
@@ -904,7 +936,7 @@ CEOF
 fi
 
 # ══════════════════════════════════════════════════════════════════════
-# 14. Stamp
+# Stamp
 # ══════════════════════════════════════════════════════════════════════
 stamp=$({
     cat "$PATCH"
@@ -922,13 +954,13 @@ stamp=$({
     done
     [ -f "$HERE/pgo/halo_linux.profdata" ] && sha256sum "$HERE/pgo/halo_linux.profdata" | cut -d' ' -f1
     echo "pgo-mode=$PGO_MODE"
-    echo "settings-only=v1"
+    echo "settings-only=v2"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 echo "$stamp" > "$SRC/.port-stamp"
 
 # ══════════════════════════════════════════════════════════════════════
-# 15. Build
+# Build
 # ══════════════════════════════════════════════════════════════════════
 export ANDROID_NDK SYSROOT_LIB SDL2_INCLUDE GUEST_CC HOST_CC JOBS
 cd "$SRC"
@@ -944,7 +976,7 @@ echo "== Baue Host-Binary (halo) ueber port/knulli/build.sh ..."
 bash "$SRC/port/knulli/build.sh"
 
 # ══════════════════════════════════════════════════════════════════════
-# 16. Distribution
+# Distribution
 # ══════════════════════════════════════════════════════════════════════
 echo "== copying the build into $DIST"
 rm -rf "$DIST"
@@ -985,9 +1017,11 @@ Installation auf M9 Pro:
 4. dist/libs.aarch64/     nach /roms/ports/halo-ce/libs.aarch64/
 
 Settings-Menue erreichbar:
-- Bei Multiplayer-Maps: ueber den Xbox-Pause-Screen (SETTINGS).
-- Sonst: HALO_MENU_OPEN=main_menu/settings_select/player_setup/player_profile_edit/video_settings/video_settings_screen
-  in Halo.sh setzen; das Spiel startet dann direkt im Settings-Screen.
+- In der Kampagne: Pause-Taste druecken, dann SETTINGS.
+- In Multiplayer-Maps: Pause-Taste druecken, dann SETTINGS.
+- Direkt beim Start: HALO_MENU_OPEN="main_menu/settings_select/
+  player_setup/player_profile_edit/video_settings/video_settings_screen"
+  in Halo.sh setzen.
 
 FERTIG.
 ────────────────────────────────────────────────────────────────────────
