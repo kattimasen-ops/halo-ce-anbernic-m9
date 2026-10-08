@@ -19,7 +19,7 @@ import sys
 
 
 # ══════════════════════════════════════════════════════════════════════
-# Hilfsfunktion: findet den Parameter, der einen Funktionsindex enthaelt
+# Hilfsfunktionen
 # ══════════════════════════════════════════════════════════════════════
 def _find_function_param(args, strict=False):
     """Sucht in den Argumenten den Parameter, dessen Name 'function'
@@ -37,6 +37,19 @@ def _find_function_param(args, strict=False):
     if args:
         return args[-1].split()[-1].lstrip('*')
     return 'function_index'
+
+
+def _insert_include(text, include_line, anchors):
+    """Fuegt `include_line` (mit Newline am Ende) nach dem ersten
+    passenden Anker ein. Wenn kein Anker passt: am Dateianfang.
+    Gibt (text, wo) zurueck."""
+    if include_line.strip() in text:
+        return text, "bereits vorhanden"
+    for anchor in anchors:
+        if anchor in text:
+            return text.replace(anchor, anchor + include_line, 1), \
+                   f"nach {anchor.strip()}"
+    return include_line + text, "am Dateianfang (Fallback)"
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -82,10 +95,16 @@ def patch_event_dispatcher(src_root):
         print("  ui_widget_event_handler_functions.c: bereits gepatcht.")
         return
 
-    anchor = '#include "text/unicode.h"\n'
-    if anchor in text and '#include "halo_menus.h"' not in text:
-        text = text.replace(anchor,
-            anchor + '#include "halo_menus.h" /* settings_only */\n', 1)
+    # halo_menus.h-Include robust einfuegen
+    text, where = _insert_include(
+        text,
+        '#include "halo_menus.h" /* settings_only */\n',
+        ('#include "text/unicode.h"\n',
+         '#include "cseries.h"\n',
+         '#include "interface/ui_widget.h"\n'))
+    if where != "bereits vorhanden":
+        print(f"  ui_widget_event_handler_functions.c: halo_menus.h {where} "
+              "eingefuegt.")
 
     pattern = re.compile(
         r'\n(?:void|boolean|short|long|int)\s+'
@@ -145,11 +164,6 @@ def patch_event_dispatcher(src_root):
 
 # ══════════════════════════════════════════════════════════════════════
 # 3. ui_widget_game_data_input_functions.c: Dispatcher (robust)
-#
-# Sucht eine Funktion mit "game_data"/"input_function"/"function_invoke"
-# im Namen, die einen Parameter mit "function" hat. Bricht nicht ab,
-# wenn sie fehlt (dann funktioniert das Menue trotzdem, nur der
-# Live-Help-Text aktualisiert sich nicht).
 # ══════════════════════════════════════════════════════════════════════
 def patch_game_data_dispatcher(src_root):
     path = os.path.join(src_root, "source", "interface",
@@ -163,10 +177,16 @@ def patch_game_data_dispatcher(src_root):
         print("  ui_widget_game_data_input_functions.c: bereits gepatcht.")
         return
 
-    anchor = '#include "cseries.h"\n'
-    if anchor in text and '#include "halo_menus.h"' not in text:
-        text = text.replace(anchor,
-            anchor + '#include "halo_menus.h" /* settings_only */\n', 1)
+    # halo_menus.h-Include robust einfuegen (mehrere Anker, Fallback oben)
+    text, where = _insert_include(
+        text,
+        '#include "halo_menus.h" /* settings_only */\n',
+        ('#include "cseries.h"\n',
+         '#include "cseries/cseries.h"\n',
+         '#include "interface/ui_widget.h"\n'))
+    if where != "bereits vorhanden":
+        print(f"  ui_widget_game_data_input_functions.c: halo_menus.h {where} "
+              "eingefuegt.")
 
     pattern = re.compile(
         r'\n(?:void|boolean|short|long|int)\s+'
@@ -305,7 +325,6 @@ def patch_menu_tags_solo_pause(src_root):
         print("  menu_tags.c: Solo-Pause-Patch bereits aktiv.")
         return
 
-    # 5a. SOLO_COLLECTION define
     anchor = '#define MULTIPLAYER_COLLECTION "ui\\\\shell\\\\multiplayer"\n'
     if anchor not in text:
         print("FEHLER: MULTIPLAYER_COLLECTION-Anker fehlt.", file=sys.stderr)
@@ -316,7 +335,6 @@ def patch_menu_tags_solo_pause(src_root):
     )
     text = text.replace(anchor, add, 1)
 
-    # 5b. pause_patch -> pause_patch_multiplayer umbenennen
     old_def = 'static void pause_patch(struct cache_file_tag_instance *instances)\n'
     new_def = ('static void pause_patch_multiplayer('
                'struct cache_file_tag_instance *instances) '
@@ -326,7 +344,6 @@ def patch_menu_tags_solo_pause(src_root):
         sys.exit(1)
     text = text.replace(old_def, new_def, 1)
 
-    # 5c. pause_patch_solo vor menu_tags_loaded einfuegen
     anchor = 'void menu_tags_loaded(\n'
     if anchor not in text:
         print("FEHLER: menu_tags_loaded-Anker fehlt.", file=sys.stderr)
@@ -442,7 +459,6 @@ static void pause_patch_solo(struct cache_file_tag_instance *instances)
 '''
     text = text.replace(anchor, solo_fn + anchor, 1)
 
-    # 5d. Guard in menu_tags_loaded erweitern
     old_guard = '''	boolean game_map = strcmp(map_name, "ui") != 0;
 
 	/* (ui.map, and a multiplayer map: its pause menu's SETTINGS) */
@@ -468,7 +484,6 @@ static void pause_patch_solo(struct cache_file_tag_instance *instances)
         sys.exit(1)
     text = text.replace(old_guard, new_guard, 1)
 
-    # 5e. pause_patch-Aufruf ersetzen
     old_call = '''	if (game_map)
 	{
 		pause_patch(instances);
