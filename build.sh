@@ -28,6 +28,11 @@ HOST_CC=${HOST_CC:-aarch64-clang}
 JOBS=${JOBS:-$(nproc)}
 OPEN_CE_URL=${OPEN_CE_URL:-https://github.com/OpenCommunityEdition/OpenCE.git}
 
+# Archiver fuer statische Bibliotheken (SDL2main, SDL2_test). CMake
+# findet bei einem Clang-Wrapper nicht automatisch llvm-ar-22.
+AR=${AR:-/usr/bin/llvm-ar-22}
+RANLIB=${RANLIB:-/usr/bin/llvm-ranlib-22}
+
 die() { echo "build.sh: $*" >&2; exit 1; }
 need() { command -v "$1" > /dev/null 2>&1 || die "$1 not found: $2"; }
 
@@ -39,6 +44,8 @@ need tar "install tar"
 need cmake "install cmake"
 need "$HOST_CC" "install clang-22 and create /usr/local/bin/aarch64-clang (see workflow)"
 need "$GUEST_CC" "install clang-22 from apt.llvm.org, or set GUEST_CC"
+[ -x "$AR" ]      || die "$AR nicht gefunden (install llvm-22)"
+[ -x "$RANLIB" ]  || die "$RANLIB nicht gefunden (install llvm-22)"
 "$GUEST_CC" -print-targets 2> /dev/null | grep -q aarch64_32 ||
     die "$GUEST_CC has no arm64_32 (aarch64_32) target; use clang 22 from apt.llvm.org"
 [ -n "${ANDROID_NDK:-}" ] || die "set ANDROID_NDK to the Android NDK r28c folder"
@@ -68,6 +75,10 @@ echo "== glibc-Version des Build-Containers:"
 ( ldd --version 2>/dev/null || true ) | head -1 || true
 echo "== Host-Compiler: $HOST_CC"
 "$HOST_CC" --version 2>&1 | head -2 || true
+echo "== Archiver: $AR"
+"$AR" --version 2>&1 | head -1 || true
+echo "== Ranlib: $RANLIB"
+"$RANLIB" --version 2>&1 | head -1 || true
 
 WORK=${WORK:-$HERE/work}
 DIST=${DIST:-$HERE/dist}
@@ -213,6 +224,8 @@ if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
         -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
         -DCMAKE_C_COMPILER=aarch64-clang \
         -DCMAKE_C_FLAGS="-march=armv8-a -mno-outline-atomics" \
+        -DCMAKE_AR="$AR" \
+        -DCMAKE_RANLIB="$RANLIB" \
         -DCMAKE_FIND_ROOT_PATH=/ \
         -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
         -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
@@ -306,6 +319,8 @@ PATCH_EOF
         -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
         -DCMAKE_C_COMPILER=aarch64-clang \
         -DCMAKE_C_FLAGS="-march=armv8-a -mno-outline-atomics" \
+        -DCMAKE_AR="$AR" \
+        -DCMAKE_RANLIB="$RANLIB" \
         -DCMAKE_FIND_ROOT_PATH=/ \
         -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
         -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
@@ -937,7 +952,7 @@ stamp=$({
     done
     [ -f "$HERE/pgo/halo_linux.profdata" ] && sha256sum "$HERE/pgo/halo_linux.profdata" | cut -d' ' -f1
     echo "pgo-mode=$PGO_MODE"
-    echo "armv8.0-clang-host=v2"
+    echo "armv8.0-clang-host=v3"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 echo "$stamp" > "$SRC/.port-stamp"
@@ -945,7 +960,7 @@ echo "$stamp" > "$SRC/.port-stamp"
 # ══════════════════════════════════════════════════════════════════════
 # Build
 # ══════════════════════════════════════════════════════════════════════
-export ANDROID_NDK SYSROOT_LIB SDL2_INCLUDE SDL2_LIB_DIR GUEST_CC HOST_CC JOBS
+export ANDROID_NDK SYSROOT_LIB SDL2_INCLUDE SDL2_LIB_DIR GUEST_CC HOST_CC JOBS AR RANLIB
 cd "$SRC"
 
 echo "== Konfiguriere mit $LTO_FLAG $PGO_FLAG $PGO_EXTRA_ARGS ..."
