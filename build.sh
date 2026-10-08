@@ -5,8 +5,9 @@ set -euo pipefail
 # Halo CE Universal — M9 Pro (RK3326 / Cortex-A35 + Mali-G31 MP2)
 #
 # Option 2: Upstream + Knulli-Patch + OpenCE-Merge per git apply --3way.
-# Nach dem Merge werden kritische Symbole geprüft; bei Konflikten werden
-# die betroffenen Dateien als rej/-Artefakt bereitgestellt.
+# Nach dem Knulli-Patch wird committet, damit --3way einen sauberen Index
+# hat; bei Konflikten werden die betroffenen Dateien als rej/-Artefakt
+# bereitgestellt.
 # ══════════════════════════════════════════════════════════════════════
 PGO_MODE=${PGO_MODE:-use}
 
@@ -163,12 +164,6 @@ fi
 
 # ══════════════════════════════════════════════════════════════════════
 # 4. SDL2: Header immer bereitstellen; .so nur bauen, wenn sie fehlt
-#
-# WICHTIG: port/knulli/build.sh braucht SDL2_INCLUDE mit SDL2/SDL.h.
-# Auch wenn die .so im sysroot liegt, braucht der Host-Build die Header.
-# Deshalb wird SDL2 (Headers + Bibliothek) in $WORK/sdl2-install gebaut,
-# sobald die Header dort fehlen — und die .so nur dann ins sysroot
-# kopiert, wenn sie dort noch nicht vorhanden ist.
 # ══════════════════════════════════════════════════════════════════════
 SDL2_SRC=$WORK/SDL2-src
 SDL2_BUILD=$WORK/sdl2-build
@@ -263,7 +258,6 @@ PATCH_EOF
 else
     echo "== SDL2-Header bereits in $SDL2_INSTALL"
     if [ ! -f "$SYSROOT_LIB/libSDL2-2.0.so.0" ]; then
-        # Header da, .so fehlt: aus dem vorherigen Build nehmen, falls da
         if [ -f "$SDL2_INSTALL/lib/libSDL2-2.0.so.0" ]; then
             cp -L "$SDL2_INSTALL/lib/libSDL2-2.0.so.0" "$SYSROOT_LIB/libSDL2-2.0.so.0"
             echo "== SDL2 .so aus $SDL2_INSTALL nach sysroot kopiert."
@@ -277,7 +271,7 @@ export SDL2_INCLUDE="$SDL2_INSTALL/include"
 echo "== SDL2_INCLUDE=$SDL2_INCLUDE"
 
 # ══════════════════════════════════════════════════════════════════════
-# 5. Upstream klonen, Knulli-Patch anwenden, dann OpenCE mergen
+# 5. Upstream klonen, Knulli-Patch anwenden und committen, dann OpenCE mergen
 # ══════════════════════════════════════════════════════════════════════
 if [ ! -d "$SRC/.git" ]; then
     echo "== Klone Upstream in $SRC ..."
@@ -292,91 +286,103 @@ fi
 git -C "$SRC" cat-file -e "$UPSTREAM_COMMIT^{commit}" 2> /dev/null ||
     die "commit $UPSTREAM_COMMIT not in $UPSTREAM_URL"
 
-echo ""
-echo "== Setze Upstream auf $UPSTREAM_COMMIT zurueck ..."
-git -C "$SRC" checkout -q --force --detach "$UPSTREAM_COMMIT"
-git -C "$SRC" reset -q --hard
-git -C "$SRC" clean -q -fd
-
-echo ""
-echo "== Pruefe und wende Knulli-Patch an ..."
-if ! git -C "$SRC" apply --check "$PATCH" 2>&1; then
-    die "Knulli-Patch kann auf $UPSTREAM_COMMIT NICHT sauber angewendet werden."
-fi
-git -C "$SRC" apply "$PATCH"
-git -C "$SRC" apply --summary "$PATCH" | awk '$1 == "create" { print $4 }' | xargs -r git -C "$SRC" add -N --
-echo "== Knulli-Patch sauber angewendet."
+# git-Identitaet fuer den Commit im CI
+git -C "$SRC" config user.email "halo-build@localhost"
+git -C "$SRC" config user.name "Halo CE RK3326 Build"
 
 OPENCE_APPLIED_MARKER=$SRC/.opence-merge-hash
 CURRENT_MERGE_HASH="${OPENCE_MERGE_BASE}:${OPENCE_PATCH_HASH}"
+
+NEED_RESET=0
+if [ ! -f "$OPENCE_APPLIED_MARKER" ] || [ "$(cat "$OPENCE_APPLIED_MARKER" 2>/dev/null)" != "$CURRENT_MERGE_HASH" ]; then
+    NEED_RESET=1
+fi
+# Auch zuruecksetzen, wenn der Baum noch Knulli-Aenderungen hat, die nicht
+# committet sind (alte Zustaende aus vorherigen Runs ohne Commit).
+if [ "$(git -C "$SRC" status --porcelain 2>/dev/null | wc -l)" -gt 0 ] && [ ! -f "$OPENCE_APPLIED_MARKER" ]; then
+    NEED_RESET=1
+fi
+
+if [ "$NEED_RESET" = "1" ]; then
+    echo ""
+    echo "== Setze Upstream auf $UPSTREAM_COMMIT zurueck ..."
+    git -C "$SRC" checkout -q --force --detach "$UPSTREAM_COMMIT"
+    git -C "$SRC" reset -q --hard
+    git -C "$SRC" clean -q -fd -e work -e dist -e rej 2>/dev/null || git -C "$SRC" clean -q -fdx
+
+    echo ""
+    echo "== Pruefe und wende Knulli-Patch an ..."
+    if ! git -C "$SRC" apply --check "$PATCH" 2>&1; then
+        die "Knulli-Patch kann auf $UPSTREAM_COMMIT NICHT sauber angewendet werden."
+    fi
+    git -C "$SRC" apply "$PATCH"
+    git -C "$SRC" add -A
+    echo "== Committe Knulli-Patch fuer sauberen Index (noetig fuer --3way) ..."
+    git -C "$SRC" commit -q -m "knulli-patch (for --3way base)"
+    echo "== Knulli-Patch angewendet und committet."
+    rm -f "$OPENCE_APPLIED_MARKER"
+fi
+
 if [ ! -f "$OPENCE_APPLIED_MARKER" ] || [ "$(cat "$OPENCE_APPLIED_MARKER" 2>/dev/null)" != "$CURRENT_MERGE_HASH" ]; then
     echo ""
     echo "== Wende OpenCE-Patch per --3way an ..."
     rm -f "$OPENCE_APPLIED_MARKER"
 
-    # WICHTIG: --3way und --reject sind inkompatibel. Wir nutzen --3way
-    # und suchen danach nach Konfliktmarkern (<<<<<<<) in der Arbeitskopie.
     set +e
     git -C "$SRC" apply --3way "$OPENCE_PATCH" > "$WORK/opence-apply.log" 2>&1
     APPLY_STATUS=$?
     set -e
-    cat "$WORK/opence-apply.log" | head -100
+    # Nur die Fehlerzeilen ausgeben, nicht die tausenden "Applied patch ..."-
+    head -50 "$WORK/opence-apply.log"
 
-    # Konflikte finden: git apply --3way schreibt <<<<<<<-Marker in
-    # betroffene Dateien.
-    CONFLICT_FILES=$(grep -rl '^<<<<<<< ' "$SRC" 2>/dev/null | grep -v '\.git/' | sort || true)
+    # Konflikte finden: unmerged paths (git-Index) UND Datei-Marker
     UNMERGED=$(git -C "$SRC" diff --name-only --diff-filter=U 2>/dev/null | sort || true)
+    CONFLICT_FILES=$(grep -rl '^<<<<<<< ' "$SRC" 2>/dev/null | grep -v '/\.git/' | sort || true)
 
-    if [ -n "$CONFLICT_FILES" ] || [ -n "$UNMERGED" ]; then
+    if [ -n "$UNMERGED" ] || [ -n "$CONFLICT_FILES" ]; then
         echo ""
         echo "════════════════════════════════════════════════════════════"
         echo "  OPENCE-MERGE HAT KONFLIKTE — BUILD STOPPT HIER"
         echo "════════════════════════════════════════════════════════════"
         echo ""
-        if [ -n "$CONFLICT_FILES" ]; then
-            echo "Konflikt-Dateien (mit <<<<<<<-Markern):"
-            echo "$CONFLICT_FILES" | sed 's|^|  |'
-        fi
         if [ -n "$UNMERGED" ]; then
-            echo "Unmerged paths (git-Index):"
+            echo "Unmerged paths:"
             echo "$UNMERGED" | sed 's|^|  |'
+        fi
+        if [ -n "$CONFLICT_FILES" ]; then
+            echo "Dateien mit <<<<<<<-Markern:"
+            for f in $CONFLICT_FILES; do
+                rel=${f#"$SRC/"}
+                echo "  $rel"
+            done
         fi
         echo ""
         rm -rf "$REJ"
         mkdir -p "$REJ"
-        # Konfliktdateien in rej/ sammeln
-        for f in $CONFLICT_FILES; do
-            rel=${f#"$SRC/"}
+
+        # Alle betroffenen Dateien sammeln (vereinigt)
+        ALL_FILES=$(printf '%s\n%s\n' "$UNMERGED" "$(for f in $CONFLICT_FILES; do echo "${f#"$SRC/"}"; done)" | sort -u | grep -v '^$' || true)
+
+        for rel in $ALL_FILES; do
+            [ -f "$SRC/$rel" ] || continue
             mkdir -p "$REJ/conflict-$(dirname "$rel")"
-            cp "$f" "$REJ/conflict-$rel"
+            cp "$SRC/$rel" "$REJ/conflict-$rel" 2>/dev/null || true
             if [ -f "$OPENCE/$rel" ]; then
                 mkdir -p "$REJ/opence-$(dirname "$rel")"
                 cp "$OPENCE/$rel" "$REJ/opence-$rel"
             fi
             mkdir -p "$REJ/knulli-$(dirname "$rel")"
-            git -C "$SRC" show "$UPSTREAM_COMMIT:$rel" > "$REJ/knulli-$rel" 2>/dev/null || true
+            # Knulli-Version: aus dem Commit (HEAD) extrahieren
+            git -C "$SRC" show "HEAD:$rel" > "$REJ/knulli-$rel" 2>/dev/null || true
         done
-        # Unmerged paths zusätzlich
-        if [ -n "$UNMERGED" ]; then
-            echo "$UNMERGED" > "$REJ/unmerged.txt"
-            for rel in $UNMERGED; do
-                [ -f "$SRC/$rel" ] || continue
-                mkdir -p "$REJ/conflict-$(dirname "$rel")"
-                cp "$SRC/$rel" "$REJ/conflict-$rel" 2>/dev/null || true
-                if [ -f "$OPENCE/$rel" ]; then
-                    mkdir -p "$REJ/opence-$(dirname "$rel")"
-                    cp "$OPENCE/$rel" "$REJ/opence-$rel"
-                fi
-                mkdir -p "$REJ/knulli-$(dirname "$rel")"
-                git -C "$SRC" show "$UPSTREAM_COMMIT:$rel" > "$REJ/knulli-$rel" 2>/dev/null || true
-            done
-        fi
+
+        echo "$ALL_FILES" > "$REJ/conflict-files.txt"
         cp "$WORK/opence-apply.log" "$REJ/opence-apply.log" 2>/dev/null || true
         exit 2
     fi
 
     if [ "$APPLY_STATUS" -ne 0 ]; then
-        echo "== git apply --3way meldete Status $APPLY_STATUS, aber keine Konfliktmarker."
+        echo "== git apply --3way meldete Status $APPLY_STATUS, aber keine Konfliktdateien."
         cat "$WORK/opence-apply.log"
         die "OpenCE-Patch-Anwendung fehlgeschlagen."
     fi
@@ -433,7 +439,7 @@ if [ ! -f "$OPENCE_APPLIED_MARKER" ] || [ "$(cat "$OPENCE_APPLIED_MARKER" 2>/dev
             mkdir -p "$REJ/opence-$(dirname "$f")"
             cp "$OPENCE/$f" "$REJ/opence-$f"
             mkdir -p "$REJ/knulli-$(dirname "$f")"
-            git -C "$SRC" show "$UPSTREAM_COMMIT:$f" > "$REJ/knulli-$f" 2>/dev/null || true
+            git -C "$SRC" show "HEAD:$f" > "$REJ/knulli-$f" 2>/dev/null || true
         done
         exit 3
     fi
@@ -593,7 +599,7 @@ print("xbox_kernel.c geprueft")
 PYEOF
 
 # ══════════════════════════════════════════════════════════════════════
-# 8. Fix 2: android_build.py (mcpu, O3, Builtin-Shim, PGO)
+# 8. Fix 2: android_build.py
 # ══════════════════════════════════════════════════════════════════════
 python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import sys
@@ -1016,7 +1022,7 @@ stamp=$({
     [ -f "$HERE/pgo/halo_linux.profdata" ] && sha256sum "$HERE/pgo/halo_linux.profdata" | cut -d' ' -f1
     [ -f "$HERE/pgo/halo_android.profdata" ] && sha256sum "$HERE/pgo/halo_android.profdata" | cut -d' ' -f1
     echo "pgo-mode=$PGO_MODE"
-    echo "opence-menu=option2-v3"
+    echo "opence-menu=option2-v4"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 echo "$stamp" > "$SRC/.port-stamp"
