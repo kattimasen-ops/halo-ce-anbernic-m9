@@ -1,20 +1,12 @@
 #!/bin/sh
 # Builds the Knulli port into build/knulli:
-#   halo            the aarch64 glibc host (the loader, SDL2, OpenGL ES)
+#   halo            the aarch64 STATIC glibc host
 #   halo_guest.elf  the game, the Android port's guest image
-#   libs.aarch64/   the runtime libraries the device may not have
 #
-# Bewusst POSIX-sh-kompatibel (dash): set -eu statt set -euo pipefail.
+# Kein libs.aarch64 mehr: der Host ist statisch, bringt seine eigene
+# glibc mit und braucht weder libmali noch libSDL2 auf dem Geraet.
 #
-# WICHTIG: libmali wird NICHT mitgeliefert und NICHT gelinkt. Auf dem
-# M9 Pro kommt sie aus dem System (Halo.sh legt /tmp/halo-mali mit
-# Symlinks auf /usr/local/lib/aarch64-linux-gnu/libmali-bifrost-g31-rxp0-gbm.so
-# an und setzt diesen Pfad in LD_LIBRARY_PATH vor libs.aarch64).
-#
-# glibc_version_header (GLIBC_VERSION_HEADER) wird per -include in die
-# Host-Kompilierung eingebunden, damit der Loader auf dem M9 Pro
-# (glibc 2.31) laeuft und nicht die neueren Symbole des Build-Runners
-# (glibc 2.35) verlangt.
+# POSIX-sh-kompatibel (dash): set -eu statt set -euo pipefail.
 set -eu
 
 folder() {
@@ -36,87 +28,21 @@ JOBS=${JOBS:-$(nproc)}
 OUT=build/knulli
 OBJ=$OUT/obj
 
+# Statisches SDL2 (von der Root-build.sh gebaut)
+SDL2_LIB_DIR="${SDL2_LIB_DIR:?SDL2_LIB_DIR not set by root build.sh}"
+
 ninja -j "$JOBS" build/android/halo_guest.elf build/android/host/host_import_table.c
-mkdir -p "$OBJ" "$OUT/gl_include" "$OUT/lib" "$OUT/libs.aarch64"
+mkdir -p "$OBJ" "$OUT/gl_include" "$OUT/lib"
 
 KHRONOS=$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include
 for name in EGL GLES2 GLES3 KHR; do
     ln -sfn "$KHRONOS/$name" "$OUT/gl_include/$name"
 done
 
-echo "== Inhalt von SYSROOT_LIB=$SYSROOT_LIB:"
-ls -la "$SYSROOT_LIB" || true
-
-echo "== Kopiere Laufzeitbibliotheken nach $OUT/libs.aarch64/"
-copy_runtime_lib() {
-    prefix=$1
-    target=$2
-    src=$(find "$SYSROOT_LIB" -maxdepth 1 -name "$prefix*" -type f 2>/dev/null | head -n 1)
-    if [ -z "$src" ]; then
-        src=$(find "$SYSROOT_LIB" -maxdepth 1 -name "$prefix*" 2>/dev/null | head -n 1)
-    fi
-    if [ -z "$src" ]; then
-        echo "  WARNUNG: keine $prefix*-Datei in SYSROOT_LIB – $target wird nicht ausgeliefert"
-        return 1
-    fi
-    cp -L "$src" "$OUT/libs.aarch64/$target"
-    echo "  $target <- $(basename "$src") ($(stat -c%s "$OUT/libs.aarch64/$target") Bytes)"
-    return 0
-}
-
-# libmali absichtlich NICHT kopieren (siehe Kommentar oben).
-copy_runtime_lib "libSDL3"   "libSDL3.so.0"
-copy_runtime_lib "libSDL2"   "libSDL2-2.0.so.0"
-copy_runtime_lib "libdecor"  "libdecor-0.so.0"
-
-link_library() {
-    pattern=$1
-    linkname=$2
-    library=$(find "$SYSROOT_LIB" -maxdepth 1 -name "$pattern" -type f 2>/dev/null | head -n 1)
-    if [ -z "$library" ]; then
-        library=$(find "$SYSROOT_LIB" -maxdepth 1 -name "$pattern" 2>/dev/null | head -n 1)
-    fi
-    if [ -z "$library" ]; then
-        echo "build.sh: no $pattern in SYSROOT_LIB=$SYSROOT_LIB" >&2
-        return 1
-    fi
-    rm -f "$OUT/lib/$linkname" "$OUT/lib/$linkname.0" "$OUT/lib/$linkname.tmp"
-    if ! ln "$library" "$OUT/lib/$linkname" 2>/dev/null; then
-        cp -L "$library" "$OUT/lib/$linkname" || {
-            echo "build.sh: cp fehlgeschlagen fuer $linkname" >&2
-            return 1
-        }
-    fi
-    size=$(stat -c%s "$OUT/lib/$linkname" 2>/dev/null || echo 0)
-    if [ "$size" -lt 1024 ]; then
-        echo "build.sh: $OUT/lib/$linkname ist nur $size Bytes gross" >&2
-        ls -la "$OUT/lib/" >&2
-        return 1
-    fi
-    echo "  copied $linkname <- $(basename "$library") ($size Bytes)"
-    return 0
-}
-
-# libmali absichtlich NICHT linken.
-link_library "libSDL2*"  "libSDL2.so"    || exit 1
-link_library "libSDL3*"  "libSDL3.so"    || exit 1
-link_library "libdecor*" "libdecor.so"   || exit 1
-
-# ── glibc_version_header (nur Host!) ─────────────────────────────────
-if [ -n "${GLIBC_VERSION_HEADER:-}" ] && [ -f "$GLIBC_VERSION_HEADER" ]; then
-    GLIBC_CFLAGS="-include $GLIBC_VERSION_HEADER"
-    echo "== glibc_version_header: $GLIBC_VERSION_HEADER"
-else
-    GLIBC_CFLAGS=""
-    echo "== WARNUNG: GLIBC_VERSION_HEADER nicht gesetzt oder Datei fehlt."
-    echo "   Der Host-Loader verlangt dann die glibc des Build-Runners."
-fi
-
 CFLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -fPIC -Wall -Wno-unused-function \
         -D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS \
         -DHALO_ANDROID \
-        $GLIBC_CFLAGS \
-        -flto -fomit-frame-pointer -ffunction-sections -fdata-sections \
+        -fomit-frame-pointer -ffunction-sections -fdata-sections \
         -fno-plt -fno-semantic-interposition"
 
 CFLAGS="$CFLAGS -ffile-prefix-map=$ROOT=. -ffile-prefix-map=$SDL2_INCLUDE=sdl2"
@@ -183,30 +109,29 @@ done
 compile port/third_party/tomlc17/tomlc17.c -w
 compile build/android/host/host_import_table.c
 
-echo "LINK $OUT/halo"
-# Nur -lSDL2, nicht -lSDL3 (siehe vorige Version: SDL_Init etc. sind in
-# beiden; -lSDL3 zuerst wuerde den KMSDRM-Videopfad brechen).
-#
-# KEIN -lmali: die EGL/GLES-Symbole, die host_gl.c und host_glthread_gen.c
-# referenzieren, werden zur Laufzeit aus der System-Mali aufgeloest
-# (Halo.sh: LD_LIBRARY_PATH=/tmp/halo-mali:... vor libs.aarch64).
-#
-# --unresolved-symbols=ignore-all laesst die EGL/GLES-Symbole beim
-# Linken offen; sie landen als normale undefinierte Symbole in der
-# dynamischen Symboltabelle und werden beim Start vom Loader ueber
-# LD_LIBRARY_PATH und die DT_NEEDED-Eintraege aufgeloest.
-$CC -o "$OUT/halo" $objects \
-    -L"$OUT/lib" \
-    -Wl,-rpath-link,"$OUT/lib" \
-    -Wl,--allow-shlib-undefined \
-    -Wl,--unresolved-symbols=ignore-all \
-    -Wl,-O1 -Wl,--as-needed -Wl,--gc-sections \
-    -flto \
-    -lSDL2 -lpthread -ldl -lm
+echo "LINK $OUT/halo (statisch)"
+# STATISCH: -static + libSDL2.a. Die glibc kommt aus dem Binary,
+# das Geraet braucht keine passende System-glibc mehr.
+# --allow-multiple-definition: einige Symbole (z. B. dlopen) sind in
+# glibc sowohl in libc.a als auch in libdl.a enthalten.
+$CC -static -o "$OUT/halo" $objects \
+    "$SDL2_LIB_DIR/libSDL2.a" \
+    -Wl,--allow-multiple-definition \
+    -Wl,-O1 -Wl,--gc-sections \
+    -lm -lpthread -ldl -lrt -lresolv
 
 cp build/android/halo_guest.elf "$OUT/halo_guest.elf"
 
-echo "== Inhalt von $OUT/libs.aarch64/:"
-ls -la "$OUT/libs.aarch64/"
+echo "== Pruefe auf dynamische Abhaengigkeiten:"
+if command -v file > /dev/null 2>&1; then
+    file "$OUT/halo" || true
+fi
+if command -v readelf > /dev/null 2>&1; then
+    echo "  NEEDED-Bibliotheken (leer = statisch):"
+    readelf -d "$OUT/halo" 2>/dev/null | grep NEEDED || echo "  (keine — statisch)"
+    echo "  GLIBC-Versionsbedarf (leer = keine):"
+    readelf --dyn-syms "$OUT/halo" 2>/dev/null | grep -E "GLIBC_[0-9]" || echo "  (keine — statisch)"
+fi
+
 echo "== $OUT/halo und $OUT/halo_guest.elf:"
 ls -l "$OUT/halo" "$OUT/halo_guest.elf"
