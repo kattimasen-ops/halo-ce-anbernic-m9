@@ -13,12 +13,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - name: Checkout port repo
+      - name: "Checkout port repo"
         uses: actions/checkout@v4
         with:
           path: port-repo
 
-      - name: Clone upstream and apply Knulli patch
+      - name: "Clone upstream and apply Knulli patch"
         run: |
           set -e
           UPSTREAM_URL="https://github.com/cybersecurity/halo-ce-universal.git"
@@ -34,171 +34,156 @@ jobs:
           git clean -q -fd
 
           echo "== Checking patch applicability =="
-          git apply --check "$PATCH" || {
+          if ! git apply --check "$PATCH"; then
             echo "PATCH DOES NOT APPLY CLEANLY"
             exit 1
-          }
+          fi
           git apply "$PATCH"
           git add -A
-          echo "== Upstream patched OK, HEAD=$(git rev-parse HEAD) =="
+          echo "== Upstream patched OK =="
+          git rev-parse HEAD
 
-      - name: Section 1 — patched tree structure
+      - name: "Section 01 - patched tree structure"
         run: |
           REPORT="$GITHUB_WORKSPACE/upstream-analysis.txt"
           {
-            echo "════════════════════════════════════════════════════════════════════"
+            echo "================================================================"
             echo "UPSTREAM ANALYSIS (after Knulli patch)"
             echo "Upstream commit: $(cat port-repo/UPSTREAM_COMMIT)"
             echo "Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            echo "════════════════════════════════════════════════════════════════════"
+            echo "================================================================"
             echo ""
-            echo "════════════════════════════════════════════════════════════════════"
-            echo "SECTION 1 — TREE STRUCTURE AFTER PATCH"
-            echo "════════════════════════════════════════════════════════════════════"
+            echo "==== SECTION 01 - TREE STRUCTURE AFTER PATCH ===="
             echo ""
-            echo "--- port/ (top 4 levels) ---"
+            echo "--- port top 4 levels ---"
             find upstream/port -maxdepth 4 -type f -printf '%10s  %p\n' 2>/dev/null | sort -k2 || true
             echo ""
-            echo "--- port/linux/src/ ---"
+            echo "--- port/linux/src ---"
             ls -la upstream/port/linux/src/ 2>&1 || echo "(not found)"
             echo ""
-            echo "--- port/linux/game/ ---"
+            echo "--- port/linux/game ---"
             ls -la upstream/port/linux/game/ 2>&1 || echo "(not found)"
             echo ""
-            echo "--- port/linux/include/ ---"
+            echo "--- port/linux/include ---"
             ls -la upstream/port/linux/include/ 2>&1 || echo "(not found)"
             echo ""
-            echo "--- port/android/guest/runtime/ ---"
+            echo "--- port/android/guest/runtime ---"
             ls -la upstream/port/android/guest/runtime/ 2>&1 || echo "(not found)"
             echo ""
-            echo "--- port/android/host/ ---"
+            echo "--- port/android/host ---"
             ls -la upstream/port/android/host/ 2>&1 || echo "(not found)"
             echo ""
-            echo "--- port/android/include/ ---"
+            echo "--- port/android/include ---"
             ls -la upstream/port/android/include/ 2>&1 || echo "(not found)"
             echo ""
-            echo "--- port/third_party/ ---"
+            echo "--- port/third_party ---"
             ls -la upstream/port/third_party/ 2>&1 || echo "(not found)"
             echo ""
-            echo "--- tools/ ---"
+            echo "--- tools ---"
             ls -la upstream/tools/ 2>&1 || echo "(not found)"
             echo ""
           } > "$REPORT"
 
-      - name: Section 2 — port.json and build system config
+      - name: "Section 02 - port.json and build config"
         run: |
           REPORT="$GITHUB_WORKSPACE/upstream-analysis.txt"
           {
-            echo "════════════════════════════════════════════════════════════════════"
-            echo "SECTION 2 — port.json AND BUILD CONFIG"
-            echo "════════════════════════════════════════════════════════════════════"
+            echo "==== SECTION 02 - port.json AND BUILD CONFIG ===="
             echo ""
             echo "----- BEGIN port/linux/port.json -----"
             cat upstream/port/linux/port.json 2>&1 || echo "(MISSING)"
             echo ""
             echo "----- END port/linux/port.json -----"
             echo ""
-            echo "--- tools/linux_build.py: game_sources / platform_sources config ---"
-            grep -n 'game_sources\|platform_sources\|game"\]\[\|platform' upstream/tools/linux_build.py 2>/dev/null | head -40 || true
+            echo "--- linux_build.py source registration ---"
+            grep -n 'game_sources\|platform_sources\|menu_files\|menu_tags\|menu_functions\|expat\|EXPAT' upstream/tools/linux_build.py 2>/dev/null | head -40 || true
             echo ""
-            echo "--- tools/linux_build.py: EXPAT / menu references ---"
-            grep -n 'expat\|EXPAT\|menu_files\|menu_tags\|menu_functions' upstream/tools/linux_build.py 2>/dev/null || true
+            echo "--- android_build.py source registration ---"
+            grep -n 'menu_files\|menu_tags\|menu_functions\|expat\|EXPAT' upstream/tools/android_build.py 2>/dev/null | head -40 || true
             echo ""
-            echo "--- tools/android_build.py: EXPAT / menu references ---"
-            grep -n 'expat\|EXPAT\|menu_files\|menu_tags\|menu_functions' upstream/tools/android_build.py 2>/dev/null || true
+            echo "--- android_build.py GUEST_ABI_FLAGS ---"
+            grep -n -A30 'GUEST_ABI_FLAGS = ' upstream/tools/android_build.py 2>/dev/null | head -40 || true
             echo ""
-            echo "--- tools/android_build.py: GUEST_ABI_FLAGS (current) ---"
-            grep -n -A30 'GUEST_ABI_FLAGS = \[' upstream/tools/android_build.py 2>/dev/null | head -40 || true
+            echo "--- android_build.py GUEST_CODE_FLAGS ---"
+            grep -n -A25 'GUEST_CODE_FLAGS = ' upstream/tools/android_build.py 2>/dev/null | head -35 || true
             echo ""
-            echo "--- tools/android_build.py: GUEST_CODE_FLAGS (current) ---"
-            grep -n -A25 'GUEST_CODE_FLAGS = \[' upstream/tools/android_build.py 2>/dev/null | head -35 || true
-            echo ""
-            echo "--- configure.py top-level source registration ---"
+            echo "--- configure.py references ---"
             grep -n 'menu_files\|menu_tags\|menu_functions\|expat\|hud_hires' upstream/configure.py 2>/dev/null || true
             echo ""
           } >> "$REPORT"
 
-      - name: Section 3 — ui_widget.c hook analysis
+      - name: "Section 03 - ui_widget.c hook points"
         run: |
           REPORT="$GITHUB_WORKSPACE/upstream-analysis.txt"
           {
-            echo "════════════════════════════════════════════════════════════════════"
-            echo "SECTION 3 — source/interface/ui_widget.c HOOK POINTS"
-            echo "════════════════════════════════════════════════════════════════════"
+            echo "==== SECTION 03 - ui_widget.c HOOK POINTS ===="
             echo ""
             echo "--- file size ---"
             wc -l upstream/source/interface/ui_widget.c 2>&1 || true
             echo ""
-            echo "--- all function definitions (grep) ---"
+            echo "--- function definitions ---"
             grep -n '^[a-zA-Z_].*(' upstream/source/interface/ui_widget.c 2>/dev/null | head -120 || true
             echo ""
-            echo "--- ui_widget_event_handler_function_invoke area ---"
+            echo "--- ui_widget_event_handler_function_invoke ---"
             grep -n -B5 -A60 'ui_widget_event_handler_function_invoke' upstream/source/interface/ui_widget.c 2>/dev/null | head -100 || true
             echo ""
-            echo "--- ui_widget_game_data_input_function_invoke area ---"
+            echo "--- ui_widget_game_data_input_function_invoke ---"
             grep -n -B5 -A60 'ui_widget_game_data_input_function_invoke' upstream/source/interface/ui_widget.c 2>/dev/null | head -100 || true
             echo ""
-            echo "--- ui_widget_go_back / dispatch_event / list_index ---"
+            echo "--- ui_widget_go_back / dispatch / list_index ---"
             grep -n 'ui_widget_go_back\|ui_widget_dispatch\|ui_widget_list_index\|ui_widget_emit_event' upstream/source/interface/ui_widget.c 2>/dev/null | head -20 || true
             echo ""
             echo "--- ui_widget_load_children_recursive ---"
             grep -n -A40 'ui_widget_load_children_recursive' upstream/source/interface/ui_widget.c 2>/dev/null | head -60 || true
             echo ""
-            echo "--- widget_handle_mouse / left_mouse handling ---"
-            grep -n 'mouse\|left_mouse\|_event_mouse' upstream/source/interface/ui_widget.c 2>/dev/null | head -20 || true
-            echo ""
           } >> "$REPORT"
 
-      - name: Section 4 — cache_files.c and scenario tags hook points
+      - name: "Section 04 - cache_files and scenario tags hooks"
         run: |
           REPORT="$GITHUB_WORKSPACE/upstream-analysis.txt"
           {
-            echo "════════════════════════════════════════════════════════════════════"
-            echo "SECTION 4 — cache_files.c AND scenario TAGS HOOKS"
-            echo "════════════════════════════════════════════════════════════════════"
+            echo "==== SECTION 04 - cache_files.c AND scenario TAGS HOOKS ===="
             echo ""
-            echo "--- cache_files.c: file size ---"
+            echo "--- cache_files.c size ---"
             wc -l upstream/source/cache/cache_files.c 2>&1 || true
             echo ""
-            echo "--- cache_files.c: tag_instances symbols ---"
+            echo "--- cache_files.c tag_instances symbols ---"
             grep -n 'tag_instances\|tag_header\|cache_file_globals\|tag_count' upstream/source/cache/cache_files.c 2>/dev/null | head -40 || true
             echo ""
-            echo "--- scenario_tags_load / scenario_tags_unload locations ---"
+            echo "--- scenario_tags_load / unload ---"
             grep -rn 'scenario_tags_load\|scenario_tags_unload' upstream/source/ 2>/dev/null | head -20 || true
             echo ""
-            echo "--- scenario_tags_load full definition (first 60 lines after match) ---"
-            SCEN_FILE=$(grep -rl 'scenario_tags_load' upstream/source/ 2>/dev/null | head -1)
+            echo "--- scenario_tags_load definition ---"
+            SCEN_FILE=$(grep -rl 'void scenario_tags_load' upstream/source/ 2>/dev/null | head -1)
             if [ -n "$SCEN_FILE" ]; then
               echo "In file: $SCEN_FILE"
-              grep -n -A60 'scenario_tags_load' "$SCEN_FILE" 2>/dev/null | head -80 || true
+              grep -n -A60 'void scenario_tags_load' "$SCEN_FILE" 2>/dev/null | head -80 || true
             fi
             echo ""
-            echo "--- where cache_file_globals.tag_instances is assigned ---"
-            grep -rn 'tag_instances\s*=' upstream/source/cache/ 2>/dev/null | head -20 || true
+            echo "--- where tag_instances is assigned ---"
+            grep -rn 'tag_instances =' upstream/source/cache/ 2>/dev/null | head -20 || true
             echo ""
           } >> "$REPORT"
 
-      - name: Section 5 — main.c and rasterizer bitmap APIs
+      - name: "Section 05 - main.c and rasterizer bitmap APIs"
         run: |
           REPORT="$GITHUB_WORKSPACE/upstream-analysis.txt"
           {
-            echo "════════════════════════════════════════════════════════════════════"
-            echo "SECTION 5 — main.c AND rasterizer bitmap APIs"
-            echo "════════════════════════════════════════════════════════════════════"
+            echo "==== SECTION 05 - main.c AND rasterizer bitmap APIs ===="
             echo ""
-            echo "--- main.c: where the main menu is loaded/opened ---"
-            grep -n 'main_menu\|main_screen_shell_load\|main_menu_load\|ui_widget.*main_menu' upstream/source/main/main.c 2>/dev/null | head -40 || true
+            echo "--- main.c main menu load ---"
+            grep -n 'main_menu\|main_screen_shell_load\|main_menu_load' upstream/source/main/main.c 2>/dev/null | head -40 || true
             echo ""
-            echo "--- main.c: main_menu_load definition ---"
-            grep -n -B3 -A40 'void main_menu_load\|main_menu_switch_to_main_menu' upstream/source/main/main.c 2>/dev/null | head -80 || true
+            echo "--- main_menu_load definition ---"
+            grep -n -B3 -A40 'void main_menu_load' upstream/source/main/main.c 2>/dev/null | head -80 || true
             echo ""
-            echo "--- main_get_solo_level_name definition ---"
+            echo "--- main_get_solo_level_name ---"
             grep -rn 'main_get_solo_level_name\|main_get_solo_level_from_name' upstream/source/ 2>/dev/null | head -20 || true
             echo ""
-            echo "--- rasterizer_bitmap_new / rasterizer_bitmap_delete signatures ---"
+            echo "--- rasterizer_bitmap_new / delete ---"
             grep -rn 'rasterizer_bitmap_new\|rasterizer_bitmap_delete' upstream/source/ 2>/dev/null | head -20 || true
             echo ""
-            echo "--- rasterizer_xbox_hardware_bitmaps.h full ---"
+            echo "----- rasterizer_xbox_hardware_bitmaps.h -----"
             cat upstream/source/rasterizer/xbox/rasterizer_xbox_hardware_bitmaps.h 2>&1 || echo "(MISSING)"
             echo ""
             echo "--- bitmap_group.h relevant parts ---"
@@ -206,118 +191,101 @@ jobs:
             echo ""
           } >> "$REPORT"
 
-      - name: Section 6 — Knulli patch: what files it creates/modifies
+      - name: "Section 06 - Knulli patch file list"
         run: |
           REPORT="$GITHUB_WORKSPACE/upstream-analysis.txt"
           {
-            echo "════════════════════════════════════════════════════════════════════"
-            echo "SECTION 6 — KNULLI PATCH: FILES CREATED/MODIFIED"
-            echo "════════════════════════════════════════════════════════════════════"
+            echo "==== SECTION 06 - KNULLI PATCH FILE LIST ===="
             echo ""
-            echo "--- files added (create mode in patch) ---"
-            grep -E '^diff --git|^new file mode' port-repo/patches/halo-ce-universal-knulli.patch 2>/dev/null | \
-              awk '/^diff --git/{f=$3} /^new file mode/{print f}' | sed 's|a/||' | sort || true
+            echo "--- files added by patch ---"
+            grep -E '^diff --git|^new file mode' port-repo/patches/halo-ce-universal-knulli.patch 2>/dev/null | awk '/^diff --git/{f=$3} /^new file mode/{print f}' | sed 's|a/||' | sort || true
             echo ""
-            echo "--- all files touched by patch (diff --git lines) ---"
+            echo "--- all files touched by patch ---"
             grep '^diff --git' port-repo/patches/halo-ce-universal-knulli.patch 2>/dev/null | sed 's|.*a/||;s| b/.*||' | sort -u || true
             echo ""
-            echo "--- does the patch reference menu_files / menu_tags / halo_menus? ---"
-            grep -n 'menu_files\|menu_tags\|halo_menus\|pc_menus_\|pc_menu_\|ui_widget_port_' \
-              port-repo/patches/halo-ce-universal-knulli.patch 2>/dev/null | head -30 || true
-            echo ""
-            echo "--- does the patch reference hud_hires? ---"
-            grep -n 'hud_hires' port-repo/patches/halo-ce-universal-knulli.patch 2>/dev/null | head -20 || true
-            echo ""
-            echo "--- does the patch reference custom_edition_*? ---"
-            grep -n 'custom_edition_' port-repo/patches/halo-ce-universal-knulli.patch 2>/dev/null | head -20 || true
+            echo "--- patch references to menu systems ---"
+            grep -n 'menu_files\|menu_tags\|halo_menus\|pc_menus_\|pc_menu_\|ui_widget_port_\|hud_hires\|custom_edition_' \
+              port-repo/patches/halo-ce-universal-knulli.patch 2>/dev/null | head -40 || true
             echo ""
           } >> "$REPORT"
 
-      - name: Section 7 — port_config.c and platform.h current state
+      - name: "Section 07 - port_config and platform headers"
         run: |
           REPORT="$GITHUB_WORKSPACE/upstream-analysis.txt"
           {
-            echo "════════════════════════════════════════════════════════════════════"
-            echo "SECTION 7 — port_config.c AND platform.h"
-            echo "════════════════════════════════════════════════════════════════════"
+            echo "==== SECTION 07 - port_config.c AND platform headers ===="
             echo ""
-            echo "--- port_config.c: file size ---"
+            echo "--- port_config.c size ---"
             wc -l upstream/port/linux/src/port_config.c 2>&1 || true
             echo ""
-            echo "--- port_config.c: config_setting struct ---"
+            echo "--- struct config_setting ---"
             grep -n -B3 -A20 'struct config_setting' upstream/port/linux/src/port_config.c 2>/dev/null | head -40 || true
             echo ""
-            echo "--- port_config.c: config_settings[] entries (keys only) ---"
+            echo "--- config_setting keys ---"
             grep -n '^\s*{ "' upstream/port/linux/src/port_config.c 2>/dev/null | head -80 || true
             echo ""
-            echo "--- port_config.c: config_folder / config_string / config_boolean / config_write / config_default signatures ---"
+            echo "--- config functions signatures ---"
             grep -n 'config_folder\|config_string\|config_boolean\|config_write\|config_default\|config_real\|config_integer' upstream/port/linux/src/port_config.c 2>/dev/null | head -40 || true
             echo ""
-            echo "--- port_config.h (header) full ---"
+            echo "----- port_config.h -----"
             cat upstream/port/linux/include/port_config.h 2>&1 || echo "(MISSING)"
             echo ""
-            echo "--- platform.h full ---"
+            echo "----- platform.h -----"
             cat upstream/port/linux/include/platform.h 2>&1 || echo "(MISSING)"
             echo ""
-            echo "--- xgpu.h full ---"
+            echo "----- xgpu.h -----"
             cat upstream/port/linux/src/xgpu.h 2>&1 || echo "(MISSING)"
             echo ""
           } >> "$REPORT"
 
-      - name: Section 8 — d3d8_gl.c current state (after Knulli)
+      - name: "Section 08 - d3d8_gl.c after Knulli"
         run: |
           REPORT="$GITHUB_WORKSPACE/upstream-analysis.txt"
           {
-            echo "════════════════════════════════════════════════════════════════════"
-            echo "SECTION 8 — d3d8_gl.c AFTER KNULLI PATCH"
-            echo "════════════════════════════════════════════════════════════════════"
+            echo "==== SECTION 08 - d3d8_gl.c AFTER KNULLI ===="
             echo ""
-            echo "--- file size ---"
             wc -l upstream/port/linux/src/d3d8_gl.c 2>&1 || true
             echo ""
             echo "--- first 60 lines ---"
             head -60 upstream/port/linux/src/d3d8_gl.c 2>&1 || true
             echo ""
-            echo "--- halo_screen_commit definition ---"
+            echo "--- halo_screen_commit ---"
             grep -n -A30 'halo_screen_commit' upstream/port/linux/src/d3d8_gl.c 2>/dev/null | head -50 || true
             echo ""
-            echo "--- halo_frame_due / device.frame_pacing ---"
+            echo "--- halo_frame_due / frame_pacing ---"
             grep -n 'halo_frame_due\|frame_pacing' upstream/port/linux/src/d3d8_gl.c 2>/dev/null || true
             echo ""
           } >> "$REPORT"
 
-      - name: Section 9 — source/interface/ui_widget_event_handler_functions.c
+      - name: "Section 09 - ui_widget_event_handler_functions.c"
         run: |
           REPORT="$GITHUB_WORKSPACE/upstream-analysis.txt"
           {
-            echo "════════════════════════════════════════════════════════════════════"
-            echo "SECTION 9 — ui_widget_event_handler_functions.c"
-            echo "════════════════════════════════════════════════════════════════════"
+            echo "==== SECTION 09 - ui_widget_event_handler_functions.c ===="
             echo ""
-            echo "--- file size ---"
             wc -l upstream/source/interface/ui_widget_event_handler_functions.c 2>&1 || true
             echo ""
             echo "--- invoke definition ---"
             grep -n -B5 -A80 'ui_widget_event_handler_function_invoke' upstream/source/interface/ui_widget_event_handler_functions.c 2>/dev/null | head -120 || true
             echo ""
-            echo "--- function name lookup table head ---"
+            echo "--- name lookup head ---"
             grep -n -A20 'ui_widget_event_handler_function_name' upstream/source/interface/ui_widget_event_handler_functions.c 2>/dev/null | head -40 || true
             echo ""
           } >> "$REPORT"
 
-      - name: Section 10 — report footer and upload
+      - name: "Section 10 - footer and upload"
         run: |
           REPORT="$GITHUB_WORKSPACE/upstream-analysis.txt"
           {
             echo ""
-            echo "════════════════════════════════════════════════════════════════════"
+            echo "================================================================"
             echo "END OF UPSTREAM REPORT"
             echo "Size: $(stat -c%s "$REPORT") bytes, $(wc -l < "$REPORT") lines"
-            echo "════════════════════════════════════════════════════════════════════"
+            echo "================================================================"
           } >> "$REPORT"
           echo "Report ready: $REPORT"
 
-      - name: Upload upstream report
+      - name: "Upload upstream report"
         uses: actions/upload-artifact@v4
         with:
           name: upstream-analysis
