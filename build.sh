@@ -4,13 +4,13 @@ set -euo pipefail
 # ══════════════════════════════════════════════════════════════════════
 # Halo CE Universal — M9 Pro (RK3326 / Cortex-A35 + Mali-G31 MP2)
 #
-# Laeuft in einem Ubuntu-20.04-Docker-Container (glibc 2.31, wie der
-# M9 Pro). Host-Loader + SDL2 werden mit Clang 22 (Wrapper: aarch64-clang)
-# gebaut, weil GCC 9 aus Ubuntu 20.04 trotz -mcpu=cortex-a35 LSE-Atomics
-# (ARMv8.1) erzeugt und der RK3326 (ARMv8.0) darauf mit SIGILL stirbt.
-# ──────────────────────────────────────────────────────────────────────
-# Der Wrapper aarch64-clang wird vom Workflow angelegt und setzt:
-#   --target=aarch64-linux-gnu --sysroot=/usr/aarch64-linux-gnu
+# Host-Loader + SDL2 werden mit Clang 22 (Wrapper: aarch64-clang)
+# gebaut, weil GCC 9 aus Ubuntu 20.04 trotz -mcpu=cortex-a35
+# LSE-Atomics (ARMv8.1) erzeugt und der RK3326 (ARMv8.0) darauf mit
+# SIGILL stirbt.
+#
+# Der Wrapper aarch64-clang setzt:
+#   --target=aarch64-linux-gnu --sysroot=/ --gcc-toolchain=/usr
 #   -march=armv8-a -mno-outline-atomics
 # ══════════════════════════════════════════════════════════════════════
 PGO_MODE=${PGO_MODE:-use}
@@ -48,7 +48,6 @@ ANDROID_NDK=$(cd "$ANDROID_NDK" && pwd)
 [ -d "$SYSROOT_LIB" ] || die "SYSROOT_LIB=$SYSROOT_LIB is not a folder"
 SYSROOT_LIB=$(cd "$SYSROOT_LIB" && pwd)
 
-# libmali wird NICHT gelinkt, aber geprueft, damit ein leeres sysroot auffaellt.
 for library in libdecor-0.so.0; do
     compgen -G "$SYSROOT_LIB/$library*" > /dev/null ||
         die "no $library* in SYSROOT_LIB=$SYSROOT_LIB"
@@ -69,9 +68,6 @@ echo "== glibc-Version des Build-Containers:"
 ( ldd --version 2>/dev/null || true ) | head -1 || true
 echo "== Host-Compiler: $HOST_CC"
 "$HOST_CC" --version 2>&1 | head -2 || true
-echo "== Host-Compiler target:"
-printf 'int main(void){return 0;}\n' > /tmp/probe.c
-"$HOST_CC" -v -o /tmp/probe /tmp/probe.c 2>&1 | grep -E "Target|target" | head -3 || true
 
 WORK=${WORK:-$HERE/work}
 DIST=${DIST:-$HERE/dist}
@@ -217,7 +213,7 @@ if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
         -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
         -DCMAKE_C_COMPILER=aarch64-clang \
         -DCMAKE_C_FLAGS="-march=armv8-a -mno-outline-atomics" \
-        -DCMAKE_FIND_ROOT_PATH=/usr/aarch64-linux-gnu \
+        -DCMAKE_FIND_ROOT_PATH=/ \
         -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
         -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
         -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
@@ -310,7 +306,7 @@ PATCH_EOF
         -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
         -DCMAKE_C_COMPILER=aarch64-clang \
         -DCMAKE_C_FLAGS="-march=armv8-a -mno-outline-atomics" \
-        -DCMAKE_FIND_ROOT_PATH=/usr/aarch64-linux-gnu \
+        -DCMAKE_FIND_ROOT_PATH=/ \
         -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
         -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
         -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
@@ -344,12 +340,10 @@ export SDL2_INCLUDE="$SDL2_INSTALL/include"
 [ -f "$SDL2_INCLUDE/SDL2/SDL.h" ] || die "SDL2_INCLUDE=$SDL2_INCLUDE enthaelt kein SDL2/SDL.h"
 echo "== SDL2_INCLUDE=$SDL2_INCLUDE"
 
-# ── SDL2_LIB_DIR fuer den Host-Build exportieren (nur wenn vorhanden) ─
 if [ -f "$SDL2_INSTALL/lib/libSDL2.a" ]; then
     export SDL2_LIB_DIR="$SDL2_INSTALL/lib"
     echo "== SDL2_LIB_DIR=$SDL2_LIB_DIR (statisch verfuegbar)"
 else
-    # Nicht-statisch gebaut; setze trotzdem auf das lib-Verzeichnis.
     export SDL2_LIB_DIR="$SDL2_INSTALL/lib"
     echo "== SDL2_LIB_DIR=$SDL2_LIB_DIR (nur Header, keine .a)"
 fi
@@ -943,7 +937,7 @@ stamp=$({
     done
     [ -f "$HERE/pgo/halo_linux.profdata" ] && sha256sum "$HERE/pgo/halo_linux.profdata" | cut -d' ' -f1
     echo "pgo-mode=$PGO_MODE"
-    echo "armv8.0-clang-host=v1"
+    echo "armv8.0-clang-host=v2"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 echo "$stamp" > "$SRC/.port-stamp"
@@ -1019,7 +1013,7 @@ else
     cat <<'RELEASE'
 
 ────────────────────────────────────────────────────────────────────────
-RELEASE-BUILD (Settings-Only, Ubuntu 20.04, Clang/ARMv8.0, ohne libmali)
+RELEASE-BUILD (Settings-Only, Clang/ARMv8.0, ohne libmali)
 ────────────────────────────────────────────────────────────────────────
 Installation auf M9 Pro (wenn halo_guest.elf existiert):
 1. dist/Halo.sh           nach /roms/ports/Halo.sh
