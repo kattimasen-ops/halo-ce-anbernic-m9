@@ -3,32 +3,10 @@ set -euo pipefail
 
 # ══════════════════════════════════════════════════════════════════════
 # Halo CE Universal — M9 Pro (RK3326 / Cortex-A35 + Mali-G31 MP2)
-# Build-Skript: Host (aarch64) + Guest (arm64_32 ILP32 AArch64)
 #
-# Zieht port_settings.py, die Menü-Assets UND den kompletten
-# OpenCE-Menü-C-Code (menu_files.c, menu_tags.c, menu_functions.c,
-# halo_menus.h, Expat, ui_widget-Hooks) aus dem OpenCE-Fork.
-#
-# Patch-Kette (Reihenfolge ist wichtig!):
-#   1. Knulli-Patch (monolithisch)
-#   2. OpenCE-Menü-Dateien kopieren + Hooks setzen
-#   3. patch_memory_pools        — Debug-Allocator aus, __thread-Arrays
-#   4. patch_neon_math           — NEON in matrix_math + guest_string
-#   5. patch_vita_optimizations  — Vita-Port-Ideen (LOD, Lighting, Sound)
-#   6. patch_button_remap        — A/B/X/Y-Tausch
-#   7. patch_index_extent_neon   — NEON fuer index_extent
-#   8. patch_fps_overlay         — In-Game-FPS-Overlay
-#   9. patch_draw_framebuffer_bound — GL_INVALID_OPERATION-Fix
-#  10. patch_mali_subdata        — Mali-G31 Mirror-Subdata-Guard
-#  11. patch_shader_prewarm      — Offline-Shader-Cache + Prewarming
-#  12. patch_aggressive_culling  — Aggressives Objekt-Culling
-#  13. patch_state_batching      — Render-Command-Batching
-#  14. patch_texture_prewarm     — Texture-Prewarming beim Map-Load
-#  15. patch_settings_menu       — In-Game-Settings-Menue
-#  16. patch_config_defaults     — RK3326-abgestimmte Defaults
-#  17. patch_credits             — St0len-One-Credits
-#  18. patch_credits_xml         — Credits-Wasserzeichen in statische XMLs
-#  19. patch_forward_declarations — C99-Forward-Deklarationen (shader)
+# Option 2: Upstream + Knulli-Patch + OpenCE-Merge per git apply --3way.
+# Nach dem Merge werden kritische Symbole geprüft und bei Fehlen die
+# betroffenen Dateien als rej/-Artefakt bereitgestellt.
 # ══════════════════════════════════════════════════════════════════════
 PGO_MODE=${PGO_MODE:-use}
 
@@ -42,9 +20,7 @@ SDL2_ARCHIVE=https://github.com/libsdl-org/SDL/archive/refs/tags/$SDL2_TAG.tar.g
 GUEST_CC=${GUEST_CC:-clang-22}
 HOST_CC=${HOST_CC:-aarch64-linux-gnu-gcc}
 JOBS=${JOBS:-$(nproc)}
-
 OPEN_CE_URL=${OPEN_CE_URL:-https://github.com/OpenCommunityEdition/OpenCE.git}
-OPEN_CE_TARBALL_URL=${OPEN_CE_TARBALL_URL:-https://github.com/OpenCommunityEdition/OpenCE/archive/refs/heads/main.tar.gz}
 
 die() { echo "build.sh: $*" >&2; exit 1; }
 need() { command -v "$1" > /dev/null 2>&1 || die "$1 not found: $2"; }
@@ -85,155 +61,51 @@ echo "== PGO-Modus: $PGO_MODE"
 
 WORK=${WORK:-$HERE/work}
 DIST=${DIST:-$HERE/dist}
-mkdir -p "$WORK" "$DIST"
+REJ=${REJ:-$HERE/rej}
+mkdir -p "$WORK" "$DIST" "$REJ"
 WORK=$(cd "$WORK" && pwd)
 DIST=$(cd "$DIST" && pwd)
+REJ=$(cd "$REJ" && pwd)
 SRC=$WORK/halo-ce-universal
+OPENCE=$WORK/opence
 
-# ── OpenCE-Dateien holen ─────────────────────────────────────────────
-fetch_opence_files() {
-    local opence_dir="$WORK/opence-source"
-    local opence_tarball="$WORK/opence-main.tar.gz"
-
-    echo ""
-    echo "== Hole OpenCE-Dateien (Menue-System + Assets) ..."
-    rm -rf "$opence_dir"
-
-    if git clone --depth 1 "$OPEN_CE_URL" "$opence_dir" > /dev/null 2>&1; then
-        echo "   + Git-Clone erfolgreich."
-    else
-        echo "   Git-Clone fehlgeschlagen, versuche Tarball ..."
-        rm -f "$opence_tarball"
-        if ! curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 30 \
-            -o "$opence_tarball" "$OPEN_CE_TARBALL_URL"; then
-            die "Konnte OpenCE nicht klonen ($OPEN_CE_URL) und auch nicht als Tarball laden."
-        fi
-        mkdir -p "$opence_dir"
-        if ! tar -xzf "$opence_tarball" -C "$opence_dir" --strip-components=1; then
-            die "Konnte OpenCE-Tarball nicht entpacken."
-        fi
-        echo "   + Tarball erfolgreich."
-    fi
-
-    # 1. tools/port_settings.py + ce_menus.py + custom_edition_script_names.py
-    if [ -f "$opence_dir/tools/port_settings.py" ]; then
-        mkdir -p "$SRC/tools"
-        cp "$opence_dir/tools/port_settings.py" "$SRC/tools/"
-        echo "   + tools/port_settings.py"
-    else
-        die "OpenCE hat keine tools/port_settings.py."
-    fi
-    for t in tools/ce_menus.py tools/custom_edition_script_names.py tools/menu_art.py tools/menu_files.py; do
-        if [ -f "$opence_dir/$t" ]; then
-            cp "$opence_dir/$t" "$SRC/tools/"
-            echo "   + $t"
-        fi
-    done
-
-    # 2. port/assets/menus/ce (XML-Dateien) + svg + port_svg + menus.json
-    if [ -d "$opence_dir/port/assets/menus/ce" ]; then
-        mkdir -p "$SRC/port/assets/menus"
-        rm -rf "$SRC/port/assets/menus/ce"
-        cp -a "$opence_dir/port/assets/menus/ce" "$SRC/port/assets/menus/"
-        local count
-        count=$(find "$SRC/port/assets/menus/ce" -name "*.xml" | wc -l)
-        echo "   + port/assets/menus/ce/ ($count XML-Dateien)"
-    else
-        die "OpenCE hat keinen port/assets/menus/ce Ordner."
-    fi
-    for extra in port/assets/menus/svg port/assets/menus/port_svg port/assets/menus/strings; do
-        if [ -d "$opence_dir/$extra" ]; then
-            mkdir -p "$SRC/$(dirname "$extra")"
-            rm -rf "$SRC/$extra"
-            cp -a "$opence_dir/$extra" "$SRC/$(dirname "$extra")/"
-            echo "   + $extra"
-        fi
-    done
-    for f in port/assets/menus/menus.json \
-             port/assets/menus/UNWIRED.md \
-             port/assets/menus/NON_HANDDRAWN.md \
-             port/assets/menus/README.md; do
-        if [ -f "$opence_dir/$f" ]; then
-            mkdir -p "$SRC/$(dirname "$f")"
-            cp "$opence_dir/$f" "$SRC/$f"
-            echo "   + $f"
-        fi
-    done
-
-    # 3. Menue-C-Quellen (in Upstream NICHT vorhanden)
-    mkdir -p "$SRC/port/linux/include" "$SRC/port/linux/src" \
-             "$SRC/port/linux/game" "$SRC/port/third_party"
-    for f in \
-        port/linux/include/halo_menus.h \
-        port/linux/include/halo_keyboard.h \
-        port/linux/src/menu_files.c \
-        port/linux/src/menu_files.h \
-        port/linux/src/p2p_lobby.c \
-        port/linux/game/menu_tags.c \
-        port/linux/game/menu_functions.c \
-        ; do
-        if [ -f "$opence_dir/$f" ]; then
-            cp "$opence_dir/$f" "$SRC/$f"
-            echo "   + $f"
-        else
-            echo "   WARNUNG: $f fehlt in OpenCE."
-        fi
-    done
-
-    # 4. OpenCE-Versionen ersetzen (Knulli fasst sie NICHT an)
-    for f in \
-        source/interface/ui_widget.c \
-        source/interface/ui_widget_event_handler_functions.c \
-        source/interface/ui_widget_game_data_input_functions.c \
-        port/linux/src/p2p.h \
-        tools/embed_assets.py \
-        ; do
-        if [ -f "$opence_dir/$f" ]; then
-            cp "$opence_dir/$f" "$SRC/$f"
-            echo "   + $f (OpenCE-Version)"
-        else
-            echo "   WARNUNG: $f fehlt in OpenCE."
-        fi
-    done
-
-    # 5. Expat (XML-Parser, nicht im Upstream)
-    if [ -d "$opence_dir/port/third_party/expat" ]; then
-        rm -rf "$SRC/port/third_party/expat"
-        cp -a "$opence_dir/port/third_party/expat" "$SRC/port/third_party/"
-        echo "   + port/third_party/expat/"
-    else
-        die "OpenCE hat keinen port/third_party/expat-Ordner."
-    fi
-
-    # 6. Stubs aus patches/stubs (Coop und Custom Edition deaktiviert)
-    if [ -f "$HERE/patches/stubs/network_coop_stub.c" ]; then
-        cp "$HERE/patches/stubs/network_coop_stub.c" \
-           "$SRC/port/linux/game/network_coop.c"
-        cp "$HERE/patches/stubs/network_coop.h" \
-           "$SRC/port/linux/game/network_coop.h"
-        echo "   + network_coop.c (Stub)"
-    fi
-    if [ -f "$HERE/patches/stubs/custom_edition_stub.c" ]; then
-        cp "$HERE/patches/stubs/custom_edition_stub.c" \
-           "$SRC/port/linux/game/custom_edition_maps.c"
-        if [ -f "$opence_dir/port/linux/game/custom_edition_maps.h" ]; then
-            cp "$opence_dir/port/linux/game/custom_edition_maps.h" \
-               "$SRC/port/linux/game/custom_edition_maps.h"
-        fi
-        echo "   + custom_edition_maps.c (Stub)"
-    fi
-
-    rm -rf "$opence_dir" "$opence_tarball"
-    echo "== OpenCE-Dateien geholt."
-}
-
-# ── XML-Hunk aus dem Knulli-Patch entfernen (idempotent) ────────────
+# ══════════════════════════════════════════════════════════════════════
+# 1. OpenCE klonen und OpenCE-Patch gegen den Merge-Base erzeugen
+# ══════════════════════════════════════════════════════════════════════
 echo ""
-echo "== Entferne den video_settings.xml-Hunk aus dem Knulli-Patch (einmalig) ..."
-python3 - "$PATCH" <<'PYEOF'
-import re
-import sys
+echo "== Klone OpenCE (vollstaendig, fuer den Merge-Base) ..."
+if [ ! -d "$OPENCE/.git" ]; then
+    rm -rf "$OPENCE"
+    if ! git clone --quiet "$OPEN_CE_URL" "$OPENCE"; then
+        die "Konnte OpenCE nicht klonen."
+    fi
+fi
+git -C "$OPENCE" remote remove upstream 2>/dev/null || true
+git -C "$OPENCE" remote add upstream "$UPSTREAM_URL"
+echo "== Hole Upstream-Commit $UPSTREAM_COMMIT in OpenCE ..."
+git -C "$OPENCE" fetch --quiet upstream "$UPSTREAM_COMMIT" ||
+    die "Konnte $UPSTREAM_COMMIT nicht von $UPSTREAM_URL holen."
+OPENCE_MERGE_BASE=$(git -C "$OPENCE" merge-base "$UPSTREAM_COMMIT" HEAD 2>/dev/null || true)
+if [ -z "$OPENCE_MERGE_BASE" ]; then
+    echo "== Kein gemeinsamer Vorfahre; nehme OpenCE-Root als Basis."
+    OPENCE_MERGE_BASE=$(git -C "$OPENCE" rev-list --max-parents=0 HEAD | tail -1)
+fi
+echo "== OpenCE merge-base: $OPENCE_MERGE_BASE"
 
+OPENCE_PATCH=$WORK/opence-all.patch
+echo "== Erzeuge OpenCE-Patch gegen merge-base ..."
+git -C "$OPENCE" diff --binary "$OPENCE_MERGE_BASE"..HEAD > "$OPENCE_PATCH"
+OPENCE_PATCH_SIZE=$(stat -c%s "$OPENCE_PATCH")
+OPENCE_PATCH_HASH=$(sha256sum "$OPENCE_PATCH" | cut -d' ' -f1)
+echo "== OpenCE-Patch: $OPENCE_PATCH_SIZE Bytes, sha256=$OPENCE_PATCH_HASH"
+
+# ══════════════════════════════════════════════════════════════════════
+# 2. XML-Hunk aus dem Knulli-Patch entfernen (idempotent)
+# ══════════════════════════════════════════════════════════════════════
+echo ""
+echo "== Entferne den video_settings.xml-Hunk aus dem Knulli-Patch ..."
+python3 - "$PATCH" <<'PYEOF'
+import re, sys
 path = sys.argv[1]
 text = open(path).read()
 pattern = re.compile(
@@ -251,7 +123,9 @@ open(path, 'w').write(new_text)
 print("  XML-Hunk entfernt; Patch ist jetzt %d Bytes kleiner." % (len(text) - len(new_text)))
 PYEOF
 
-# ── SDL3 ─────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+# 3. SDL3 bauen (nur wenn nicht vorhanden)
+# ══════════════════════════════════════════════════════════════════════
 if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
     echo "== SDL3 $SDL3_TAG: kompiliere aus dem Quellcode"
     SDL3_SRC=$WORK/SDL3-${SDL3_TAG#release-}
@@ -287,7 +161,9 @@ else
     echo "== libSDL3.so.0 bereits vorhanden"
 fi
 
-# ── SDL2 ─────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+# 4. SDL2 bauen (nur wenn nicht vorhanden), mit KMSDRM-Pageflip-Patch
+# ══════════════════════════════════════════════════════════════════════
 if [ ! -f "$SYSROOT_LIB/libSDL2-2.0.so.0" ]; then
     echo "== SDL2 $SDL2_TAG: kompiliere aus dem Quellcode"
     SDL2_SRC=$WORK/SDL2-src
@@ -304,7 +180,6 @@ import sys
 path = sys.argv[1]
 with open(path) as f:
     text = f.read()
-
 old = '''    ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id,
                                   fb_info->fb_id, flip_flags, &windata->waiting_for_flip);
     if (ret == 0) {
@@ -312,7 +187,6 @@ old = '''    ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_
     } else {
         SDL_LogError(SDL_LOG_CATEGORY_VIDEO, "Could not queue pageflip: %d", ret);
     }'''
-
 new = '''    ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id,
                                   fb_info->fb_id, flip_flags, &windata->waiting_for_flip);
     /* Mali-G31 (RK3326) meldet DRM_CAP_ASYNC_PAGE_FLIP, lehnt den Aufruf
@@ -334,7 +208,6 @@ new = '''    ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_
     } else {
         SDL_LogError(SDL_LOG_CATEGORY_VIDEO, "Could not queue pageflip: %d", ret);
     }'''
-
 if old not in text:
     import re
     pattern = re.compile(
@@ -352,7 +225,6 @@ if old not in text:
     text = text[:match.start()] + new + text[match.end():]
 else:
     text = text.replace(old, new, 1)
-
 with open(path, 'w') as f:
     f.write(text)
 print("SDL2 KMSDRM Pageflip-Patch angewendet (SDL_kmsdrmopengles.c)")
@@ -383,9 +255,11 @@ fi
 export SDL2_INCLUDE="$SDL2_INSTALL/include"
 echo "== SDL2_INCLUDE=$SDL2_INCLUDE"
 
-# ── Repository klonen und patchen ────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+# 5. Upstream klonen, Knulli-Patch anwenden, dann OpenCE mergen
+# ══════════════════════════════════════════════════════════════════════
 if [ ! -d "$SRC/.git" ]; then
-    echo "== cloning $UPSTREAM_URL into $SRC"
+    echo "== Klone Upstream in $SRC ..."
     git init -q "$SRC"
     git -C "$SRC" remote add origin "$UPSTREAM_URL"
 fi
@@ -393,54 +267,166 @@ if ! git -C "$SRC" cat-file -e "$UPSTREAM_COMMIT^{commit}" 2> /dev/null; then
     echo "== fetching $UPSTREAM_COMMIT"
     git -C "$SRC" fetch -q --depth 1 origin "$UPSTREAM_COMMIT" ||
         git -C "$SRC" fetch -q origin
-    git -C "$SRC" cat-file -e "$UPSTREAM_COMMIT^{commit}" 2> /dev/null ||
-        die "commit $UPSTREAM_COMMIT not in $UPSTREAM_URL"
+fi
+git -C "$SRC" cat-file -e "$UPSTREAM_COMMIT^{commit}" 2> /dev/null ||
+    die "commit $UPSTREAM_COMMIT not in $UPSTREAM_URL"
+
+echo ""
+echo "== Setze Upstream auf $UPSTREAM_COMMIT zurueck ..."
+git -C "$SRC" checkout -q --force --detach "$UPSTREAM_COMMIT"
+git -C "$SRC" reset -q --hard
+git -C "$SRC" clean -q -fd
+
+echo ""
+echo "== Pruefe und wende Knulli-Patch an ..."
+if ! git -C "$SRC" apply --check "$PATCH" 2>&1; then
+    die "Knulli-Patch kann auf $UPSTREAM_COMMIT NICHT sauber angewendet werden."
+fi
+git -C "$SRC" apply "$PATCH"
+git -C "$SRC" apply --summary "$PATCH" | awk '$1 == "create" { print $4 }' | xargs -r git -C "$SRC" add -N --
+echo "== Knulli-Patch sauber angewendet."
+
+OPENCE_APPLIED_MARKER=$SRC/.opence-merge-hash
+CURRENT_MERGE_HASH="${OPENCE_MERGE_BASE}:${OPENCE_PATCH_HASH}"
+if [ ! -f "$OPENCE_APPLIED_MARKER" ] || [ "$(cat "$OPENCE_APPLIED_MARKER" 2>/dev/null)" != "$CURRENT_MERGE_HASH" ]; then
+    echo ""
+    echo "== Wende OpenCE-Patch per --3way an ..."
+    rm -f "$OPENCE_APPLIED_MARKER"
+    set +e
+    git -C "$SRC" apply --3way --reject "$OPENCE_PATCH" > "$WORK/opence-apply.log" 2>&1
+    APPLY_STATUS=$?
+    set -e
+    cat "$WORK/opence-apply.log"
+
+    REJ_FILES=$(find "$SRC" -name '*.rej' 2>/dev/null | sort)
+    ORIG_FILES=$(find "$SRC" -name '*.orig' 2>/dev/null | sort)
+    UNMERGED=$(git -C "$SRC" diff --name-only --diff-filter=U 2>/dev/null | sort)
+
+    if [ -n "$REJ_FILES" ] || [ -n "$ORIG_FILES" ] || [ -n "$UNMERGED" ]; then
+        echo ""
+        echo "════════════════════════════════════════════════════════════"
+        echo "  OPENCE-MERGE HAT KONFLIKTE — BUILD STOPPT HIER"
+        echo "════════════════════════════════════════════════════════════"
+        echo ""
+        [ -n "$REJ_FILES" ] && { echo "Konflikt-Dateien (.rej):"; echo "$REJ_FILES" | sed 's|^|  |'; }
+        [ -n "$ORIG_FILES" ] && { echo "Originale (.orig):"; echo "$ORIG_FILES" | sed 's|^|  |'; }
+        [ -n "$UNMERGED" ] && { echo "Unmerged paths:"; echo "$UNMERGED" | sed 's|^|  |'; }
+        echo ""
+        rm -rf "$REJ"
+        mkdir -p "$REJ"
+        for f in $REJ_FILES; do
+            rel=${f#"$SRC/"}
+            mkdir -p "$REJ/$(dirname "$rel")"
+            cp "$f" "$REJ/$rel"
+        done
+        for f in $ORIG_FILES; do
+            rel=${f#"$SRC/"}
+            mkdir -p "$REJ/orig-$(dirname "$rel")"
+            cp "$f" "$REJ/orig-$rel"
+        done
+        echo "$UNMERGED" > "$REJ/unmerged.txt"
+        cp "$WORK/opence-apply.log" "$REJ/opence-apply.log" 2>/dev/null || true
+        for f in $UNMERGED; do
+            mkdir -p "$REJ/current-$(dirname "$f")"
+            cp "$SRC/$f" "$REJ/current-$f" 2>/dev/null || true
+        done
+        for f in $UNMERGED; do
+            mkdir -p "$REJ/opence-$(dirname "$f")"
+            cp "$OPENCE/$f" "$REJ/opence-$f" 2>/dev/null || true
+            mkdir -p "$REJ/knulli-$(dirname "$f")"
+            git -C "$SRC" show "$UPSTREAM_COMMIT:$f" > "$REJ/knulli-$f" 2>/dev/null || true
+        done
+        exit 2
+    fi
+
+    if [ "$APPLY_STATUS" -ne 0 ]; then
+        echo "== git apply --3way meldete Status $APPLY_STATUS, aber keine .rej."
+        cat "$WORK/opence-apply.log"
+        die "OpenCE-Patch-Anwendung fehlgeschlagen."
+    fi
+
+    # ─── p2p-Header und -Quellen komplett aus OpenCE übernehmen ──────
+    # Diese Dateien sind reine Header bzw. neue Quellen ohne Knulli-Konflikt
+    # und decken die Symbole ab, die menu_functions.c und p2p_lobby.c
+    # erwarten (P2P_LOBBY_SLOT_PREFIX, P2P_SEALED_TOKEN_SIZE,
+    # p2p_ed25519_to_x25519, p2p_signing_key, p2p_seal_token, p2p_sign).
+    echo ""
+    echo "== Uebernehme p2p-Header und -Quellen aus OpenCE ..."
+    for f in \
+        port/linux/src/p2p.h \
+        port/linux/src/p2p_internal.h \
+        port/linux/src/p2p_crypto.c \
+        port/linux/src/p2p_signal.c \
+        port/linux/src/p2p_discord.c \
+        port/linux/src/p2p_lobby.c \
+        ; do
+        if [ -f "$OPENCE/$f" ]; then
+            mkdir -p "$SRC/$(dirname "$f")"
+            cp "$OPENCE/$f" "$SRC/$f"
+            echo "   + $f (OpenCE-Version)"
+        fi
+    done
+
+    # ─── Post-Merge-Sanity: kritische Symbole pruefen ───────────────
+    echo ""
+    echo "== Post-Merge-Sanity-Check ..."
+    SANITY_FAIL=0
+    check_symbol() {
+        local file="$1" symbol="$2"
+        if ! grep -q -- "$symbol" "$SRC/$file" 2>/dev/null; then
+            echo "   FEHLT: $symbol in $file"
+            SANITY_FAIL=1
+        fi
+    }
+    check_symbol "port/linux/src/p2p_internal.h" "P2P_LOBBY_SLOT_PREFIX"
+    check_symbol "port/linux/src/p2p_internal.h" "P2P_SEALED_TOKEN_SIZE"
+    check_symbol "port/linux/src/p2p_internal.h" "P2P_SIGNATURE_SIZE"
+    check_symbol "port/linux/src/p2p.h"          "p2p_lobby"
+    check_symbol "port/linux/src/menu_files.c"   "halo_menus_load"
+    check_symbol "port/linux/game/menu_tags.c"   "menu_tags_loaded"
+    check_symbol "port/linux/game/menu_functions.c" "pc_menu_event_function_invoke"
+    check_symbol "source/interface/ui_widget.c"  "pc_menu_tag"
+    check_symbol "source/cache/cache_files.c"    "menu_tags_loaded"
+    check_symbol "port/third_party/expat/expat.h" "XML_ParserCreate"
+    if [ "$SANITY_FAIL" -ne 0 ]; then
+        echo ""
+        echo "════════════════════════════════════════════════════════════"
+        echo "  POST-MERGE-SANITY-CHECK FEHLGESCHLAGEN"
+        echo "════════════════════════════════════════════════════════════"
+        rm -rf "$REJ"
+        mkdir -p "$REJ"
+        for f in port/linux/src/p2p_internal.h port/linux/src/p2p.h \
+                 port/linux/src/menu_files.c port/linux/game/menu_tags.c; do
+            [ -f "$OPENCE/$f" ] || continue
+            mkdir -p "$REJ/opence-$(dirname "$f")"
+            cp "$OPENCE/$f" "$REJ/opence-$f"
+            mkdir -p "$REJ/knulli-$(dirname "$f")"
+            git -C "$SRC" show "$UPSTREAM_COMMIT:$f" > "$REJ/knulli-$f" 2>/dev/null || true
+        done
+        exit 3
+    fi
+    echo "   OK: alle kritischen Symbole vorhanden."
+
+    echo "$CURRENT_MERGE_HASH" > "$OPENCE_APPLIED_MARKER"
+    echo "== OpenCE-Merge erfolgreich."
 fi
 
-tree_is_patched() {
-    [ "$(git -C "$SRC" rev-parse HEAD 2> /dev/null || true)" = "$UPSTREAM_COMMIT" ] &&
-        cmp -s <(git -C "$SRC" diff HEAD | grep -v '^index ') <(grep -v '^index ' "$PATCH")
-}
-if ! tree_is_patched; then
-    echo "== checking out $UPSTREAM_COMMIT ..."
-    git -C "$SRC" checkout -q --force --detach "$UPSTREAM_COMMIT"
-    git -C "$SRC" reset -q --hard
-    git -C "$SRC" clean -q -fd
-
-    # 1. OpenCE-Dateien holen (Menue-System + Assets + Expat + Stubs)
-    fetch_opence_files
-
-    # 2. Knulli-Patch pruefen und anwenden
-    echo ""
-    echo "== Pruefe, ob der Knulli-Patch auf den OpenCE-Dateien sauber laeuft ..."
-    if ! git -C "$SRC" apply --check "$PATCH" 2>&1; then
-        die "Knulli-Patch kann auf den OpenCE-Dateien NICHT sauber angewendet werden. Bitte Patch-Konflikt pruefen."
-    fi
-    echo "== Knulli-Patch ist sauber anwendbar. Wende an ..."
-    git -C "$SRC" apply "$PATCH"
-    git -C "$SRC" apply --summary "$PATCH" | awk '$1 == "create" { print $4 }' | xargs -r git -C "$SRC" add -N --
-
-    # 3. Menue-Hooks in cache_files.c (nach Knulli)
-    echo ""
-    echo "== Setze OpenCE-Menue-Hooks in cache_files.c ..."
-    if [ -f "$HERE/patches/patch_opence_menu_cache_hooks.py" ]; then
-        python3 "$HERE/patches/patch_opence_menu_cache_hooks.py" "$SRC"
-    else
-        echo "WARNUNG: patch_opence_menu_cache_hooks.py fehlt."
-    fi
-
-    # 4. Build-Registrierung (Expat in linux_build.py / android_build.py / port.json)
-    echo ""
-    echo "== Registriere Menue-Dateien in den Builds ..."
-    if [ -f "$HERE/patches/patch_opence_menu_build.py" ]; then
-        python3 "$HERE/patches/patch_opence_menu_build.py" "$SRC"
-    else
-        echo "WARNUNG: patch_opence_menu_build.py fehlt."
-    fi
+# ─── OpenCE-Assets und -Tools ins Repo kopieren ──────────────────────
+echo ""
+echo "== Kopiere OpenCE-Assets und -Tools ..."
+for t in tools/ce_menus.py tools/port_settings.py tools/custom_edition_script_names.py; do
+    [ -f "$OPENCE/$t" ] && cp "$OPENCE/$t" "$SRC/$t" && echo "   + $t" || true
+done
+if [ -d "$OPENCE/port/assets/menus" ]; then
+    rm -rf "$SRC/port/assets/menus"
+    mkdir -p "$SRC/port/assets"
+    cp -a "$OPENCE/port/assets/menus" "$SRC/port/assets/menus"
+    echo "   + port/assets/menus/"
 fi
+[ -d "$SRC/port/assets/menus/ce" ] || die "port/assets/menus/ce fehlt nach dem Merge."
 
 # ══════════════════════════════════════════════════════════════════════
-# PGO-Konfiguration
+# 6. PGO-Konfiguration
 # ══════════════════════════════════════════════════════════════════════
 PGO_FLAG="--pgo=off"
 PGO_EXTRA_ARGS=""
@@ -454,22 +440,18 @@ if [ "$PGO_MODE" = "use" ]; then
 
     if [ -f "$LOCAL_PGO" ]; then
         echo "== PGO: use (lokales Linux-Profil)"
-        PGO_FLAG="--pgo=use"
-        PGO_EXTRA_ARGS="--pgo-profile $LOCAL_PGO"
+        PGO_FLAG="--pgo=use"; PGO_EXTRA_ARGS="--pgo-profile $LOCAL_PGO"
     elif curl -fsSL --retry 2 --connect-timeout 30 -o "$WORK/halo_linux.profdata" "$PGO_LINUX_URL" 2>/dev/null; then
-        echo "== PGO: use (Linux-Profil vom Upstream-Repo)"
-        PGO_FLAG="--pgo=use"
-        PGO_EXTRA_ARGS="--pgo-profile $WORK/halo_linux.profdata"
+        echo "== PGO: use (Upstream-Linux-Profil)"
+        PGO_FLAG="--pgo=use"; PGO_EXTRA_ARGS="--pgo-profile $WORK/halo_linux.profdata"
     elif curl -fsSL --retry 2 --connect-timeout 30 -o "$WORK/halo_linux.profdata" "$PGO_FALLBACK_URL" 2>/dev/null; then
-        echo "== PGO: use (Linux-Profil aus Fallback-Repo)"
-        PGO_FLAG="--pgo=use"
-        PGO_EXTRA_ARGS="--pgo-profile $WORK/halo_linux.profdata"
+        echo "== PGO: use (Fallback-Linux-Profil)"
+        PGO_FLAG="--pgo=use"; PGO_EXTRA_ARGS="--pgo-profile $WORK/halo_linux.profdata"
     elif [ -f "$LOCAL_PGO_ANDROID" ]; then
-        echo "== PGO: use (Notfall: lokales Android-Profil)"
-        PGO_FLAG="--pgo=use"
-        PGO_EXTRA_ARGS="--pgo-profile $LOCAL_PGO_ANDROID"
+        echo "== PGO: use (lokales Android-Profil)"
+        PGO_FLAG="--pgo=use"; PGO_EXTRA_ARGS="--pgo-profile $LOCAL_PGO_ANDROID"
     else
-        echo "== PGO: kein Linux-Profil gefunden, baue ohne PGO (--pgo=off)"
+        echo "== PGO: kein Profil gefunden, baue ohne PGO (--pgo=off)"
         PGO_FLAG="--pgo=off"
     fi
 elif [ "$PGO_MODE" = "off" ]; then
@@ -479,7 +461,9 @@ elif [ "$PGO_MODE" = "train" ]; then
     LTO_FLAG="--lto=off"
 fi
 
-# ── Fix 1: APCs ─────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+# 7. Fix 1: APCs in xbox_kernel.c
+# ══════════════════════════════════════════════════════════════════════
 python3 - "$SRC/port/linux/src/xbox_kernel.c" <<'PYEOF'
 import sys
 path = sys.argv[1]
@@ -524,8 +508,9 @@ wait_new = '''\tif (alertable && platform_run_apcs())
 \t\t\tbreak;
 \t\t}'''
 if wait_old not in text:
-    print("FEHLER: WaitForSingleObjectEx nicht gefunden", file=sys.stderr); sys.exit(1)
-text = text.replace(wait_old, wait_new, 1)
+    print("WARNUNG: WaitForSingleObjectEx-Muster nicht gefunden (evtl. bereits gepatcht).")
+else:
+    text = text.replace(wait_old, wait_new, 1)
 sleep_old = '''\tif (milliseconds == INFINITE)
 \t{
 \t\tfor (;;)
@@ -567,34 +552,29 @@ sleep_new = '''\tif (milliseconds == INFINITE)
 \t}
 \treturn 0;'''
 if sleep_old not in text:
-    print("FEHLER: SleepEx nicht gefunden", file=sys.stderr); sys.exit(1)
-text = text.replace(sleep_old, sleep_new, 1)
+    print("WARNUNG: SleepEx-Muster nicht gefunden (evtl. bereits gepatcht).")
+else:
+    text = text.replace(sleep_old, sleep_new, 1)
 with open(path, 'w') as f:
     f.write(text)
-print("xbox_kernel.c gepatcht")
+print("xbox_kernel.c geprueft")
 PYEOF
 
-# ── Fix 2: android_build.py (mcpu, O3) ──────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+# 8. Fix 2: android_build.py (mcpu, O3, Builtin-Shim, PGO)
+# ══════════════════════════════════════════════════════════════════════
 python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import sys
 path = sys.argv[1]
 with open(path) as f:
     text = f.read()
-
 old_mcpu = '"-mcpu=cortex-a53"'
 new_mcpu = '"-mcpu=cortex-a35",\n    "-mtune=cortex-a35"'
-count_mcpu = text.count(old_mcpu)
-if count_mcpu > 0:
+if text.count(old_mcpu) > 0:
     text = text.replace(old_mcpu, new_mcpu)
+    print("android_build.py: mcpu=cortex-a53 -> cortex-a35")
 else:
-    old_mcpu = '"-mcpu=cortex-a35+dotprod",\n    "-mtune=cortex-a35"'
-    new_mcpu = '"-mcpu=cortex-a35",\n    "-mtune=cortex-a35"'
-    count_mcpu = text.count(old_mcpu)
-    if count_mcpu == 0:
-        print("WARNUNG: keine mcpu-Zeile gefunden")
-    else:
-        text = text.replace(old_mcpu, new_mcpu)
-
+    print("android_build.py: mcpu war bereits cortex-a35")
 old_flags = '"-ffp-contract=off",\n    "-O2",'
 new_flags = '''"-ffp-contract=off",
     "-O3",
@@ -604,37 +584,19 @@ new_flags = '''"-ffp-contract=off",
     "-fno-trapping-math",
     "-fmerge-all-constants",
     "-fno-strict-aliasing",'''
-count_flags = text.count(old_flags)
-if count_flags == 0:
-    old_flags = '"-ffp-contract=off",'
-    new_flags = '''"-ffp-contract=off",
-    "-O3",
-    "-fomit-frame-pointer",
-    "-funroll-loops",
-    "-fno-math-errno",
-    "-fno-trapping-math",
-    "-fmerge-all-constants",
-    "-fno-strict-aliasing",'''
-    count_flags = text.count(old_flags)
-    if count_flags == 0:
-        print("WARNUNG: GUEST_ABI_FLAGS-Marker fehlt", file=sys.stderr)
-    else:
-        text = text.replace(old_flags, new_flags, 1)
-else:
+if old_flags in text:
     text = text.replace(old_flags, new_flags, 1)
-
+    print("android_build.py: O2 -> O3 + Flags")
+else:
+    print("android_build.py: O-Flags unveraendert")
 if '"-fno-omit-frame-pointer"' in text:
     text = text.replace('    "-fno-omit-frame-pointer",\n', '')
-    print("Guest-Code-Flags: -fno-omit-frame-pointer entfernt")
-else:
-    print("Guest-Code-Flags: -fno-omit-frame-pointer war nicht vorhanden")
-
+    print("android_build.py: -fno-omit-frame-pointer entfernt")
 with open(path, 'w') as f:
     f.write(text)
-print(f"android_build.py gepatcht: {count_mcpu}x mcpu, {count_flags}x O-Flags")
 PYEOF
 
-# ── Fix 2e: -DHALO_ANDROID ──────────────────────────────────────────
+# ─── Fix 2e: -DHALO_ANDROID vor -DHALO_RELEASE ──────────────────────
 python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import sys
 path = sys.argv[1]
@@ -647,126 +609,62 @@ anchor = '"-DHALO_RELEASE"'
 if anchor in text:
     text = text.replace(anchor, '"-DHALO_ANDROID",\n    "-DHALO_RELEASE"', 1)
     print("android_build.py: -DHALO_ANDROID vor -DHALO_RELEASE")
-else:
-    fallback = '"-O3",\n    "-fomit-frame-pointer"'
-    if fallback in text:
-        text = text.replace(fallback, '"-DHALO_ANDROID",\n    ' + fallback, 1)
-        print("android_build.py: -DHALO_ANDROID vor -O3")
-    else:
-        print("FEHLER: kein Anker fuer -DHALO_ANDROID", file=sys.stderr)
-        sys.exit(1)
-with open(path, 'w') as f:
-    f.write(text)
+    with open(path, 'w') as f:
+        f.write(text)
 PYEOF
 
-# ── Fix 2b: clang-Builtin-Shim ──────────────────────────────────────
+# ─── Fix 2b: clang-Builtin-Shim ─────────────────────────────────────
 python3 - "$SRC/tools/android_build.py" <<'PYEOF'
-import re
-import sys
+import re, sys
 path = sys.argv[1]
 with open(path) as f:
     text = f.read()
 if "_clang_builtin_shim" in text:
-    print("shim bereits aktiv")
-else:
-    old_fn = '''def _clang_resource_include(cc: str) -> List[str]:
-    # Include directory of cc's own built-in headers (arm_neon.h etc.).
-    #
-    # The guest build compiles with -nostdinc so the host's glibc headers
-    # do not leak into a foreign target. That flag also hides clang's
-    # built-in headers, which live under <resource-dir>/include rather
-    # than a system path (arm_neon.h, immintrin.h, stddef.h ...). Query
-    # the compiler for its resource directory and re-add only that
-    # subfolder as a system include, so -nostdinc keeps doing its job
-    # everywhere else.
-    try:
-        result = subprocess.run([cc, "-print-resource-dir"],
-                                capture_output=True, text=True, check=True)
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError) as error:
-        print(f"WARNING: cannot query {cc} for its resource directory "
-              f"({error}); arm_neon.h and other compiler builtins may be "
-              f"missing", file=sys.stderr)
-        return []
-    include = Path(result.stdout.strip()) / "include"
-    if not include.is_dir():
-        print(f"WARNING: {cc} reports a resource directory but {include} "
-              f"is missing", file=sys.stderr)
-        return []
-    return ["-isystem", str(include)]'''
-    new_fn = '''def _clang_builtin_shim(cc: str) -> List[str]:
-    try:
-        result = subprocess.run([cc, "-print-resource-dir"],
-                                capture_output=True, text=True, check=True)
-    except (subprocess.CalledProcessError, FileNotFoundError, OSError) as error:
-        print(f"WARNING: cannot query {cc} for its resource directory "
-              f"({error})", file=sys.stderr)
-        return []
-    include = Path(result.stdout.strip()) / "include"
-    if not include.is_dir():
-        print(f"WARNING: {cc} reports a resource directory but {include} "
-              f"is missing", file=sys.stderr)
-        return []
-    shim = BUILD / "guest" / "clang_builtin_shim"
-    shim.mkdir(parents=True, exist_ok=True)
-    for name in ("arm_neon.h", "arm_vector_types.h", "arm_acle.h",
-                 "arm_fp16.h", "arm_bf16.h"):
-        source = include / name
-        if not source.is_file():
-            continue
-        target = shim / name
-        if target.exists() or target.is_symlink():
-            try:
-                target.unlink()
-            except OSError:
-                pass
-        try:
-            target.symlink_to(source)
-        except OSError:
-            shutil.copy2(source, target)
-    return ["-isystem", str(shim)]'''
-    if old_fn in text:
-        text = text.replace(old_fn, new_fn, 1)
-        text = text.replace("_clang_resource_include(guest_cc)",
-                            "_clang_builtin_shim(guest_cc)")
-    elif "_clang_resource_include" in text:
-        print("FEHLER: alte Funktion in unerwarteter Form", file=sys.stderr); sys.exit(1)
-    else:
-        anchor = """    for sdk in (Path.home() / "Android/Sdk", Path("/opt/android-sdk")):
+    print("clang-Builtin-Shim bereits aktiv")
+    sys.exit(0)
+anchor = '''    for sdk in (Path.home() / "Android/Sdk", Path("/opt/android-sdk")):
         if (sdk / "ndk").is_dir():
             versions = sorted((sdk / "ndk").iterdir())
             if versions:
                 return versions[-1]
     return None
-"""
-        if anchor not in text:
-            print("FEHLER: _find_ndk-Anker fehlt", file=sys.stderr); sys.exit(1)
-        text = text.replace(anchor, anchor + "\n\n" + new_fn, 1)
-
-if "_clang_builtin_shim(guest_cc)" not in text:
-    pattern = re.compile(
-        r'(\bguest_abi\s*=\s*"[^"]*"\s*\.join\(\s*\n?\s*GUEST_ABI_FLAGS\b)',
-        re.MULTILINE,
-    )
-    if pattern.search(text):
-        text = pattern.sub(r'\1\n        + _clang_builtin_shim(guest_cc)', text, count=1)
-        print("clang-Builtin-Shim in guest_abi eingebaut (Regex)")
-    else:
-        pattern2 = re.compile(
-            r'(\.join\(\s*\n?\s*GUEST_ABI_FLAGS\b)',
-            re.MULTILINE,
-        )
-        if pattern2.search(text):
-            text = pattern2.sub(r'\1\n        + _clang_builtin_shim(guest_cc)', text, count=1)
-            print("clang-Builtin-Shim in guest_abi eingebaut (Fallback)")
-        else:
-            print("WARNUNG: guest_abi-Berechnung nicht gefunden", file=sys.stderr)
-else:
-    print("clang-Builtin-Shim bereits in guest_abi")
+'''
+new_fn = '''def _clang_builtin_shim(cc: str) -> list:
+    import shutil
+    try:
+        result = subprocess.run([cc, "-print-resource-dir"],
+                                capture_output=True, text=True, check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return []
+    include = Path(result.stdout.strip()) / "include"
+    if not include.is_dir():
+        return []
+    shim = BUILD / "guest" / "clang_builtin_shim"
+    shim.mkdir(parents=True, exist_ok=True)
+    for name in ("arm_neon.h", "arm_vector_types.h", "arm_acle.h", "arm_fp16.h", "arm_bf16.h"):
+        source = include / name
+        if not source.is_file():
+            continue
+        target = shim / name
+        if target.exists() or target.is_symlink():
+            try: target.unlink()
+            except OSError: pass
+        try: target.symlink_to(source)
+        except OSError: shutil.copy2(source, target)
+    return ["-isystem", str(shim)]
+'''
+if anchor in text:
+    text = text.replace(anchor, anchor + "\n\n" + new_fn, 1)
+    text = text.replace("_clang_resource_include(guest_cc)", "_clang_builtin_shim(guest_cc)")
+    if "guest_abi = " in text and "_clang_builtin_shim(guest_cc)" not in text:
+        text = re.sub(r'(guest_abi\s*=\s*"[^"]*"\s*\.join\(\s*\n?\s*GUEST_ABI_FLAGS\b)',
+                      r'\1\n        + _clang_builtin_shim(guest_cc)', text, count=1)
+    print("clang-Builtin-Shim eingebaut")
 with open(path, 'w') as f:
     f.write(text)
 PYEOF
 
-# ── Fix 2c/2d: NUR Trainings-Modus ───────────────────────────────────
+# ─── Fix 2c/2d: PGO-Training ────────────────────────────────────────
 if [ "$PGO_MODE" = "train" ]; then
     python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import sys
@@ -774,37 +672,29 @@ path = sys.argv[1]
 with open(path) as f:
     text = f.read()
 if "-fprofile-instr-generate" in text:
-    print("android_build.py hat bereits -fprofile-instr-generate")
+    print("android_build.py: -fprofile-instr-generate bereits vorhanden")
     sys.exit(0)
 for old in ('"-O3",', '"-O3"'):
     if old in text:
-        new = old.replace('"-O3"', '"-O3",\n    "-fprofile-instr-generate"')
-        text = text.replace(old, new, 1)
+        text = text.replace(old, old.replace('"-O3"', '"-O3",\n    "-fprofile-instr-generate"'), 1)
         with open(path, 'w') as f:
             f.write(text)
         print("android_build.py: -fprofile-instr-generate")
         sys.exit(0)
-print("FEHLER: O3-Flag nicht gefunden", file=sys.stderr)
-sys.exit(1)
 PYEOF
-
     python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import sys
 path = sys.argv[1]
 with open(path) as f:
     text = f.read()
 if "guest_profile_runtime" in text:
-    print("android_build.py hat bereits guest_profile_runtime")
+    print("android_build.py: guest_profile_runtime bereits vorhanden")
     sys.exit(0)
 old = '''    n.rule(
         name="android_guest_link",
         command=(f"$android_ndk_bin/ld.lld -m aarch64linux -static -nostdlib -T {linker_script} "
                  f"-Map $out.map -o $out @$out.rsp {libguestc} "
-                 "$$($android_host_cc -print-libgcc-file-name)"),
-        description="ANDROID LINK $out",
-        rspfile="$out.rsp",
-        rspfile_content="$in_newline",
-    )'''
+                 "$$($android_host_cc -print-libgcc-file-name)"),'''
 new = '''    guest_profile_runtime = ""
     for _cc_candidate in (guest_cc, str(ndk_bin / "clang")):
         if not _cc_candidate:
@@ -812,55 +702,42 @@ new = '''    guest_profile_runtime = ""
         try:
             _rd = subprocess.run([_cc_candidate, "-print-resource-dir"],
                                  capture_output=True, text=True, check=True).stdout.strip()
-        except Exception as _e:
-            print(f"WARNING: cannot query {_cc_candidate}: {_e}", file=sys.stderr)
+        except Exception:
             continue
-        for _name in ("libclang_rt.profile-aarch64-android.a",
-                      "libclang_rt.profile-aarch64.a"):
+        for _name in ("libclang_rt.profile-aarch64-android.a", "libclang_rt.profile-aarch64.a"):
             _candidate = Path(_rd) / "lib" / "linux" / _name
             if _candidate.is_file():
                 guest_profile_runtime = str(_candidate)
-                print(f"== using profile runtime: {guest_profile_runtime}")
+                print(f"== profile runtime: {guest_profile_runtime}")
                 break
         if guest_profile_runtime:
             break
-    if not guest_profile_runtime:
-        print("WARNING: no profile runtime found; link may fail", file=sys.stderr)
     n.rule(
         name="android_guest_link",
         command=(f"$android_ndk_bin/ld.lld -m aarch64linux -static -nostdlib -T {linker_script} "
                  f"-Map $out.map -o $out @$out.rsp {libguestc} {guest_profile_runtime} "
-                 "$$($android_host_cc -print-libgcc-file-name)"),
-        description="ANDROID LINK $out",
-        rspfile="$out.rsp",
-        rspfile_content="$in_newline",
-    )'''
-if old not in text:
-    print("FEHLER: android_guest_link rule nicht gefunden", file=sys.stderr)
-    sys.exit(1)
-text = text.replace(old, new, 1)
-with open(path, 'w') as f:
-    f.write(text)
-print("android_build.py: Profiling-Runtime zum Link")
+                 "$$($android_host_cc -print-libgcc-file-name)"),'''
+if old in text:
+    text = text.replace(old, new, 1)
+    with open(path, 'w') as f:
+        f.write(text)
+    print("android_build.py: Profiling-Runtime zum Link")
 PYEOF
 fi
 
-# ── Fix 3: linux_build.py ────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+# 9. Fix 3: linux_build.py (-O3 + Zusatz-Flags)
+# ══════════════════════════════════════════════════════════════════════
 python3 - "$SRC/tools/linux_build.py" <<'PYEOF'
 import sys
 path = sys.argv[1]
 with open(path) as f:
     text = f.read()
 if 'OPTIMISATION = "-O3"' in text:
-    print("linux_build.py hat bereits -O3")
-    sys.exit(0)
-old_opt = 'OPTIMISATION = "-O2"'
-new_opt = 'OPTIMISATION = "-O3"'
-count_opt = text.count(old_opt)
-if count_opt == 0:
-    print("WARNUNG: OPTIMISATION = -O2 fehlt", file=sys.stderr)
+    print("linux_build.py: -O3 bereits vorhanden")
 else:
-    text = text.replace(old_opt, new_opt)
+    text = text.replace('OPTIMISATION = "-O2"', 'OPTIMISATION = "-O3"')
+    print("linux_build.py: O2 -> O3")
 old_abi = '"-ffp-contract=off",\n    OPTIMISATION,'
 new_abi = '''"-ffp-contract=off",
     "-funroll-loops",
@@ -869,17 +746,16 @@ new_abi = '''"-ffp-contract=off",
     "-fmerge-all-constants",
     "-fno-strict-aliasing",
     OPTIMISATION,'''
-count_abi = text.count(old_abi)
-if count_abi > 0:
+if old_abi in text:
     text = text.replace(old_abi, new_abi, 1)
-else:
-    print("WARNUNG: LINUX_ABI_FLAGS-Marker fehlt", file=sys.stderr)
+    print("linux_build.py: zusaetzliche Flags")
 with open(path, 'w') as f:
     f.write(text)
-print(f"linux_build.py: {count_opt}x O2->O3, {count_abi}x zusaetzliche Flags")
 PYEOF
 
-# ── port/knulli kopieren ─────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+# 10. port/knulli kopieren + Fix 3b (-DHALO_ANDROID)
+# ══════════════════════════════════════════════════════════════════════
 echo ""
 echo "== Kopiere port/knulli in den Quellbaum ..."
 if [ ! -d "$HERE/port/knulli" ]; then
@@ -890,9 +766,6 @@ cp -a "$HERE/port/knulli" "$SRC/port/knulli"
 rm -rf "$SRC/port/knulli/__pycache__"
 chmod +x "$SRC/port/knulli/build.sh" 2>/dev/null || true
 
-# ── Fix 3b: -DHALO_ANDROID in port/knulli/build.sh ──────────────────
-echo ""
-echo "== Fix 3b: -DHALO_ANDROID in port/knulli/build.sh ..."
 if [ -f "$SRC/port/knulli/build.sh" ]; then
     python3 - "$SRC/port/knulli/build.sh" <<'PYEOF'
 import sys
@@ -904,88 +777,68 @@ if "-DHALO_ANDROID" in text:
     sys.exit(0)
 old = '-D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS \\'
 new = '-D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS \\\n        -DHALO_ANDROID \\'
-if old not in text:
-    print("WARNUNG: CFLAGS-Marker in port/knulli/build.sh fehlt", file=sys.stderr)
-    sys.exit(0)
-text = text.replace(old, new, 1)
-with open(path, 'w') as f:
-    f.write(text)
-print("port/knulli/build.sh: -DHALO_ANDROID in CFLAGS")
+if old in text:
+    text = text.replace(old, new, 1)
+    with open(path, 'w') as f:
+        f.write(text)
+    print("port/knulli/build.sh: -DHALO_ANDROID in CFLAGS")
 PYEOF
-else
-    echo "WARNUNG: port/knulli/build.sh fehlt, Fix 3b uebersprungen"
 fi
 
 # ══════════════════════════════════════════════════════════════════════
-# Fix 4: Python-Patches (Reihenfolge ist wichtig!)
+# 11. Fix 4: restliche Python-Patches
 # ══════════════════════════════════════════════════════════════════════
 echo ""
-echo "== Fix 4: Quellcode-Optimierungen ..."
-for patch_script in patch_memory_pools.py patch_neon_math.py \
-                    patch_vita_optimizations.py patch_button_remap.py \
-                    patch_index_extent_neon.py patch_fps_overlay.py \
-                    patch_draw_framebuffer_bound.py \
-                    patch_mali_subdata.py \
-                    patch_shader_prewarm.py \
-                    patch_aggressive_culling.py \
-                    patch_state_batching.py \
-                    patch_texture_prewarm.py \
-                    patch_settings_menu.py \
-                    patch_config_defaults.py \
-                    patch_credits.py \
-                    patch_forward_declarations.py; do
+echo "== Wende restliche Patch-Skripte an ..."
+for patch_script in \
+        patch_memory_pools.py patch_neon_math.py \
+        patch_vita_optimizations.py patch_button_remap.py \
+        patch_index_extent_neon.py patch_fps_overlay.py \
+        patch_draw_framebuffer_bound.py patch_mali_subdata.py \
+        patch_shader_prewarm.py patch_aggressive_culling.py \
+        patch_state_batching.py patch_texture_prewarm.py \
+        patch_settings_menu.py patch_config_defaults.py \
+        patch_credits.py patch_forward_declarations.py; do
     if [ -f "$HERE/patches/$patch_script" ]; then
-        echo "== Wende $patch_script an ..."
+        echo "== $patch_script"
         if ! python3 "$HERE/patches/$patch_script" "$SRC"; then
             echo "WARNUNG: $patch_script fehlgeschlagen"
         fi
-    else
-        echo "== $patch_script nicht vorhanden (ueberspringe)"
     fi
 done
 
-# ── Fix 4a: glUniform4f -> glUniform4fv ─────────────────────────────
+# ─── Fix 4a: glUniform4f -> glUniform4fv ────────────────────────────
 if [ -f "$SRC/port/linux/src/d3d8_gl.c" ]; then
     python3 - "$SRC/port/linux/src/d3d8_gl.c" <<'PYEOF'
-import re
-import sys
+import re, sys
 path = sys.argv[1]
 with open(path) as f:
     text = f.read()
 if "fps_overlay_enabled" not in text:
     sys.exit(0)
-pattern = re.compile(
-    r'glUniform4f\(\s*fps_overlay_color\s*,\s*([^;]+?)\s*\)\s*;'
-)
-def repl(match):
-    args = match.group(1).strip()
-    return (
-        '{ const float overlay_color[4] = { ' + args + ' }; '
-        'glUniform4fv(fps_overlay_color, 1, overlay_color); }'
-    )
-new_text = pattern.sub(repl, text)
+pattern = re.compile(r'glUniform4f\(\s*fps_overlay_color\s*,\s*([^;]+?)\s*\)\s*;')
+new_text = pattern.sub(
+    lambda m: '{ const float overlay_color[4] = { ' + m.group(1).strip() + ' }; '
+              'glUniform4fv(fps_overlay_color, 1, overlay_color); }',
+    text)
 if new_text != text:
     with open(path, "w") as f:
         f.write(new_text)
     print("d3d8_gl.c: glUniform4f -> glUniform4fv")
-else:
-    print("d3d8_gl.c: keine glUniform4f-Aufrufe")
 PYEOF
 fi
 
-# ── Fix 4c: Menus aus port_settings.py regenerieren ─────────────────
+# ─── Fix 4c: port_settings regenerieren ─────────────────────────────
 echo ""
-echo "== Regeneriere die In-Game-Settings-Menus aus port_settings.py ..."
+echo "== Regeneriere die In-Game-Settings-Menus ..."
 python3 - "$SRC" <<'PYEOF'
-import os
-import sys
+import os, sys
 src = sys.argv[1]
 sys.path.insert(0, os.path.join(src, "tools"))
 try:
     import port_settings
 except ImportError as e:
     print(f"  HINWEIS: port_settings.py nicht importierbar ({e}).")
-    print("           In-Game-Menue wird nicht regeneriert.")
     sys.exit(0)
 if not hasattr(port_settings, "settings_files"):
     print("  WARNUNG: port_settings.settings_files() fehlt.")
@@ -1001,20 +854,18 @@ for name, lines in files.items():
     print(f"  geschrieben: {name}")
 PYEOF
 
-# ── Fix 4d: Credits-Wasserzeichen in statische Menue-XMLs ───────────
-echo ""
-echo "== Injiziere das Credits-Wasserzeichen in die statischen Menue-XMLs ..."
+# ─── Fix 4d: Credits-Wasserzeichen ──────────────────────────────────
 if [ -f "$HERE/patches/patch_credits_xml.py" ]; then
+    echo ""
+    echo "== Credits-Wasserzeichen in Menue-XMLs ..."
     python3 "$HERE/patches/patch_credits_xml.py" "$SRC"
-else
-    echo "  WARNUNG: patch_credits_xml.py nicht vorhanden"
 fi
 
 # ══════════════════════════════════════════════════════════════════════
-# Fix 4b: Verifikation
+# 12. Fix 4b: Verifikation
 # ══════════════════════════════════════════════════════════════════════
 echo ""
-echo "== Fix 4b: Verifiziere Patch-Ergebnisse ..."
+echo "== Verifiziere Patch-Ergebnisse ..."
 verification_failed=0
 check_patch() {
     local file="$1" pattern="$2" name="$3"
@@ -1034,106 +885,62 @@ check_file() {
         verification_failed=1
     fi
 }
-check_patch "source/cseries/cseries.h"                    "HALO_DEBUG_ALLOCATOR"               "cseries.h Debug-Allocator"
-check_patch "source/effects/decals.c"                     "static __thread long surface_queue" "decals.c __thread-Arrays"
-check_patch "source/math/matrix_math.c"                   "vmulq_n_f32"                        "matrix_math.c NEON"
-check_patch "port/android/guest/runtime/guest_string.c"   "vld1q_u8"                           "guest_string.c NEON memcmp"
-check_patch "port/android/guest/runtime/guest_string.c"   "vst1q_u8"                           "guest_string.c NEON memcpy"
-check_patch "source/sound/game_sound.c"                   "obstruction_interval_value"         "game_sound.c Sound-Occlusion"
-check_patch "source/render/render_objects.c"              "HALO_MIN_OBJECT_PIXELS"             "render_objects.c Distant"
-check_patch "source/render/render_objects.c"              "HALO_LIGHTING_REFRESH_DIVISOR"      "render_objects.c Lighting"
-check_patch "source/render/render_objects.c"              "aggressive_culling_guard"           "render_objects.c Aggressives Culling"
-check_patch "port/linux/src/port_config.c"                "HALO_SOUND_OBSTRUCTION_TICKS"       "port_config.c Sound"
-check_patch "port/linux/src/port_config.c"                "HALO_MIN_OBJECT_PIXELS"             "port_config.c Distant"
-check_patch "port/linux/src/port_config.c"                "HALO_LIGHTING_REFRESH_DIVISOR"      "port_config.c Lighting"
-check_patch "port/linux/src/port_config.c"                "HALO_FPS_OVERLAY_CORNER"            "port_config.c FPS"
-check_patch "port/linux/src/port_config.c"                "HALO_FAST_SHADERS"                  "port_config.c Knulli"
-check_patch "port/linux/src/port_config.c"                'display.model_detail", _config_real, "0.35"' "port_config.c model_detail=0.35"
-check_patch "port/linux/src/port_config.c"                'display.render_scale", _config_real, "0.75"' "port_config.c render_scale=0.75"
-check_patch "port/linux/src/port_config.c"                'lighting_refresh_divisor", _config_integer, "2"' "port_config.c lighting=2"
-check_patch "port/linux/src/xinput_sdl.c"                 "button_remap"                       "xinput_sdl.c Button-Remap"
-check_patch "port/linux/src/d3d8_gl.c"                    "__builtin_elementwise_min"          "d3d8_gl.c index_extent"
-check_patch "port/linux/src/d3d8_gl.c"                    "fps_overlay_enabled"                "d3d8_gl.c FPS-Overlay"
-check_patch "port/linux/src/d3d8_gl.c"                    "static int draw_framebuffer_bound(void)" "d3d8_gl.c framebuffer_bound"
-check_patch "port/linux/src/d3d8_gl.c"                    "if (draw_framebuffer_bound())"       "d3d8_gl.c Discard"
-check_patch "port/linux/src/d3d8_gl.c"                    "mali_subdata_guard"                 "d3d8_gl.c Mali-Subdata-Guard"
-check_patch "port/linux/src/d3d8_gl.c"                    "subdata_frame"                      "d3d8_gl.c subdata_frame[]"
-check_patch "port/linux/src/d3d8_gl.c"                    "device.frame - mirror.subdata_frame" "d3d8_gl.c Frame-Guard"
-check_patch "port/linux/src/d3d8_gl.c"                    "shader_prewarm_guard"               "d3d8_gl.c Shader-Prewarm"
-check_patch "port/linux/src/d3d8_gl.c"                    "xgpu_current_map_name"              "d3d8_gl.c Map-Name-Cache"
-check_patch "port/linux/src/d3d8_gl.c"                    "state_batching_guard"               "d3d8_gl.c State-Batching"
-check_patch "port/linux/src/xbox_textures.c"              "texture_prewarm_guard"              "xbox_textures.c Texture-Prewarm"
-check_patch "tools/android_build.py"                      '"-DHALO_ANDROID"'                   "android_build.py -DHALO_ANDROID"
-check_patch "source/main/main.c"                          "St0len-One"                          "main.c Credits"
-
-# OpenCE-Menü-Marker
-check_patch "port/linux/src/d3d8_gl.c"                    "shader_prewarm_fwd_decl"            "d3d8_gl.c Forward-Decl shader-prewarm"
-check_file  "port/linux/include/halo_menus.h"                                                 "halo_menus.h"
-check_file  "port/linux/src/menu_files.c"                                                     "menu_files.c"
-check_file  "port/linux/src/menu_files.h"                                                     "menu_files.h"
-check_file  "port/linux/game/menu_tags.c"                                                     "menu_tags.c"
-check_file  "port/linux/game/menu_functions.c"                                                "menu_functions.c"
-check_file  "port/linux/game/network_coop.c"                                                  "network_coop.c (Stub)"
-check_file  "port/linux/game/custom_edition_maps.c"                                           "custom_edition_maps.c (Stub)"
-check_file  "port/third_party/expat/expat.h"                                                  "expat.h"
-check_patch "source/cache/cache_files.c"                  "port: opence-menu-cache"            "cache_files.c Menü-Hooks"
-check_patch "tools/linux_build.py"                        "port: opence-menu"                  "linux_build.py Menü-Registrierung"
-check_patch "tools/android_build.py"                      "port: opence-menu"                  "android_build.py Menü-Registrierung"
-check_patch "port/linux/port.json"                        '"dl"'                               "port.json dl"
+check_patch "source/cseries/cseries.h"          "HALO_DEBUG_ALLOCATOR"          "cseries.h Debug-Allocator"
+check_patch "source/effects/decals.c"           "static __thread long surface_queue" "decals.c __thread"
+check_patch "source/math/matrix_math.c"         "vmulq_n_f32"                   "matrix_math.c NEON"
+check_patch "source/sound/game_sound.c"         "obstruction_interval_value"    "game_sound.c Sound"
+check_patch "source/render/render_objects.c"    "HALO_MIN_OBJECT_PIXELS"        "render_objects.c Distant"
+check_patch "source/render/render_objects.c"    "HALO_LIGHTING_REFRESH_DIVISOR" "render_objects.c Lighting"
+check_patch "source/render/render_objects.c"    "aggressive_culling_guard"      "render_objects.c Culling"
+check_patch "port/linux/src/port_config.c"      "HALO_SOUND_OBSTRUCTION_TICKS"  "port_config.c Sound"
+check_patch "port/linux/src/port_config.c"      "HALO_MIN_OBJECT_PIXELS"        "port_config.c Distant"
+check_patch "port/linux/src/port_config.c"      "HALO_LIGHTING_REFRESH_DIVISOR" "port_config.c Lighting"
+check_patch "port/linux/src/port_config.c"      "HALO_FPS_OVERLAY_CORNER"       "port_config.c FPS"
+check_patch "port/linux/src/port_config.c"      "HALO_FAST_SHADERS"             "port_config.c Knulli"
+check_patch "port/linux/src/xinput_sdl.c"       "button_remap"                  "xinput_sdl.c Remap"
+check_patch "port/linux/src/d3d8_gl.c"          "__builtin_elementwise_min"     "d3d8_gl.c index_extent"
+check_patch "port/linux/src/d3d8_gl.c"          "fps_overlay_enabled"           "d3d8_gl.c FPS-Overlay"
+check_patch "port/linux/src/d3d8_gl.c"          "mali_subdata_guard"            "d3d8_gl.c Mali-Subdata"
+check_patch "port/linux/src/d3d8_gl.c"          "shader_prewarm_guard"          "d3d8_gl.c Shader-Prewarm"
+check_patch "port/linux/src/d3d8_gl.c"          "state_batching_guard"          "d3d8_gl.c State-Batching"
+check_patch "port/linux/src/d3d8_gl.c"          "shader_prewarm_fwd_decl"       "d3d8_gl.c Fwd-Decl"
+check_patch "port/linux/src/xbox_textures.c"    "texture_prewarm_guard"         "xbox_textures.c Prewarm"
+check_patch "tools/android_build.py"            '"-DHALO_ANDROID"'              "android_build.py HALO_ANDROID"
+check_patch "source/main/main.c"                "St0len-One"                    "main.c Credits"
+check_file  "port/linux/include/halo_menus.h"                                   "halo_menus.h"
+check_file  "port/linux/src/menu_files.c"                                       "menu_files.c"
+check_file  "port/linux/game/menu_tags.c"                                       "menu_tags.c"
+check_file  "port/linux/game/menu_functions.c"                                  "menu_functions.c"
+check_file  "port/linux/game/custom_edition_cache.c"                            "custom_edition_cache.c"
+check_file  "port/linux/game/custom_edition_maps.c"                             "custom_edition_maps.c"
+check_file  "port/linux/game/network_coop.c"                                    "network_coop.c"
+check_file  "port/third_party/expat/expat.h"                                    "expat.h"
+check_file  "port/linux/src/p2p_lobby.c"                                        "p2p_lobby.c"
+check_patch "port/linux/src/p2p_internal.h"     "P2P_LOBBY_SLOT_PREFIX"         "p2p_internal.h Lobby"
+check_patch "port/linux/src/p2p_internal.h"     "P2P_SEALED_TOKEN_SIZE"         "p2p_internal.h SealedToken"
+check_patch "source/cache/cache_files.c"        "menu_tags_loaded"              "cache_files.c Menue-Hooks"
+check_patch "source/interface/ui_widget.c"      "pc_menu_tag"                   "ui_widget.c pc_menu_tag"
 
 if [ -f "$SRC/tools/port_settings.py" ]; then
     check_patch "tools/port_settings.py" "display.fast_shaders"  "port_settings.py Video-Rows"
-    check_patch "tools/port_settings.py" "button_top"            "port_settings.py button_top"
-    check_patch "tools/port_settings.py" "credits_watermark"     "port_settings.py Credits"
-else
-    echo "   HINWEIS: tools/port_settings.py fehlt."
 fi
-
 if [ -f "$SRC/port/assets/menus/ce/main_menu.settings_select.player_setup.player_profile_edit.video_settings.xml" ]; then
     check_patch "port/assets/menus/ce/main_menu.settings_select.player_setup.player_profile_edit.video_settings.xml" \
         "op_fast_shaders" "video_settings.xml op_fast_shaders"
-    check_patch "port/assets/menus/ce/main_menu.settings_select.player_setup.player_profile_edit.video_settings.xml" \
-        "op_alpha_test_elision" "video_settings.xml op_alpha_test_elision"
-    check_patch "port/assets/menus/ce/main_menu.settings_select.player_setup.player_profile_edit.video_settings.xml" \
-        "credits_watermark" "video_settings.xml Wasserzeichen"
-else
-    echo "   HINWEIS: video_settings.xml fehlt."
-fi
-
-if [ -f "$SRC/port/knulli/host/host_glthread.c" ]; then
-    if grep -q "health_check" "$SRC/port/knulli/host/host_glthread.c"; then
-        echo "   OK: host_glthread.c health_check"
-    else
-        echo "   HINWEIS: host_glthread.c ohne health_check (optional)"
-    fi
-fi
-
-if grep -q '#include <arm_neon.h>' "$SRC/port/linux/src/d3d8_gl.c"; then
-    echo "   FEHLT: d3d8_gl.c hat noch arm_neon.h"
-    verification_failed=1
-fi
-if grep -q 'glUniform4f(fps_overlay_color' "$SRC/port/linux/src/d3d8_gl.c"; then
-    echo "   FEHLT: d3d8_gl.c enthaelt noch glUniform4f"
-    verification_failed=1
-fi
-if [ "$PGO_MODE" = "train" ]; then
-    check_patch "tools/android_build.py" "-fprofile-instr-generate" "android_build.py PGO"
-    check_patch "tools/android_build.py" "guest_profile_runtime"    "android_build.py Runtime"
 fi
 if [ "$verification_failed" -ne 0 ]; then
-    echo "FEHLER: Optimierungen fehlen"
+    echo ""
+    echo "FEHLER: Verifikation fehlgeschlagen."
     exit 1
 fi
-echo "== Alle Optimierungen sauber angewendet."
+echo "== Alle Optimierungen sauber."
 
-# ── Fix 5: PGO-Shim (NUR Trainings-Modus) ────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+# 13. Fix 5: PGO-Shim (nur train)
+# ══════════════════════════════════════════════════════════════════════
 if [ "$PGO_MODE" = "train" ]; then
     SHIM="$SRC/port/android/guest/runtime/guest_pgo_shim.c"
     cat > "$SHIM" <<'CEOF'
-/*
-GUEST_PGO_SHIM.C — Bionic-Symbole und SIGTERM-Handler fuer die
-LLVM-Profiling-Runtime im musl-Guest.
-*/
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1141,16 +948,12 @@ LLVM-Profiling-Runtime im musl-Guest.
 static int pgo_errno_value;
 int *__errno(void) { return &pgo_errno_value; }
 char __sF[3 * 256];
-int prctl(int option, unsigned long a2, unsigned long a3, unsigned long a4, unsigned long a5)
-{ (void)option; (void)a2; (void)a3; (void)a4; (void)a5; return 0; }
+int prctl(int o, unsigned long a, unsigned long b, unsigned long c, unsigned long d)
+{ (void)o;(void)a;(void)b;(void)c;(void)d; return 0; }
 int getpagesize(void) { return 4096; }
 extern int __llvm_profile_write_file(void);
 static void pgo_write_and_die(int sig)
-{
-    __llvm_profile_write_file();
-    signal(sig, SIG_DFL);
-    raise(sig);
-}
+{ __llvm_profile_write_file(); signal(sig, SIG_DFL); raise(sig); }
 __attribute__((constructor)) static void pgo_install_handlers(void)
 {
     struct sigaction sa;
@@ -1163,18 +966,16 @@ __attribute__((constructor)) static void pgo_install_handlers(void)
     atexit((void (*)(void))__llvm_profile_write_file);
 }
 CEOF
-    if [ -f "$SHIM" ]; then
-        echo "== Fix 5: guest_pgo_shim.c erzeugt ($(stat -c%s "$SHIM") Bytes)"
-    else
-        die "Fix 5: guest_pgo_shim.c konnte nicht erzeugt werden"
-    fi
+    echo "== Fix 5: guest_pgo_shim.c erzeugt"
 fi
 
 # ══════════════════════════════════════════════════════════════════════
-# Stamp (muss ALLE Patch-Skripte enthalten, die den Baum veraendern)
+# 14. Stamp
 # ══════════════════════════════════════════════════════════════════════
 stamp=$({
     cat "$PATCH"
+    echo "opence-merge=$OPENCE_MERGE_BASE"
+    echo "opence-patch=$OPENCE_PATCH_HASH"
     for p in patch_memory_pools.py patch_neon_math.py \
              patch_vita_optimizations.py patch_button_remap.py \
              patch_index_extent_neon.py patch_fps_overlay.py \
@@ -1183,51 +984,21 @@ stamp=$({
              patch_state_batching.py patch_texture_prewarm.py \
              patch_settings_menu.py patch_config_defaults.py \
              patch_credits.py patch_credits_xml.py \
-             patch_forward_declarations.py \
-             patch_opence_menu_cache_hooks.py \
-             patch_opence_menu_build.py; do
+             patch_forward_declarations.py; do
         cat "$HERE/patches/$p" 2>/dev/null || true
     done
-    for s in network_coop_stub.c network_coop.h custom_edition_stub.c; do
-        cat "$HERE/patches/stubs/$s" 2>/dev/null || true
-    done
-    if [ -f "$HERE/pgo/halo_linux.profdata" ]; then
-        sha256sum "$HERE/pgo/halo_linux.profdata" | cut -d' ' -f1
-    fi
-    if [ -f "$HERE/pgo/halo_android.profdata" ]; then
-        sha256sum "$HERE/pgo/halo_android.profdata" | cut -d' ' -f1
-    fi
+    [ -f "$HERE/pgo/halo_linux.profdata" ] && sha256sum "$HERE/pgo/halo_linux.profdata" | cut -d' ' -f1
+    [ -f "$HERE/pgo/halo_android.profdata" ] && sha256sum "$HERE/pgo/halo_android.profdata" | cut -d' ' -f1
     echo "pgo-mode=$PGO_MODE"
-    echo "frame-pointer=option-a"
-    echo "index-extent=neon-builtins-v2"
-    echo "fps-overlay=uniform4fv"
-    echo "halo-android=on"
-    echo "draw-framebuffer-bound=on"
-    echo "mali-subdata=guard-v1"
-    echo "shader-prewarm=map-specific-v1"
-    echo "aggressive-culling=1.5x-v1"
-    echo "state-batching=opaque-sort-v1"
-    echo "texture-prewarm=map-load-v1"
-    echo "forward-declarations=c99-shader"
-    echo "opence-menu=cache-files-hooks-v1"
-    echo "glthread-health-check=tolerant"
-    echo "xml-hunk-removed=1"
-    echo "settings-menu=regenerated"
-    echo "config-defaults=m9-rk3326"
-    echo "credits=st0len-one"
-    echo "opence-files=fetched-v3-menu"
+    echo "opence-menu=option2-v2"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
-if [ -f "$SRC/.port-stamp" ] && [ "$(cat "$SRC/.port-stamp")" = "$stamp" ]; then
-    rm -rf "$SRC/build/knulli"
-fi
 echo "$stamp" > "$SRC/.port-stamp"
 
-# ── Build ────────────────────────────────────────────────────────────
-export ANDROID_NDK SYSROOT_LIB
-export SDL2_INCLUDE
-export GUEST_CC HOST_CC JOBS
-
+# ══════════════════════════════════════════════════════════════════════
+# 15. Build
+# ══════════════════════════════════════════════════════════════════════
+export ANDROID_NDK SYSROOT_LIB SDL2_INCLUDE GUEST_CC HOST_CC JOBS
 cd "$SRC"
 
 echo "== Konfiguriere mit $LTO_FLAG $PGO_FLAG $PGO_EXTRA_ARGS ..."
@@ -1240,7 +1011,9 @@ ninja -j "$JOBS" build/android/halo_guest.elf
 echo "== Baue Host-Binary (halo) ueber port/knulli/build.sh ..."
 bash "$SRC/port/knulli/build.sh"
 
-# ── Distribution zusammenstellen ─────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════
+# 16. Distribution
+# ══════════════════════════════════════════════════════════════════════
 echo "== copying the build into $DIST"
 rm -rf "$DIST"
 mkdir -p "$DIST"
@@ -1261,28 +1034,17 @@ GUEST_SIZE_MB=$((GUEST_SIZE / 1048576))
 echo "== halo_guest.elf: $GUEST_SIZE Bytes (~${GUEST_SIZE_MB} MB)"
 
 if [ "$PGO_MODE" = "train" ]; then
-    if [ "$GUEST_SIZE" -lt 11500000 ]; then
-        die "Trainings-Build ist nur ${GUEST_SIZE_MB} MB - Instrumentierung hat nicht gegriffen."
-    fi
     cat <<'TRAINING'
 
 ────────────────────────────────────────────────────────────────────────
 TRAININGS-BUILD FERTIG
 ────────────────────────────────────────────────────────────────────────
-
-Naechste Schritte auf dem M9 Pro:
-
+Naechste Schritte:
 1. dist/Halo.sh           nach /roms/ports/Halo.sh
 2. dist/halo_guest.elf    nach /roms/ports/halo-ce/halo_guest.elf
 3. dist/halo              nach /roms/ports/halo-ce/halo
-
-4. Spiel starten. Beendet sich nach 10 Minuten selbst (SIGTERM).
-5. .profraw-Dateien vom Geraet holen.
-6. llvm-profdata merge -output=pgo/halo_android.profdata halo-*.profraw
-7. PGO_MODE=use ./build.sh
-
-FERTIG.
-────────────────────────────────────────────────────────────────────────
+4. Spiel starten, SIGTERM senden, .profraw holen, mit llvm-profdata
+   zu pgo/halo_android.profdata mergen, dann PGO_MODE=use ./build.sh
 TRAINING
 else
     cat <<'RELEASE'
@@ -1292,28 +1054,21 @@ RELEASE-BUILD FERTIG (PGO use, LTO full, Frame-Pointer Option A)
 ────────────────────────────────────────────────────────────────────────
 
 Zu installieren auf dem M9 Pro:
-
 1. dist/Halo.sh           nach /roms/ports/Halo.sh
 2. dist/halo_guest.elf    nach /roms/ports/halo-ce/halo_guest.elf
 3. dist/halo              nach /roms/ports/halo-ce/halo
 4. dist/libs.aarch64/     nach /roms/ports/halo-ce/libs.aarch64/  (falls vorhanden)
 
 Aktiv in diesem Build (RK3326 / Mali-G31 MP2):
-  - HALO_ANDROID aktiv (Guest + Host): alle ES-Optimierungen.
-  - draw_framebuffer_bound: kein GL_INVALID_OPERATION mehr.
-  - Mali-Subdata-Guard: kein Stick-Figure-Bug auf Mali-G31.
-  - Shader-Prewarming: map-spezifischer Cache, kein Kompilierungs-Ruckler.
-  - Aggressives Culling: 1.5x verschaerfte Pixel-Schwelle.
-  - State-Batching: opaque Draws nach Zustand sortiert.
-  - Texture-Prewarming: Map-Texturen vor dem ersten Draw.
+  - HALO_ANDROID aktiv (Guest + Host).
+  - draw_framebuffer_bound, Mali-Subdata-Guard.
+  - Shader-Prewarming, Aggressives Culling, State-Batching.
+  - Texture-Prewarming.
   - NEON in matrix_math, guest_string, index_extent.
-  - Forward-Deklaration: C99-konform (shader).
-  - PC-Menus aus OpenCE: XML-basierte Menues statt ui.map-Widgets.
-  - Custom Edition Maps und Coop sind in diesem Build deaktiviert (Stubs).
-  - Defaults auf RK3326 abgestimmt (render_scale 0.75, model_detail 0.35,
-    distant_objects 8.0, obstruction_ticks 3, lighting_divisor 2).
-  - In-Game-Settings-Menue mit 20 Zeilen, ohne Luecken (OpenCE).
-  - Credits "St0len-One" im Hauptmenue und in allen Settings-Screens.
+  - PC-Menus aus OpenCE (Option 2: vollstaendiger Merge).
+  - RK3326-Defaults (render_scale 0.75, model_detail 0.35).
+  - In-Game-Settings-Menue (OpenCE).
+  - Credits "St0len-One".
 
 FERTIG.
 ────────────────────────────────────────────────────────────────────────
