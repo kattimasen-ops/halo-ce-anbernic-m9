@@ -11,6 +11,10 @@ set -euo pipefail
 #
 # Build laeuft mit `ninja -k 0`, damit ALLE Fehler einer Session im Log
 # erscheinen statt nur der erste.
+#
+# Host-Loader: Wird mit `zig cc` gegen glibc 2.31 gelinkt, damit er auf
+# dem M9 Pro (ArkOS, Ubuntu 20.04-Basis) laeuft und nicht die neueren
+# Symbole des Build-Runners (glibc 2.35) verlangt.
 # ══════════════════════════════════════════════════════════════════════
 PGO_MODE=${PGO_MODE:-use}
 
@@ -23,10 +27,10 @@ SDL3_TAG=release-3.2.10
 SDL2_TAG=release-2.30.10
 SDL2_ARCHIVE=https://github.com/libsdl-org/SDL/archive/refs/tags/$SDL2_TAG.tar.gz
 GUEST_CC=${GUEST_CC:-clang-22}
-HOST_CC=${HOST_CC:-aarch64-linux-gnu-gcc}
+HOST_CC=zig cc
+HOST_TARGET="aarch64-linux-gnu.2.31"
 JOBS=${JOBS:-$(nproc)}
 OPEN_CE_URL=${OPEN_CE_URL:-https://github.com/OpenCommunityEdition/OpenCE.git}
-GLIBC_VERSION_HEADER_URL=${GLIBC_VERSION_HEADER_URL:-https://github.com/wheybags/glibc_version_header.git}
 
 die() { echo "build.sh: $*" >&2; exit 1; }
 need() { command -v "$1" > /dev/null 2>&1 || die "$1 not found: $2"; }
@@ -37,7 +41,6 @@ need ninja "install ninja-build"
 need curl "install curl"
 need tar "install tar"
 need cmake "install cmake"
-need "$HOST_CC" "install gcc-aarch64-linux-gnu, or set HOST_CC"
 need "$GUEST_CC" "install clang-22 from apt.llvm.org, or set GUEST_CC"
 "$GUEST_CC" -print-targets 2> /dev/null | grep -q aarch64_32 ||
     die "$GUEST_CC has no arm64_32 (aarch64_32) target; use clang 22 from apt.llvm.org"
@@ -76,68 +79,35 @@ SRC=$WORK/halo-ce-universal
 OPENCE=$WORK/opence
 
 # ══════════════════════════════════════════════════════════════════════
-# glibc_version_header: portable Header fuer den Host-Loader
-#
-# Damit der Host-Loader auf dem M9 Pro (glibc 2.31) laeuft und nicht
-# die neueren Symbole des Build-Runners (glibc 2.35) verlangt. Das Repo
-# wheybags/glibc_version_header enthaelt pro glibc-Version einen Header
-# (version_headers/<X.Y>/glibc_version_header.h), NICHT pro Architektur.
+# Zig als Cross-Compiler installieren
 # ══════════════════════════════════════════════════════════════════════
-GLIBC_HEADER_DIR=$WORK/glibc_version_header
-GLIBC_HEADER_FILE=
+ZIG_VERSION="0.13.0"
+ZIG_DIR="$WORK/zig"
+ZIG_BIN="$ZIG_DIR/zig"
 
-fetch_glibc_version_header() {
-    if [ -n "$GLIBC_HEADER_FILE" ] && [ -f "$GLIBC_HEADER_FILE" ]; then
-        echo "== glibc_version_header bereits vorhanden: $GLIBC_HEADER_FILE"
+install_zig() {
+    if [ -x "$ZIG_BIN" ]; then
+        echo "== Zig bereits vorhanden: $ZIG_BIN"
         return 0
     fi
-    echo "== Hole glibc_version_header von $GLIBC_VERSION_HEADER_URL ..."
-    rm -rf "$GLIBC_HEADER_DIR"
-    if git clone --depth 1 "$GLIBC_VERSION_HEADER_URL" "$GLIBC_HEADER_DIR" > /dev/null 2>&1; then
-        echo "   + Git-Clone erfolgreich."
-    else
-        echo "   Git-Clone fehlgeschlagen, versuche Tarball ..."
-        rm -f "$WORK/glibc_version_header.tar.gz"
-        if ! curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 30 \
-            -o "$WORK/glibc_version_header.tar.gz" \
-            "$GLIBC_VERSION_HEADER_URL/archive/refs/heads/master.tar.gz"; then
-            die "Konnte glibc_version_header nicht laden."
-        fi
-        mkdir -p "$GLIBC_HEADER_DIR"
-        if ! tar -xzf "$WORK/glibc_version_header.tar.gz" -C "$GLIBC_HEADER_DIR" --strip-components=1; then
-            die "Konnte glibc_version_header-Tarball nicht entpacken."
-        fi
-        echo "   + Tarball erfolgreich."
+    echo "== Installiere Zig $ZIG_VERSION ..."
+    mkdir -p "$ZIG_DIR"
+    local url="https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz"
+    local tarball="$WORK/zig.tar.xz"
+    if ! curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 30 -o "$tarball" "$url"; then
+        die "Konnte Zig nicht herunterladen: $url"
     fi
-
-    # Struktur des Repos anzeigen (zur Sicherheit im Log)
-    if [ -d "$GLIBC_HEADER_DIR/version_headers" ]; then
-        echo "== Verfuegbare glibc-Versionen im Header-Repo:"
-        ls -1 "$GLIBC_HEADER_DIR/version_headers" 2>/dev/null | head -20 | sed 's/^/   /'
+    if ! tar -xJf "$tarball" -C "$ZIG_DIR" --strip-components=1; then
+        die "Konnte Zig nicht entpacken."
     fi
-
-    # Der Header liegt nach glibc-Version sortiert, nicht nach Architektur.
-    # Wir suchen die passende Version (2.31 fuer den M9 Pro, dann etwas
-    # aelter als Fallback).
-    for ver in 2.31 2.30 2.28 2.26 2.17; do
-        candidate="$GLIBC_HEADER_DIR/version_headers/$ver/glibc_version_header.h"
-        if [ -f "$candidate" ]; then
-            GLIBC_HEADER_FILE="$candidate"
-            echo "== glibc_version_header bereit: $GLIBC_HEADER_FILE"
-            return 0
-        fi
-    done
-
-    # Fallback: die erste gefundene Version
-    candidate=$(find "$GLIBC_HEADER_DIR/version_headers" -name "glibc_version_header.h" 2>/dev/null | sort -V | tail -n 1)
-    if [ -n "$candidate" ] && [ -f "$candidate" ]; then
-        GLIBC_HEADER_FILE="$candidate"
-        echo "== glibc_version_header bereit (Fallback): $GLIBC_HEADER_FILE"
-        return 0
+    rm -f "$tarball"
+    if [ ! -x "$ZIG_BIN" ]; then
+        die "Zig-Binary nicht gefunden nach dem Entpacken: $ZIG_BIN"
     fi
-
-    die "glibc_version_header.h nicht gefunden. Verzeichnis: $GLIBC_HEADER_DIR/version_headers/"
+    echo "== Zig installiert: $ZIG_BIN ($($ZIG_BIN version))"
 }
+
+install_zig
 
 # ── OpenCE-Dateien holen (nur die, die wir brauchen) ─────────────────
 fetch_opence_files() {
@@ -283,7 +253,8 @@ if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
     mkdir -p "$SDL3_BUILD" "$SDL3_INSTALL"
     cmake -S "$SDL3_SRC" -B "$SDL3_BUILD" \
         -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
-        -DCMAKE_C_COMPILER="$HOST_CC" \
+        -DCMAKE_C_COMPILER="$ZIG_BIN" -DCMAKE_C_COMPILER_ARG1=cc \
+        -DCMAKE_C_FLAGS="-target $HOST_TARGET" \
         -DCMAKE_FIND_ROOT_PATH=/usr/aarch64-linux-gnu \
         -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
         -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
@@ -376,7 +347,8 @@ PATCH_EOF
 
     cmake -S "$SDL2_SRC" -B "$SDL2_BUILD" \
         -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
-        -DCMAKE_C_COMPILER="$HOST_CC" \
+        -DCMAKE_C_COMPILER="$ZIG_BIN" -DCMAKE_C_COMPILER_ARG1=cc \
+        -DCMAKE_C_FLAGS="-target $HOST_TARGET" \
         -DCMAKE_FIND_ROOT_PATH=/usr/aarch64-linux-gnu \
         -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
         -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
@@ -410,13 +382,6 @@ fi
 export SDL2_INCLUDE="$SDL2_INSTALL/include"
 [ -f "$SDL2_INCLUDE/SDL2/SDL.h" ] || die "SDL2_INCLUDE=$SDL2_INCLUDE enthaelt kein SDL2/SDL.h"
 echo "== SDL2_INCLUDE=$SDL2_INCLUDE"
-
-# ══════════════════════════════════════════════════════════════════════
-# glibc_version_header holen (fuer den Host-Loader)
-# ══════════════════════════════════════════════════════════════════════
-fetch_glibc_version_header
-export GLIBC_VERSION_HEADER="$GLIBC_HEADER_FILE"
-echo "== GLIBC_VERSION_HEADER=$GLIBC_VERSION_HEADER"
 
 # ══════════════════════════════════════════════════════════════════════
 # Upstream klonen + Knulli-Patch + OpenCE-Dateien
@@ -1007,7 +972,7 @@ stamp=$({
     done
     [ -f "$HERE/pgo/halo_linux.profdata" ] && sha256sum "$HERE/pgo/halo_linux.profdata" | cut -d' ' -f1
     echo "pgo-mode=$PGO_MODE"
-    echo "settings-only=v6"
+    echo "settings-only=v7"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 echo "$stamp" > "$SRC/.port-stamp"
@@ -1015,8 +980,9 @@ echo "$stamp" > "$SRC/.port-stamp"
 # ══════════════════════════════════════════════════════════════════════
 # Build
 # ══════════════════════════════════════════════════════════════════════
-export ANDROID_NDK SYSROOT_LIB SDL2_INCLUDE GUEST_CC HOST_CC JOBS
-export GLIBC_VERSION_HEADER
+export ANDROID_NDK SYSROOT_LIB SDL2_INCLUDE GUEST_CC JOBS
+export HOST_CC HOST_TARGET
+export PATH="$ZIG_DIR:$PATH"
 cd "$SRC"
 
 echo "== Konfiguriere mit $LTO_FLAG $PGO_FLAG $PGO_EXTRA_ARGS ..."
