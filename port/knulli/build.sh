@@ -70,6 +70,10 @@ link_library() {
         echo "build.sh: no $pattern in SYSROOT_LIB=$SYSROOT_LIB" >&2
         return 1
     fi
+    # settings_only: link_library_robust — erst die (evtl. kaputte) Symlink
+    # ENTFERNEN, dann die echte Datei kopieren. Ohne rm -f kann cp -Lf durch
+    # eine bestehende Symlink schreiben und eine leere Zieldatei hinterlassen.
+    # (Der aarch64-Cross-BFD-ld meldet dann "file too short".)
     rm -f "$OUT/lib/$linkname" "$OUT/lib/$linkname.0" "$OUT/lib/$linkname.tmp"
     if ! ln "$library" "$OUT/lib/$linkname" 2>/dev/null; then
         cp -L "$library" "$OUT/lib/$linkname" || {
@@ -89,8 +93,8 @@ link_library() {
 
 link_library "libSDL2*"  "libSDL2.so"    || exit 1
 link_library "libSDL3*"  "libSDL3.so"    || exit 1
-link_library "libmali*"  "libmali.so"    || exit 1
 link_library "libdecor*" "libdecor.so"   || exit 1
+# libmali wird NICHT über die link_library-Funktion verlinkt (siehe unten).
 
 CFLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -fPIC -Wall -Wno-unused-function \
         -D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS \
@@ -165,12 +169,14 @@ compile build/android/host/host_import_table.c
 echo "LINK $OUT/halo (dynamisch)"
 $CC -o "$OUT/halo" $objects \
     -L"$OUT/lib" \
+    -L"$OUT/libs.aarch64" \
     -Wl,-rpath-link,"$OUT/lib" \
+    -Wl,-rpath-link,"$OUT/libs.aarch64" \
     -Wl,--allow-shlib-undefined \
     -Wl,--unresolved-symbols=ignore-all \
     -Wl,-O1 -Wl,--as-needed -Wl,--gc-sections \
     -flto \
-    -lSDL2 -lmali -lpthread -ldl -lm
+    -lSDL2 "-l:libmali.so.0" -lpthread -ldl -lm
 
 cp build/android/halo_guest.elf "$OUT/halo_guest.elf"
 
