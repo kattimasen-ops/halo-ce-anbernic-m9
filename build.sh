@@ -5,31 +5,9 @@ set -euo pipefail
 # Halo CE Universal — M9 Pro (RK3326 / Cortex-A35 + Mali-G31 MP2)
 #
 # Settings-Only: Knulli-Patch wie bisher, dazu das PC-Settings-Menue aus
-# OpenCE (menu_files.c, menu_tags.c, halo_menus.h, Expat, ce_menus.py,
-# port_settings.py, XML-Assets) plus eine reduzierte menu_functions.c,
-# die nur die Settings-Callbacks bereitstellt.
-#
-# Patch-Kette (Reihenfolge ist wichtig!):
-#   1. Knulli-Patch (monolithisch)
-#   2. OpenCE-Menue-Dateien kopieren + reduzierte menu_functions.c
-#   3. patch_settings_only.py (Hooks + Solo-Pause-Patch)
-#   4. patch_memory_pools         — Debug-Allocator aus, __thread-Arrays
-#   5. patch_neon_math            — NEON in matrix_math + guest_string
-#   6. patch_vita_optimizations   — Vita-Port-Ideen (LOD, Lighting, Sound)
-#   7. patch_button_remap         — A/B/X/Y-Tausch
-#   8. patch_index_extent_neon    — NEON fuer index_extent
-#   9. patch_fps_overlay          — In-Game-FPS-Overlay
-#  10. patch_draw_framebuffer_bound — GL_INVALID_OPERATION-Fix
-#  11. patch_mali_subdata         — Mali-G31 Mirror-Subdata-Guard
-#  12. patch_shader_prewarm       — Offline-Shader-Cache + Prewarming
-#  13. patch_aggressive_culling   — Aggressives Objekt-Culling
-#  14. patch_state_batching       — Render-Command-Batching
-#  15. patch_texture_prewarm      — Texture-Prewarming beim Map-Load
-#  16. patch_settings_menu        — In-Game-Settings-Menue (13 Zeilen)
-#  17. patch_config_defaults      — RK3326-abgestimmte Defaults
-#  18. patch_credits              — St0len-One-Credits
-#  19. patch_credits_xml          — Credits-Wasserzeichen in statische XMLs
-#  20. patch_forward_declarations — C99-Forward-Deklarationen (shader)
+# OpenCE (menu_files.c, menu_tags.c, halo_menus.h, hud_hires.c/.h, Expat,
+# ce_menus.py, port_settings.py, XML-Assets) plus eine reduzierte
+# menu_functions.c, die nur die Settings-Callbacks bereitstellt.
 #
 # Build laeuft mit `ninja -k 0`, damit ALLE Fehler einer Session im Log
 # erscheinen statt nur der erste.
@@ -137,6 +115,16 @@ fetch_opence_files() {
             echo "   + $f"
         else
             die "OpenCE hat $f nicht."
+        fi
+    done
+
+    # 1b. hud_hires: OpenCE-Version (mit point_threshold-Feld in
+    # hud_hires_embedded — passt zur OpenCE-Version von
+    # tools/embed_assets.py)
+    for f in port/linux/src/hud_hires.c port/linux/src/hud_hires.h; do
+        if [ -f "$opence_dir/$f" ]; then
+            cp "$opence_dir/$f" "$SRC/$f"
+            echo "   + $f (OpenCE-Version)"
         fi
     done
 
@@ -865,11 +853,14 @@ check_file  "port/linux/src/menu_files.c"                                       
 check_file  "port/linux/game/menu_tags.c"                                       "menu_tags.c"
 check_file  "port/linux/game/menu_functions.c"                                  "menu_functions.c"
 check_file  "port/third_party/expat/expat.h"                                    "expat.h"
+check_file  "port/linux/src/hud_hires.c"                                        "hud_hires.c (OpenCE)"
+check_file  "port/linux/src/hud_hires.h"                                        "hud_hires.h (OpenCE)"
 check_patch "source/interface/ui_widget.c"      "pc_menu_tag"                   "ui_widget.c pc_menu_tag extern"
 check_patch "source/interface/ui_widget_event_handler_functions.c" "PC_MENU_FUNCTION_BASE" "ui_widget_event_handler_functions.c Dispatcher"
 check_patch "source/interface/ui_widget_event_handler_functions.c" "ui_widget_event_handler_function_name" "ui_widget_event_handler_functions.c Name-Lookup"
 check_patch "source/cache/cache_files.c"        "cache_files_tag_instances"     "cache_files.c Accessors"
 check_patch "source/cache/cache_files.c"        "menu_tags_loaded"              "cache_files.c Menue-Hooks"
+check_patch "port/linux/src/menu_files.c"       "settings_only: externals"      "menu_files.c externals"
 check_patch "tools/linux_build.py"              "EXPAT_DIR"                     "linux_build.py Expat"
 check_patch "tools/android_build.py"            "EXPAT_DIR"                     "android_build.py Expat"
 
@@ -958,9 +949,6 @@ python3 configure.py --release "$LTO_FLAG" "$PGO_FLAG" $PGO_EXTRA_ARGS \
     --android-ndk "$ANDROID_NDK" --android-guest-cc "$GUEST_CC"
 
 echo "== Baue Guest-ELF (halo_guest.elf) — mit -k 0 (alle Fehler sammeln) ..."
-# -k 0: ninja laeuft weiter, auch wenn Dateien fehlschlagen. Damit
-# erscheinen ALLE Kompilierfehler im Log, nicht nur der erste.
-# || true: bash bricht nicht ab; der Build laeuft bis zum ninja-Ende.
 ninja -j "$JOBS" -k 0 build/android/halo_guest.elf || true
 
 echo "== Baue Host-Binary (halo) ueber port/knulli/build.sh ..."
@@ -1014,6 +1002,13 @@ Installation auf M9 Pro (wenn halo_guest.elf existiert):
 2. dist/halo_guest.elf    nach /roms/ports/halo-ce/halo_guest.elf
 3. dist/halo              nach /roms/ports/halo-ce/halo
 4. dist/libs.aarch64/     nach /roms/ports/halo-ce/libs.aarch64/
+
+Settings-Menue erreichbar:
+- In der Kampagne: Pause-Taste druecken, dann SETTINGS.
+- In Multiplayer-Maps: Pause-Taste druecken, dann SETTINGS.
+- Direkt beim Start: HALO_MENU_OPEN="main_menu/settings_select/
+  player_setup/player_profile_edit/video_settings/video_settings_screen"
+  in Halo.sh setzen.
 
 FERTIG.
 ────────────────────────────────────────────────────────────────────────
