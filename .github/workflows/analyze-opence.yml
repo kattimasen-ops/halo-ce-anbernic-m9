@@ -1,0 +1,291 @@
+name: Analyze OpenCE Fork
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/analyze-opence.yml'
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: "Checkout port repo"
+        uses: actions/checkout@v4
+        with:
+          path: port-repo
+
+      - name: "Clone OpenCE"
+        run: |
+          git clone --depth 1 https://github.com/OpenCommunityEdition/OpenCE.git opence
+          cd opence
+          echo "== OpenCE HEAD =="
+          git rev-parse HEAD
+          git log --oneline -3
+
+      - name: "Clone upstream at our pinned commit"
+        run: |
+          UPSTREAM_COMMIT=$(tr -d '[:space:]' < port-repo/UPSTREAM_COMMIT)
+          echo "Pinned upstream commit: $UPSTREAM_COMMIT"
+          git init upstream
+          cd upstream
+          git remote add origin https://github.com/cybersecurity/halo-ce-universal.git
+          git fetch -q --depth 1 origin "$UPSTREAM_COMMIT"
+          git checkout -q FETCH_HEAD
+
+      - name: "Section 01 - OpenCE tree"
+        run: |
+          REPORT="$GITHUB_WORKSPACE/opence-analysis.txt"
+          {
+            echo "================================================================"
+            echo "OPENCE ANALYSIS"
+            echo "Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "Pinned upstream commit: $(cat port-repo/UPSTREAM_COMMIT)"
+            echo "================================================================"
+            echo ""
+            echo "==== SECTION 01 - OPENCE TREE ===="
+            echo ""
+            echo "--- opence/port/linux (3 levels) ---"
+            find opence/port/linux -maxdepth 3 -type f -printf '%10s  %p\n' 2>/dev/null | sort -k2 | head -300 || true
+            echo ""
+            echo "--- opence/port/linux/game ---"
+            ls -la opence/port/linux/game/ 2>&1 || echo "(not found)"
+            echo ""
+            echo "--- opence/port/linux/src ---"
+            ls -la opence/port/linux/src/ 2>&1 || echo "(not found)"
+            echo ""
+            echo "--- opence/port/linux/include ---"
+            ls -la opence/port/linux/include/ 2>&1 || echo "(not found)"
+            echo ""
+            echo "--- opence/port/third_party ---"
+            ls -la opence/port/third_party/ 2>&1 || echo "(not found)"
+            echo ""
+            echo "--- opence/tools ---"
+            ls -la opence/tools/ 2>&1 || echo "(not found)"
+            echo ""
+            echo "--- opence/port/assets ---"
+            ls -la opence/port/assets/ 2>&1 || echo "(not found)"
+            echo ""
+            echo "--- opence/port/assets/menus (top) ---"
+            ls -la opence/port/assets/menus/ 2>&1 || echo "(not found)"
+            echo ""
+          } > "$REPORT"
+
+      - name: "Section 02 - new files in OpenCE (not in upstream)"
+        run: |
+          REPORT="$GITHUB_WORKSPACE/opence-analysis.txt"
+          {
+            echo "==== SECTION 02 - FILES IN OPENCE NOT IN UPSTREAM ===="
+            echo ""
+            echo "--- new files under port/linux ---"
+            ( cd opence && find port/linux -type f | sort ) > /tmp/opence-files.txt
+            ( cd upstream && find port/linux -type f | sort ) > /tmp/upstream-files.txt
+            comm -23 /tmp/opence-files.txt /tmp/upstream-files.txt | sed 's|^|+ |' || true
+            echo ""
+            echo "--- new files under tools ---"
+            ( cd opence && find tools -type f | sort ) > /tmp/opence-tools.txt
+            ( cd upstream && find tools -type f | sort ) > /tmp/upstream-tools.txt
+            comm -23 /tmp/opence-tools.txt /tmp/upstream-tools.txt | sed 's|^|+ |' || true
+            echo ""
+            echo "--- new files under source/interface ---"
+            ( cd opence && find source/interface -type f | sort ) > /tmp/opence-iface.txt
+            ( cd upstream && find source/interface -type f | sort ) > /tmp/upstream-iface.txt
+            comm -23 /tmp/opence-iface.txt /tmp/upstream-iface.txt | sed 's|^|+ |' || true
+            echo ""
+            echo "--- new files under source/cache ---"
+            ( cd opence && find source/cache -type f | sort ) > /tmp/opence-cache.txt
+            ( cd upstream && find source/cache -type f | sort ) > /tmp/upstream-cache.txt
+            comm -23 /tmp/opence-cache.txt /tmp/upstream-cache.txt | sed 's|^|+ |' || true
+            echo ""
+            echo "--- files in upstream but removed in OpenCE ---"
+            comm -13 /tmp/opence-files.txt /tmp/upstream-files.txt | sed 's|^- |x |' || true
+            echo ""
+          } >> "$REPORT"
+
+      - name: "Section 03 - diff of ui_widget.c (the menu hooks)"
+        run: |
+          REPORT="$GITHUB_WORKSPACE/opence-analysis.txt"
+          {
+            echo "==== SECTION 03 - DIFF source/interface/ui_widget.c ===="
+            echo ""
+            echo "--- file sizes ---"
+            wc -l upstream/source/interface/ui_widget.c opence/source/interface/ui_widget.c 2>&1 || true
+            echo ""
+            echo "--- unified diff (context 3, no headers) ---"
+            diff -u upstream/source/interface/ui_widget.c opence/source/interface/ui_widget.c 2>&1 | head -2000 || true
+            echo ""
+            echo "--- END OF DIFF ---"
+            echo ""
+          } >> "$REPORT"
+
+      - name: "Section 04 - diff of ui_widget_event_handler_functions.c"
+        run: |
+          REPORT="$GITHUB_WORKSPACE/opence-analysis.txt"
+          {
+            echo "==== SECTION 04 - DIFF ui_widget_event_handler_functions.c ===="
+            echo ""
+            wc -l upstream/source/interface/ui_widget_event_handler_functions.c opence/source/interface/ui_widget_event_handler_functions.c 2>&1 || true
+            echo ""
+            diff -u upstream/source/interface/ui_widget_event_handler_functions.c opence/source/interface/ui_widget_event_handler_functions.c 2>&1 | head -1500 || true
+            echo ""
+            echo "--- END OF DIFF ---"
+            echo ""
+          } >> "$REPORT"
+
+      - name: "Section 05 - diff of cache_files.c and main.c"
+        run: |
+          REPORT="$GITHUB_WORKSPACE/opence-analysis.txt"
+          {
+            echo "==== SECTION 05 - DIFF cache_files.c AND main.c ===="
+            echo ""
+            echo "--- cache_files.c size ---"
+            wc -l upstream/source/cache/cache_files.c opence/source/cache/cache_files.c 2>&1 || true
+            echo ""
+            echo "--- diff cache_files.c ---"
+            diff -u upstream/source/cache/cache_files.c opence/source/cache/cache_files.c 2>&1 | head -800 || true
+            echo ""
+            echo "--- main.c size ---"
+            wc -l upstream/source/main/main.c opence/source/main/main.c 2>&1 || true
+            echo ""
+            echo "--- diff main.c ---"
+            diff -u upstream/source/main/main.c opence/source/main/main.c 2>&1 | head -1500 || true
+            echo ""
+            echo "--- END OF DIFF ---"
+            echo ""
+          } >> "$REPORT"
+
+      - name: "Section 06 - diff of port.json, linux_build.py, android_build.py"
+        run: |
+          REPORT="$GITHUB_WORKSPACE/opence-analysis.txt"
+          {
+            echo "==== SECTION 06 - DIFF BUILD REGISTRATION ===="
+            echo ""
+            echo "--- diff port/linux/port.json ---"
+            diff -u upstream/port/linux/port.json opence/port/linux/port.json 2>&1 | head -200 || true
+            echo ""
+            echo "--- diff tools/linux_build.py ---"
+            diff -u upstream/tools/linux_build.py opence/tools/linux_build.py 2>&1 | head -1500 || true
+            echo ""
+            echo "--- diff tools/android_build.py ---"
+            diff -u upstream/tools/android_build.py opence/tools/android_build.py 2>&1 | head -2000 || true
+            echo ""
+            echo "--- diff tools/embed_assets.py ---"
+            diff -u upstream/tools/embed_assets.py opence/tools/embed_assets.py 2>&1 | head -400 || true
+            echo ""
+          } >> "$REPORT"
+
+      - name: "Section 07 - ui_widget_port_* signatures"
+        run: |
+          REPORT="$GITHUB_WORKSPACE/opence-analysis.txt"
+          {
+            echo "==== SECTION 07 - ui_widget_port_* SIGNATURES ===="
+            echo ""
+            echo "--- all ui_widget_port_ references in OpenCE ---"
+            grep -rn 'ui_widget_port_' opence/source/ opence/port/ --include='*.c' --include='*.h' 2>/dev/null | head -200 || true
+            echo ""
+            echo "--- all pc_menu_ references ---"
+            grep -rn 'pc_menu_' opence/source/ opence/port/ --include='*.c' --include='*.h' 2>/dev/null | head -100 || true
+            echo ""
+            echo "--- all menu_tags_ references ---"
+            grep -rn 'menu_tags_' opence/source/ opence/port/ --include='*.c' --include='*.h' 2>/dev/null | head -40 || true
+            echo ""
+            echo "--- all pc_menus_ references ---"
+            grep -rn 'pc_menus_' opence/source/ opence/port/ --include='*.c' --include='*.h' 2>/dev/null | head -40 || true
+            echo ""
+            echo "--- all cache_files_tag_instances references ---"
+            grep -rn 'cache_files_tag_instances\|cache_files_set_tag_instances' opence/source/ opence/port/ --include='*.c' --include='*.h' 2>/dev/null | head -40 || true
+            echo ""
+          } >> "$REPORT"
+
+      - name: "Section 08 - full new files from OpenCE (menu system)"
+        run: |
+          REPORT="$GITHUB_WORKSPACE/opence-analysis.txt"
+          {
+            echo "==== SECTION 08 - FULL NEW FILES (menu system) ===="
+            echo ""
+            for f in \
+              port/linux/game/menu_tags.c \
+              port/linux/game/menu_functions.c \
+              port/linux/game/custom_edition_cache.c \
+              port/linux/game/custom_edition_cache.h \
+              port/linux/game/custom_edition_maps.c \
+              port/linux/game/custom_edition_maps.h \
+              port/linux/src/menu_files.c \
+              port/linux/src/menu_files.h \
+              port/linux/include/halo_menus.h \
+              ; do
+              if [ -f "opence/$f" ]; then
+                echo "----- BEGIN $f ($(wc -l < opence/$f) lines) -----"
+                head -50 "opence/$f" 2>&1 || true
+                echo "... (first 50 lines shown)"
+                echo "----- END $f -----"
+                echo ""
+              else
+                echo "----- $f MISSING IN OPENCE -----"
+                echo ""
+              fi
+            done
+          } >> "$REPORT"
+
+      - name: "Section 09 - expat presence and OpenCE third_party"
+        run: |
+          REPORT="$GITHUB_WORKSPACE/opence-analysis.txt"
+          {
+            echo "==== SECTION 09 - EXPAT AND THIRD_PARTY ===="
+            echo ""
+            echo "--- opence/port/third_party top level ---"
+            ls -la opence/port/third_party/ 2>&1 || echo "(not found)"
+            echo ""
+            echo "--- expat directory ---"
+            ls -la opence/port/third_party/expat/ 2>&1 || echo "(not found)"
+            echo ""
+            echo "--- does OpenCE include expat as a git submodule? ---"
+            cat opence/.gitmodules 2>&1 || echo "(no .gitmodules)"
+            echo ""
+            echo "--- where is expat source located ---"
+            find opence -maxdepth 4 -type d -name 'expat*' 2>/dev/null || true
+            find opence -maxdepth 4 -name 'expat.h' 2>/dev/null || true
+            echo ""
+          } >> "$REPORT"
+
+      - name: "Section 10 - menu_functions.c call surface (functions it needs)"
+        run: |
+          REPORT="$GITHUB_WORKSPACE/opence-analysis.txt"
+          {
+            echo "==== SECTION 10 - WHAT menu_functions.c AND menu_tags.c NEED ===="
+            echo ""
+            echo "--- every function declared in menu_functions.c ---"
+            grep -n '^[a-zA-Z_][a-zA-Z0-9_ ]*(' opence/port/linux/game/menu_functions.c 2>/dev/null | head -80 || true
+            echo ""
+            echo "--- every external function menu_functions.c calls ---"
+            grep -oE '\b(ui_widget_port_[a-z_]+|pc_menu_[a-z_]+|menu_tags_[a-z_]+|custom_edition_[a-z_]+|playlist_profile_[a-z_]+|player_profile_[a-z_]+|player_ui_[a-z_]+|p2p_[a-z_]+)\b' \
+              opence/port/linux/game/menu_functions.c 2>/dev/null | sort -u || true
+            echo ""
+            echo "--- every external function menu_tags.c calls ---"
+            grep -oE '\b(ui_widget_port_[a-z_]+|pc_menu_[a-z_]+|menu_tags_[a-z_]+|custom_edition_[a-z_]+|cache_files_[a-z_]+|tag_[a-z_]+|bitmap_group_[a-z_]+|rasterizer_bitmap_[a-z_]+)\b' \
+              opence/port/linux/game/menu_tags.c 2>/dev/null | sort -u || true
+            echo ""
+            echo "--- END ---"
+            echo ""
+          } >> "$REPORT"
+
+      - name: "Section 11 - upload"
+        run: |
+          REPORT="$GITHUB_WORKSPACE/opence-analysis.txt"
+          {
+            echo ""
+            echo "================================================================"
+            echo "END OF OPENCE REPORT"
+            echo "Size: $(stat -c%s "$REPORT") bytes, $(wc -l < "$REPORT") lines"
+            echo "================================================================"
+          } >> "$REPORT"
+          echo "Report ready."
+
+      - name: "Upload opence report"
+        uses: actions/upload-artifact@v4
+        with:
+          name: opence-analysis
+          path: opence-analysis.txt
+          retention-days: 30
+          if-no-files-found: error
