@@ -77,12 +77,17 @@ OPENCE=$WORK/opence
 
 # ══════════════════════════════════════════════════════════════════════
 # glibc_version_header: portable Header fuer den Host-Loader
+#
+# Damit der Host-Loader auf dem M9 Pro (glibc 2.31) laeuft und nicht
+# die neueren Symbole des Build-Runners (glibc 2.35) verlangt. Das Repo
+# wheybags/glibc_version_header enthaelt pro glibc-Version einen Header
+# (version_headers/<X.Y>/glibc_version_header.h), NICHT pro Architektur.
 # ══════════════════════════════════════════════════════════════════════
 GLIBC_HEADER_DIR=$WORK/glibc_version_header
-GLIBC_HEADER_FILE=$GLIBC_HEADER_DIR/version_headers/aarch64/glibc_version_header.h
+GLIBC_HEADER_FILE=
 
 fetch_glibc_version_header() {
-    if [ -f "$GLIBC_HEADER_FILE" ]; then
+    if [ -n "$GLIBC_HEADER_FILE" ] && [ -f "$GLIBC_HEADER_FILE" ]; then
         echo "== glibc_version_header bereits vorhanden: $GLIBC_HEADER_FILE"
         return 0
     fi
@@ -92,19 +97,46 @@ fetch_glibc_version_header() {
         echo "   + Git-Clone erfolgreich."
     else
         echo "   Git-Clone fehlgeschlagen, versuche Tarball ..."
+        rm -f "$WORK/glibc_version_header.tar.gz"
         if ! curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 30 \
             -o "$WORK/glibc_version_header.tar.gz" \
             "$GLIBC_VERSION_HEADER_URL/archive/refs/heads/master.tar.gz"; then
             die "Konnte glibc_version_header nicht laden."
         fi
         mkdir -p "$GLIBC_HEADER_DIR"
-        tar -xzf "$WORK/glibc_version_header.tar.gz" -C "$GLIBC_HEADER_DIR" --strip-components=1
+        if ! tar -xzf "$WORK/glibc_version_header.tar.gz" -C "$GLIBC_HEADER_DIR" --strip-components=1; then
+            die "Konnte glibc_version_header-Tarball nicht entpacken."
+        fi
         echo "   + Tarball erfolgreich."
     fi
-    if [ ! -f "$GLIBC_HEADER_FILE" ]; then
-        die "glibc_version_header.h fuer aarch64 nicht gefunden: $GLIBC_HEADER_FILE"
+
+    # Struktur des Repos anzeigen (zur Sicherheit im Log)
+    if [ -d "$GLIBC_HEADER_DIR/version_headers" ]; then
+        echo "== Verfuegbare glibc-Versionen im Header-Repo:"
+        ls -1 "$GLIBC_HEADER_DIR/version_headers" 2>/dev/null | head -20 | sed 's/^/   /'
     fi
-    echo "== glibc_version_header bereit: $GLIBC_HEADER_FILE"
+
+    # Der Header liegt nach glibc-Version sortiert, nicht nach Architektur.
+    # Wir suchen die passende Version (2.31 fuer den M9 Pro, dann etwas
+    # aelter als Fallback).
+    for ver in 2.31 2.30 2.28 2.26 2.17; do
+        candidate="$GLIBC_HEADER_DIR/version_headers/$ver/glibc_version_header.h"
+        if [ -f "$candidate" ]; then
+            GLIBC_HEADER_FILE="$candidate"
+            echo "== glibc_version_header bereit: $GLIBC_HEADER_FILE"
+            return 0
+        fi
+    done
+
+    # Fallback: die erste gefundene Version
+    candidate=$(find "$GLIBC_HEADER_DIR/version_headers" -name "glibc_version_header.h" 2>/dev/null | sort -V | tail -n 1)
+    if [ -n "$candidate" ] && [ -f "$candidate" ]; then
+        GLIBC_HEADER_FILE="$candidate"
+        echo "== glibc_version_header bereit (Fallback): $GLIBC_HEADER_FILE"
+        return 0
+    fi
+
+    die "glibc_version_header.h nicht gefunden. Verzeichnis: $GLIBC_HEADER_DIR/version_headers/"
 }
 
 # ── OpenCE-Dateien holen (nur die, die wir brauchen) ─────────────────
