@@ -70,8 +70,10 @@ link_library() {
         echo "build.sh: no $pattern in SYSROOT_LIB=$SYSROOT_LIB" >&2
         return 1
     fi
-    ln -sf "$library" "$OUT/lib/$linkname"
-    echo "  linked $linkname -> $(basename "$library")"
+    # settings_only: link_library_cp — echte Kopie statt Symlink,
+    # sonst meldet der BFD-ld "file too short" beim Linken.
+    cp -Lf "$library" "$OUT/lib/$linkname"
+    echo "  copied $linkname <- $(basename "$library")"
     return 0
 }
 
