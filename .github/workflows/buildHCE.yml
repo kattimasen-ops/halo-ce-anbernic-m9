@@ -134,7 +134,7 @@ jobs:
           bash build.sh 2>&1 | tee build.log
 
       - name: "Fehleranalyse sammeln"
-        if: failure()
+        if: always()
         run: |
           set +e
           {
@@ -146,39 +146,51 @@ jobs:
             echo "Repo: ${{ github.repository }}"
             echo "Commit: ${{ github.sha }}"
             echo ""
-            echo "--- Letzte 300 Zeilen build.log ---"
-            tail -n 300 build.log 2>/dev/null || echo "(kein build.log)"
+            echo "════════════════════════════════════════════════════════════"
+            echo "1. ALLE error:-Zeilen (mit Zeilennummer aus build.log)"
+            echo "════════════════════════════════════════════════════════════"
+            grep -nE "error:|error :|fatal error:|FAILED:" build.log 2>/dev/null | head -500 || echo "(keine error-Zeilen)"
             echo ""
-            echo "--- Erste 300 Fehlerzeilen aus build.log ---"
-            grep -E "error:|FEHLER|FAILED|Traceback|ninja: build stopped|does not apply|conflict" build.log 2>/dev/null | head -300 || true
+            echo "════════════════════════════════════════════════════════════"
+            echo "2. Jede error:-Zeile mit 5 Zeilen Kontext danach"
+            echo "════════════════════════════════════════════════════════════"
+            grep -nA5 "error:" build.log 2>/dev/null | head -3000 || echo "(keine error-Zeilen)"
             echo ""
-            echo "--- Inhalt rej/ (falls vorhanden) ---"
+            echo "════════════════════════════════════════════════════════════"
+            echo "3. Alle Fehlerklassen-Zusammenfassung (gezaehlt)"
+            echo "════════════════════════════════════════════════════════════"
+            echo "  undefined reference:  $(grep -c "undefined reference" build.log 2>/dev/null || echo 0)"
+            echo "  undeclared identifier: $(grep -c "use of undeclared identifier" build.log 2>/dev/null || echo 0)"
+            echo "  implicit declaration: $(grep -c "implicit-function-declaration" build.log 2>/dev/null || echo 0)"
+            echo "  no member named:       $(grep -c "no member named" build.log 2>/dev/null || echo 0)"
+            echo "  incompatible:          $(grep -c "incompatible" build.log 2>/dev/null || echo 0)"
+            echo "  conflicting types:     $(grep -c "conflicting types" build.log 2>/dev/null || echo 0)"
+            echo "  fatal error:           $(grep -c "fatal error:" build.log 2>/dev/null || echo 0)"
+            echo "  FAILED:                $(grep -c "^FAILED:" build.log 2>/dev/null || echo 0)"
+            echo ""
+            echo "════════════════════════════════════════════════════════════"
+            echo "4. Alle betroffenen Dateien (unique)"
+            echo "════════════════════════════════════════════════════════════"
+            grep -oE "^[a-zA-Z0-9_/.-]+\.c:[0-9]+:[0-9]+: error:" build.log 2>/dev/null \
+              | cut -d: -f1 | sort -u || echo "(keine Dateien)"
+            echo ""
+            echo "════════════════════════════════════════════════════════════"
+            echo "5. Letzte 500 Zeilen build.log (Kontext)"
+            echo "════════════════════════════════════════════════════════════"
+            tail -n 500 build.log 2>/dev/null || echo "(kein build.log)"
+            echo ""
+            echo "════════════════════════════════════════════════════════════"
+            echo "6. ninja-Status am Ende"
+            echo "════════════════════════════════════════════════════════════"
+            tail -n 30 build.log 2>/dev/null | grep -E "ninja|FAILED|stopped" || true
+            echo ""
+            echo "════════════════════════════════════════════════════════════"
+            echo "7. Inhalt rej/ (falls vorhanden)"
+            echo "════════════════════════════════════════════════════════════"
             if [ -d rej ]; then
               find rej -type f -printf '%10s  %p\n' 2>/dev/null | sort -k2 || true
             else
               echo "(kein rej/)"
-            fi
-            echo ""
-            echo "--- Unmerged paths / Konflikte ---"
-            if [ -f rej/unmerged.txt ]; then
-              cat rej/unmerged.txt
-            else
-              echo "(keine unmerged.txt)"
-            fi
-            echo ""
-            echo "--- opence-apply.log (falls vorhanden) ---"
-            if [ -f rej/opence-apply.log ]; then
-              tail -n 200 rej/opence-apply.log
-            else
-              echo "(kein opence-apply.log)"
-            fi
-            echo ""
-            echo "--- Zwischenstand der .o/.rej/.orig-Dateien ---"
-            find work -maxdepth 6 \( -name "*.o" -o -name "*.rej" -o -name "*.orig" \) 2>/dev/null | head -80 || true
-            echo ""
-            echo "--- Work-Verzeichnisstruktur (falls vorhanden) ---"
-            if [ -d work ]; then
-              find work -maxdepth 2 -type d 2>/dev/null | head -60 || true
             fi
             echo ""
             echo "════════════════════════════════════════════════════════════"
@@ -188,9 +200,10 @@ jobs:
           cp build-error-analysis.txt rej/ 2>/dev/null || true
           cp build.log rej/ 2>/dev/null || true
           echo "Analyse geschrieben: build-error-analysis.txt"
+          echo "Groesse: $(stat -c%s build-error-analysis.txt 2>/dev/null) Bytes"
 
-      - name: "Upload Konflikt- und Fehleranalyse (bei Merge-/Build-Fehler)"
-        if: failure()
+      - name: "Upload Konflikt- und Fehleranalyse"
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: rej-and-error-analysis
@@ -214,7 +227,7 @@ jobs:
             dist/halo_screen.py
             dist/sdl_mapping.py
             dist/libs.aarch64/
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30
 
       - name: "Kurze Zusammenfassung im Log"
@@ -224,28 +237,23 @@ jobs:
           echo "  BUILD-ZUSAMMENFASSUNG"
           echo "════════════════════════════════════════════════════════════"
           echo ""
+          if [ -f build.log ]; then
+            ERRORS=$(grep -c "error:" build.log 2>/dev/null || echo 0)
+            FAILED=$(grep -c "^FAILED:" build.log 2>/dev/null || echo 0)
+            echo "Fehler: $ERRORS, fehlgeschlagene Targets: $FAILED"
+          fi
           if [ -f dist/halo_guest.elf ]; then
             GUEST_SIZE=$(stat -c%s dist/halo_guest.elf 2>/dev/null || echo 0)
-            GUEST_MB=$((GUEST_SIZE / 1048576))
-            echo "Guest-ELF: $GUEST_SIZE Bytes (~${GUEST_MB} MB)"
+            echo "Guest-ELF: $GUEST_SIZE Bytes"
+          else
+            echo "Guest-ELF: FEHLT"
           fi
           if [ -f dist/halo ]; then
             HOST_SIZE=$(stat -c%s dist/halo 2>/dev/null || echo 0)
             echo "Host-Binary: $HOST_SIZE Bytes"
-          fi
-          if [ -f dist/libs.aarch64/libmali.so.0 ]; then
-            echo "libmali.so.0: $(stat -c%s dist/libs.aarch64/libmali.so.0) Bytes"
-          fi
-          echo ""
-          if [ -f rej/unmerged.txt ]; then
-            echo "Konflikte (unmerged):"
-            cat rej/unmerged.txt
-            echo ""
-            echo "Lade das Artefakt 'rej-and-error-analysis' herunter."
-          fi
-          if [ -f build-error-analysis.txt ]; then
-            echo ""
-            echo "Fehleranalyse liegt in 'rej-and-error-analysis'."
+          else
+            echo "Host-Binary: FEHLT"
           fi
           echo ""
+          echo "Fehleranalyse in Artefakt 'rej-and-error-analysis'."
           echo "════════════════════════════════════════════════════════════"
