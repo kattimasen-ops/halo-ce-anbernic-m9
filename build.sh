@@ -4,14 +4,14 @@ set -euo pipefail
 # ══════════════════════════════════════════════════════════════════════
 # Halo CE Universal — M9 Pro (RK3326 / Cortex-A35 + Mali-G31 MP2)
 #
-# Host-Loader + SDL2 werden mit Clang 22 (Wrapper: aarch64-clang)
-# gebaut, weil GCC 9 aus Ubuntu 20.04 trotz -mcpu=cortex-a35
-# LSE-Atomics (ARMv8.1) erzeugt und der RK3326 (ARMv8.0) darauf mit
-# SIGILL stirbt.
+# Host-Loader wird mit Clang 22 (aarch64-clang) gebaut, weil GCC 9 aus
+# Ubuntu 20.04 LSE-Atomics (ARMv8.1) erzeugt und der RK3326 (ARMv8.0)
+# darauf mit SIGILL stirbt.
 #
-# Der Wrapper aarch64-clang setzt:
-#   --target=aarch64-linux-gnu --sysroot=/ --gcc-toolchain=/usr
-#   -march=armv8-a -mno-outline-atomics
+# ZUSAETZLICH: Der Host wird STATISCH gelinkt. Die System-glibc auf dem
+# M9 Pro enthaelt ebenfalls LSE-Instruktionen und verursacht einen
+# SIGILL. Eine statisch gelinkte glibc (aus dem Container, ARMv8.0)
+# umgeht das Problem vollstaendig.
 # ══════════════════════════════════════════════════════════════════════
 PGO_MODE=${PGO_MODE:-use}
 
@@ -28,8 +28,7 @@ HOST_CC=${HOST_CC:-aarch64-clang}
 JOBS=${JOBS:-$(nproc)}
 OPEN_CE_URL=${OPEN_CE_URL:-https://github.com/OpenCommunityEdition/OpenCE.git}
 
-# Archiver fuer statische Bibliotheken (SDL2main, SDL2_test). CMake
-# findet bei einem Clang-Wrapper nicht automatisch llvm-ar-22.
+# Archiver fuer statische Bibliotheken
 AR=${AR:-/usr/bin/llvm-ar-22}
 RANLIB=${RANLIB:-/usr/bin/llvm-ranlib-22}
 
@@ -952,7 +951,7 @@ stamp=$({
     done
     [ -f "$HERE/pgo/halo_linux.profdata" ] && sha256sum "$HERE/pgo/halo_linux.profdata" | cut -d' ' -f1
     echo "pgo-mode=$PGO_MODE"
-    echo "armv8.0-clang-host=v3"
+    echo "armv8.0-clang-static-host=v1"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 echo "$stamp" > "$SRC/.port-stamp"
