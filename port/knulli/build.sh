@@ -6,10 +6,12 @@
 #
 # POSIX-sh-kompatibel (dash): set -eu statt set -euo pipefail.
 #
-# WICHTIG: libmali wird NICHT gelinkt und NICHT ausgeliefert. Die Datei
-# im sysroot/ ist beschaedigt (fehlende Sektionstabellen). Die EGL/GLES-
-# Symbole werden zur Laufzeit aus der System-Mali geladen, die Halo.sh
-# bereits ueber /tmp/halo-mali bereitstellt.
+# WICHTIG: libmali wird NICHT gelinkt und NICHT ausgeliefert.
+# Die EGL/GLES-Symbole werden zur Laufzeit aus der System-Mali geladen.
+#
+# KEIN LTO: GCC-LTO-Bitcode ist mit LLVM-Linkern nicht kompatibel; der
+# Linker wuerde die Objekte als leer behandeln und nur ein 8-KB-Geruest
+# produzieren. Der Host-Loader ist klein, LTO bringt nichts.
 set -eu
 
 folder() {
@@ -59,7 +61,7 @@ copy_runtime_lib() {
     return 0
 }
 
-# libmali wird NICHT kopiert (siehe Kommentar oben).
+# libmali wird NICHT kopiert.
 copy_runtime_lib "libSDL3"   "libSDL3.so.0"
 copy_runtime_lib "libSDL2"   "libSDL2-2.0.so.0"
 copy_runtime_lib "libdecor"  "libdecor-0.so.0"
@@ -81,18 +83,17 @@ link_library() {
     return 0
 }
 
-# libmali wird NICHT gelinkt (siehe Kommentar oben).
+# libmali wird NICHT gelinkt.
 link_library "libSDL2*"  "libSDL2.so"    || exit 1
 link_library "libSDL3*"  "libSDL3.so"    || exit 1
 link_library "libdecor*" "libdecor.so"   || exit 1
 
-# WICHTIG: -B/usr/bin zeigt GCC, wo er seine Werkzeuge sucht; dort liegt
-# der ld.lld-Symlink (vom Workflow angelegt). -fuse-ld=lld wählt lld.
+# KEIN -flto, KEIN -fuse-ld=lld. Der Standard-GCC-Linker (BFD) reicht
+# fuer unsere eigenen Objekte aus und ist zuverlaessig.
 CFLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -fPIC -Wall -Wno-unused-function \
         -D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS \
         -DHALO_ANDROID \
-        -B/usr/bin -fuse-ld=lld \
-        -flto -fomit-frame-pointer -ffunction-sections -fdata-sections \
+        -fomit-frame-pointer -ffunction-sections -fdata-sections \
         -fno-plt -fno-semantic-interposition"
 
 CFLAGS="$CFLAGS -ffile-prefix-map=$ROOT=. -ffile-prefix-map=$SDL2_INCLUDE=sdl2"
@@ -159,21 +160,48 @@ done
 compile port/third_party/tomlc17/tomlc17.c -w
 compile build/android/host/host_import_table.c
 
-echo "LINK $OUT/halo (dynamisch, lld)"
+# ── Diagnose: Objekte pruefen ────────────────────────────────────────
+echo "== Objekt-Dateien:"
+count=0
+total=0
+for obj in $objects; do
+    if [ -f "$obj" ]; then
+        size=$(stat -c%s "$obj")
+        total=$((total + size))
+        count=$((count + 1))
+    fi
+done
+echo "  Anzahl: $count"
+echo "  Gesamtgroesse: $total Bytes"
+echo "  Groesse der groessten Objekte:"
+for obj in $objects; do
+    [ -f "$obj" ] || continue
+    stat -c '%s %n' "$obj"
+done | sort -rn | head -8
+
+# ── Link ─────────────────────────────────────────────────────────────
+echo "LINK $OUT/halo (dynamisch, ohne LTO)"
 $CC $CFLAGS -o "$OUT/halo" $objects \
     -L"$OUT/lib" \
     -Wl,-rpath-link,"$OUT/lib" \
     -Wl,--allow-shlib-undefined \
     -Wl,--unresolved-symbols=ignore-all \
-    -Wl,-O1 -Wl,--as-needed -Wl,--gc-sections \
-    -flto \
+    -Wl,--as-needed -Wl,--gc-sections \
     -lSDL2 -lpthread -ldl -lm
 
 cp build/android/halo_guest.elf "$OUT/halo_guest.elf"
 
-echo "== Pruefe, ob der Host-Loader dynamisch ist:"
+echo "== Host-Binary:"
 if command -v file > /dev/null 2>&1; then
     file "$OUT/halo" || true
+fi
+ls -l "$OUT/halo"
+HOST_SIZE=$(stat -c%s "$OUT/halo")
+echo "  Groesse: $HOST_SIZE Bytes"
+if [ "$HOST_SIZE" -lt 50000 ]; then
+    echo "  WARNUNG: Host-Binary ist unerwartet klein ($HOST_SIZE Bytes)."
+    echo "           Erwartet: ca. 200000-400000 Bytes."
+    echo "           Das deutet darauf hin, dass Objekte nicht gelinkt wurden."
 fi
 
 echo "== Inhalt von $OUT/libs.aarch64/:"
