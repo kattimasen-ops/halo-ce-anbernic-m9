@@ -26,6 +26,7 @@ GUEST_CC=${GUEST_CC:-clang-22}
 HOST_CC=${HOST_CC:-aarch64-linux-gnu-gcc}
 JOBS=${JOBS:-$(nproc)}
 OPEN_CE_URL=${OPEN_CE_URL:-https://github.com/OpenCommunityEdition/OpenCE.git}
+GLIBC_VERSION_HEADER_URL=${GLIBC_VERSION_HEADER_URL:-https://github.com/wheybags/glibc_version_header.git}
 
 die() { echo "build.sh: $*" >&2; exit 1; }
 need() { command -v "$1" > /dev/null 2>&1 || die "$1 not found: $2"; }
@@ -73,6 +74,38 @@ DIST=$(cd "$DIST" && pwd)
 REJ=$(cd "$REJ" && pwd)
 SRC=$WORK/halo-ce-universal
 OPENCE=$WORK/opence
+
+# ══════════════════════════════════════════════════════════════════════
+# glibc_version_header: portable Header fuer den Host-Loader
+# ══════════════════════════════════════════════════════════════════════
+GLIBC_HEADER_DIR=$WORK/glibc_version_header
+GLIBC_HEADER_FILE=$GLIBC_HEADER_DIR/version_headers/aarch64/glibc_version_header.h
+
+fetch_glibc_version_header() {
+    if [ -f "$GLIBC_HEADER_FILE" ]; then
+        echo "== glibc_version_header bereits vorhanden: $GLIBC_HEADER_FILE"
+        return 0
+    fi
+    echo "== Hole glibc_version_header von $GLIBC_VERSION_HEADER_URL ..."
+    rm -rf "$GLIBC_HEADER_DIR"
+    if git clone --depth 1 "$GLIBC_VERSION_HEADER_URL" "$GLIBC_HEADER_DIR" > /dev/null 2>&1; then
+        echo "   + Git-Clone erfolgreich."
+    else
+        echo "   Git-Clone fehlgeschlagen, versuche Tarball ..."
+        if ! curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 30 \
+            -o "$WORK/glibc_version_header.tar.gz" \
+            "$GLIBC_VERSION_HEADER_URL/archive/refs/heads/master.tar.gz"; then
+            die "Konnte glibc_version_header nicht laden."
+        fi
+        mkdir -p "$GLIBC_HEADER_DIR"
+        tar -xzf "$WORK/glibc_version_header.tar.gz" -C "$GLIBC_HEADER_DIR" --strip-components=1
+        echo "   + Tarball erfolgreich."
+    fi
+    if [ ! -f "$GLIBC_HEADER_FILE" ]; then
+        die "glibc_version_header.h fuer aarch64 nicht gefunden: $GLIBC_HEADER_FILE"
+    fi
+    echo "== glibc_version_header bereit: $GLIBC_HEADER_FILE"
+}
 
 # ── OpenCE-Dateien holen (nur die, die wir brauchen) ─────────────────
 fetch_opence_files() {
@@ -345,6 +378,13 @@ fi
 export SDL2_INCLUDE="$SDL2_INSTALL/include"
 [ -f "$SDL2_INCLUDE/SDL2/SDL.h" ] || die "SDL2_INCLUDE=$SDL2_INCLUDE enthaelt kein SDL2/SDL.h"
 echo "== SDL2_INCLUDE=$SDL2_INCLUDE"
+
+# ══════════════════════════════════════════════════════════════════════
+# glibc_version_header holen (fuer den Host-Loader)
+# ══════════════════════════════════════════════════════════════════════
+fetch_glibc_version_header
+export GLIBC_VERSION_HEADER="$GLIBC_HEADER_FILE"
+echo "== GLIBC_VERSION_HEADER=$GLIBC_VERSION_HEADER"
 
 # ══════════════════════════════════════════════════════════════════════
 # Upstream klonen + Knulli-Patch + OpenCE-Dateien
@@ -712,7 +752,7 @@ print("linux_build.py geprueft")
 PYEOF
 
 # ══════════════════════════════════════════════════════════════════════
-# port/knulli kopieren + Fix 3b + Fix 4 (Link-Symlinks)
+# port/knulli kopieren
 # ══════════════════════════════════════════════════════════════════════
 echo ""
 echo "== Kopiere port/knulli in den Quellbaum ..."
@@ -723,75 +763,6 @@ rm -rf "$SRC/port/knulli"
 cp -a "$HERE/port/knulli" "$SRC/port/knulli"
 rm -rf "$SRC/port/knulli/__pycache__"
 chmod +x "$SRC/port/knulli/build.sh" 2>/dev/null || true
-
-if [ -f "$SRC/port/knulli/build.sh" ]; then
-    python3 - "$SRC/port/knulli/build.sh" <<'PYEOF'
-import sys
-path = sys.argv[1]
-with open(path) as f:
-    text = f.read()
-
-# Fix 3b: -DHALO_ANDROID in CFLAGS
-if "-DHALO_ANDROID" not in text:
-    old = '-D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS \\'
-    new = '-D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS \\\n        -DHALO_ANDROID \\'
-    if old in text:
-        text = text.replace(old, new, 1)
-        print("port/knulli/build.sh: -DHALO_ANDROID in CFLAGS")
-
-# Fix 4: link_library soll echte Dateien kopieren statt Symlinks.
-# Der aarch64-Cross-Linker (BFD) liest sonst nur den Symlink-Inhalt
-# (~50 Bytes) und meldet "file too short".
-if "settings_only: link_library_cp" not in text:
-    import re
-    m = re.search(
-        r'link_library\(\)\s*\{.*?\n\}\n',
-        text,
-        re.DOTALL)
-    if m:
-        new_fn = '''link_library() {
-    # settings_only: link_library_cp — echte Kopie statt Symlink,
-    # sonst meldet der Cross-Linker "file too short" beim BFD-ld.
-    pattern=$1
-    linkname=$2
-    library=$(find "$OUT/libs.aarch64" -maxdepth 1 -name "$pattern" -type f 2>/dev/null | head -n 1)
-    if [ -z "$library" ]; then
-        library=$(find "$SYSROOT_LIB" -maxdepth 1 -name "$pattern" -type f 2>/dev/null | head -n 1)
-    fi
-    if [ -z "$library" ]; then
-        library=$(find "$SYSROOT_LIB" -maxdepth 1 -name "$pattern" 2>/dev/null | head -n 1)
-    fi
-    if [ -z "$library" ]; then
-        echo "build.sh: no $pattern in SYSROOT_LIB=$SYSROOT_LIB" >&2
-        return 1
-    fi
-    cp -Lf "$library" "$OUT/lib/$linkname"
-    echo "  copied $linkname <- $(basename "$library") ($(stat -c%s "$OUT/lib/$linkname") Bytes)"
-    return 0
-}
-'''
-        text = text[:m.start()] + new_fn + text[m.end():]
-        print("port/knulli/build.sh: link_library nutzt jetzt cp -Lf.")
-    else:
-        print("WARNUNG: link_library-Funktion nicht gefunden.")
-        if 'ln -sf "$library"' in text:
-            text = text.replace(
-                'ln -sf "$library" "$OUT/lib/$linkname"',
-                '# settings_only: link_library_cp\n    cp -Lf "$library" "$OUT/lib/$linkname"',
-                1)
-            print("port/knulli/build.sh: ln -sf -> cp -Lf (Fallback).")
-
-    text = text.replace('linked libSDL2.so -> ', 'copied libSDL2.so <- ')
-    text = text.replace('linked libSDL3.so -> ', 'copied libSDL3.so <- ')
-    text = text.replace('linked libmali.so -> ', 'copied libmali.so <- ')
-    text = text.replace('linked libdecor.so -> ', 'copied libdecor.so <- ')
-
-    with open(path, 'w') as f:
-        f.write(text)
-else:
-    print("port/knulli/build.sh: link_library_cp bereits vorhanden.")
-PYEOF
-fi
 
 # ══════════════════════════════════════════════════════════════════════
 # Restliche Python-Patches
@@ -929,7 +900,6 @@ check_patch "source/interface/ui_widget_event_handler_functions.c" "ui_widget_ev
 check_patch "source/cache/cache_files.c"        "cache_files_tag_instances"     "cache_files.c Accessors"
 check_patch "source/cache/cache_files.c"        "menu_tags_loaded"              "cache_files.c Menue-Hooks"
 check_patch "port/linux/src/menu_files.c"       "settings_only: externals"      "menu_files.c externals"
-check_patch "port/knulli/build.sh"              "settings_only: link_library_cp" "port/knulli/build.sh link_library_cp"
 check_patch "tools/linux_build.py"              "EXPAT_DIR"                     "linux_build.py Expat"
 check_patch "tools/linux_build.py"              "ZLIB_DIR"                      "linux_build.py zlib"
 check_patch "tools/android_build.py"            "EXPAT_DIR"                     "android_build.py Expat"
@@ -1005,7 +975,7 @@ stamp=$({
     done
     [ -f "$HERE/pgo/halo_linux.profdata" ] && sha256sum "$HERE/pgo/halo_linux.profdata" | cut -d' ' -f1
     echo "pgo-mode=$PGO_MODE"
-    echo "settings-only=v5"
+    echo "settings-only=v6"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 echo "$stamp" > "$SRC/.port-stamp"
@@ -1014,6 +984,7 @@ echo "$stamp" > "$SRC/.port-stamp"
 # Build
 # ══════════════════════════════════════════════════════════════════════
 export ANDROID_NDK SYSROOT_LIB SDL2_INCLUDE GUEST_CC HOST_CC JOBS
+export GLIBC_VERSION_HEADER
 cd "$SRC"
 
 echo "== Konfiguriere mit $LTO_FLAG $PGO_FLAG $PGO_EXTRA_ARGS ..."
@@ -1035,7 +1006,6 @@ mkdir -p "$DIST"
 if [ -f "$SRC/build/knulli/halo" ]; then
     cp "$SRC/build/knulli/halo" "$DIST/halo"
 fi
-# settings_only: guest ELF kann in build/knulli/ oder build/android/ liegen
 for candidate in \
     "$SRC/build/knulli/halo_guest.elf" \
     "$SRC/build/android/halo_guest.elf"; do
