@@ -5,6 +5,10 @@
 #   libs.aarch64/   the runtime libraries the device may not have
 #
 # POSIX-sh-kompatibel (dash): set -eu statt set -euo pipefail.
+#
+# WICHTIG: Der LLVM-Linker (lld) wird verwendet (-B/usr/bin -fuse-ld=lld),
+# weil der BFD-ld aus Ubuntu 20.04 (binutils 2.34) die moderne libmali.so.0
+# nicht lesen kann ("file too short"). lld versteht den modernen ELF-Standard.
 set -eu
 
 folder() {
@@ -70,35 +74,24 @@ link_library() {
         echo "build.sh: no $pattern in SYSROOT_LIB=$SYSROOT_LIB" >&2
         return 1
     fi
-    # settings_only: link_library_robust — erst die (evtl. kaputte) Symlink
-    # ENTFERNEN, dann die echte Datei kopieren. Ohne rm -f kann cp -Lf durch
-    # eine bestehende Symlink schreiben und eine leere Zieldatei hinterlassen.
-    # (Der aarch64-Cross-BFD-ld meldet dann "file too short".)
-    rm -f "$OUT/lib/$linkname" "$OUT/lib/$linkname.0" "$OUT/lib/$linkname.tmp"
-    if ! ln "$library" "$OUT/lib/$linkname" 2>/dev/null; then
-        cp -L "$library" "$OUT/lib/$linkname" || {
-            echo "build.sh: cp fehlgeschlagen fuer $linkname" >&2
-            return 1
-        }
-    fi
-    size=$(stat -c%s "$OUT/lib/$linkname" 2>/dev/null || echo 0)
-    if [ "$size" -lt 1024 ]; then
-        echo "build.sh: $OUT/lib/$linkname ist nur $size Bytes gross" >&2
-        ls -la "$OUT/lib/" >&2
-        return 1
-    fi
-    echo "  copied $linkname <- $(basename "$library") ($size Bytes)"
+    rm -f "$OUT/lib/$linkname"
+    ln -sf "$library" "$OUT/lib/$linkname"
+    echo "  linked $linkname -> $library"
     return 0
 }
 
 link_library "libSDL2*"  "libSDL2.so"    || exit 1
 link_library "libSDL3*"  "libSDL3.so"    || exit 1
+link_library "libmali*"  "libmali.so"    || exit 1
 link_library "libdecor*" "libdecor.so"   || exit 1
-# libmali wird NICHT über die link_library-Funktion verlinkt (siehe unten).
 
+# WICHTIG: -B/usr/bin zeigt GCC, wo er seine Werkzeuge sucht; dort liegt
+# der ld.lld-Symlink (vom Workflow angelegt). -fuse-ld=lld wählt lld.
+# Ohne -B würde GCC den BFD-ld verwenden und an der libmali scheitern.
 CFLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -fPIC -Wall -Wno-unused-function \
         -D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS \
         -DHALO_ANDROID \
+        -B/usr/bin -fuse-ld=lld \
         -flto -fomit-frame-pointer -ffunction-sections -fdata-sections \
         -fno-plt -fno-semantic-interposition"
 
@@ -166,19 +159,25 @@ done
 compile port/third_party/tomlc17/tomlc17.c -w
 compile build/android/host/host_import_table.c
 
-echo "LINK $OUT/halo (dynamisch)"
-$CC -o "$OUT/halo" $objects \
+echo "LINK $OUT/halo (dynamisch, lld)"
+# Erst den Linker bestätigen, dann linken. -Wl,--version gibt llds Version aus.
+echo "  -> Linker-Version:"
+$CC $CFLAGS -Wl,--version -o /dev/null $objects 2>&1 | head -1 || true
+
+$CC $CFLAGS -o "$OUT/halo" $objects \
     -L"$OUT/lib" \
-    -L"$OUT/libs.aarch64" \
     -Wl,-rpath-link,"$OUT/lib" \
-    -Wl,-rpath-link,"$OUT/libs.aarch64" \
     -Wl,--allow-shlib-undefined \
-    -Wl,--unresolved-symbols=ignore-all \
     -Wl,-O1 -Wl,--as-needed -Wl,--gc-sections \
     -flto \
-    -lSDL2 "-l:libmali.so.0" -lpthread -ldl -lm
+    -lSDL2 -lmali -lpthread -ldl -lm
 
 cp build/android/halo_guest.elf "$OUT/halo_guest.elf"
+
+echo "== Pruefe, ob der Host-Loader dynamisch ist:"
+if command -v file > /dev/null 2>&1; then
+    file "$OUT/halo" || true
+fi
 
 echo "== Inhalt von $OUT/libs.aarch64/:"
 ls -la "$OUT/libs.aarch64/"
