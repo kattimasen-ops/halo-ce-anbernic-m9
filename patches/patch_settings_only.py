@@ -7,8 +7,9 @@ Setzt folgende Hooks:
   3. ui_widget_game_data_input_functions.c: Dispatcher (robust, per Regex)
   4. cache_files.c: Tag-Accessors + menu_tags_loaded/unloaded
   5. menu_tags.c: Solo-Pause-Patch (SETTINGS auch in der Kampagne)
-  6. tools/linux_build.py + tools/android_build.py: Expat
-  7. port/linux/port.json: "dl" in libraries
+  6. menu_files.c: externe Deklarationen (config_folder, hud_hires_png_texture)
+  7. tools/linux_build.py + tools/android_build.py: Expat
+  8. port/linux/port.json: "dl" in libraries
 
 Idempotent ueber Marker-Kommentare.
 """
@@ -95,7 +96,6 @@ def patch_event_dispatcher(src_root):
         print("  ui_widget_event_handler_functions.c: bereits gepatcht.")
         return
 
-    # halo_menus.h-Include robust einfuegen
     text, where = _insert_include(
         text,
         '#include "halo_menus.h" /* settings_only */\n',
@@ -103,8 +103,7 @@ def patch_event_dispatcher(src_root):
          '#include "cseries.h"\n',
          '#include "interface/ui_widget.h"\n'))
     if where != "bereits vorhanden":
-        print(f"  ui_widget_event_handler_functions.c: halo_menus.h {where} "
-              "eingefuegt.")
+        print(f"  ui_widget_event_handler_functions.c: halo_menus.h {where} eingefuegt.")
 
     pattern = re.compile(
         r'\n(?:void|boolean|short|long|int)\s+'
@@ -177,7 +176,6 @@ def patch_game_data_dispatcher(src_root):
         print("  ui_widget_game_data_input_functions.c: bereits gepatcht.")
         return
 
-    # halo_menus.h-Include robust einfuegen (mehrere Anker, Fallback oben)
     text, where = _insert_include(
         text,
         '#include "halo_menus.h" /* settings_only */\n',
@@ -185,8 +183,7 @@ def patch_game_data_dispatcher(src_root):
          '#include "cseries/cseries.h"\n',
          '#include "interface/ui_widget.h"\n'))
     if where != "bereits vorhanden":
-        print(f"  ui_widget_game_data_input_functions.c: halo_menus.h {where} "
-              "eingefuegt.")
+        print(f"  ui_widget_game_data_input_functions.c: halo_menus.h {where} eingefuegt.")
 
     pattern = re.compile(
         r'\n(?:void|boolean|short|long|int)\s+'
@@ -516,6 +513,54 @@ static void pause_patch_solo(struct cache_file_tag_instance *instances)
 
 
 # ══════════════════════════════════════════════════════════════════════
+# 5b. menu_files.c: externe Deklarationen
+#
+# Die OpenCE-Version von menu_files.c ruft config_folder() und
+# hud_hires_png_texture() auf. Die Header im Knulli-Baum deklarieren
+# beide nicht (hud_hires_png_texture ist dort static, config_folder
+# fehlt ganz). Wir fuegen die Deklarationen direkt in menu_files.c ein,
+# damit der Compiler sie kennt.
+# ══════════════════════════════════════════════════════════════════════
+def patch_menu_files_externs(src_root):
+    path = os.path.join(src_root, "port", "linux", "src", "menu_files.c")
+    if not os.path.exists(path):
+        print(f"  WARNUNG: {path} nicht gefunden.")
+        return
+    with open(path) as f:
+        text = f.read()
+    if "settings_only: externals" in text:
+        print("  menu_files.c: externals bereits vorhanden.")
+        return
+    # Anker: nach dem letzten Include-Block
+    anchors = (
+        '#include "xgpu.h"\n',
+        '#include "port_config.h"\n',
+        '#include "platform.h"\n',
+        '#include "halo_menus.h"\n',
+    )
+    anchor = None
+    for a in anchors:
+        if a in text:
+            anchor = a
+            break
+    if anchor is None:
+        print("  WARNUNG: menu_files.c Anker nicht gefunden.")
+        return
+    externs = anchor + (
+        '\n/* settings_only: externals — Funktionen aus dem Knulli-Baum,\n'
+        'deren Deklaration in den Headern fehlt (config_folder) oder die\n'
+        'im Original static waren (hud_hires_png_texture). */\n'
+        'void config_folder(char *path, unsigned long size);\n'
+        'unsigned int hud_hires_png_texture(const unsigned char *png,\n'
+        '    unsigned long size, unsigned long *levels);\n'
+    )
+    text = text.replace(anchor, externs, 1)
+    with open(path, "w") as f:
+        f.write(text)
+    print("  menu_files.c: externals eingebaut.")
+
+
+# ══════════════════════════════════════════════════════════════════════
 # 6. tools/linux_build.py + tools/android_build.py: Expat
 # ══════════════════════════════════════════════════════════════════════
 def patch_linux_build(src_root):
@@ -613,6 +658,7 @@ def apply_patch(src_root):
     patch_game_data_dispatcher(src_root)
     patch_cache_files(src_root)
     patch_menu_tags_solo_pause(src_root)
+    patch_menu_files_externs(src_root)
     patch_linux_build(src_root)
     patch_android_build(src_root)
     patch_port_json(src_root)
