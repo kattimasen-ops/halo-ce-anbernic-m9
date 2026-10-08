@@ -712,7 +712,7 @@ print("linux_build.py geprueft")
 PYEOF
 
 # ══════════════════════════════════════════════════════════════════════
-# port/knulli kopieren + Fix 3b
+# port/knulli kopieren + Fix 3b + Fix 4 (Link-Symlinks)
 # ══════════════════════════════════════════════════════════════════════
 echo ""
 echo "== Kopiere port/knulli in den Quellbaum ..."
@@ -730,15 +730,66 @@ import sys
 path = sys.argv[1]
 with open(path) as f:
     text = f.read()
-if "-DHALO_ANDROID" in text:
-    sys.exit(0)
-old = '-D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS \\'
-new = '-D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS \\\n        -DHALO_ANDROID \\'
-if old in text:
-    text = text.replace(old, new, 1)
+
+# Fix 3b: -DHALO_ANDROID in CFLAGS
+if "-DHALO_ANDROID" not in text:
+    old = '-D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS \\'
+    new = '-D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS \\\n        -DHALO_ANDROID \\'
+    if old in text:
+        text = text.replace(old, new, 1)
+        print("port/knulli/build.sh: -DHALO_ANDROID in CFLAGS")
+
+# Fix 4: link_library soll echte Dateien kopieren statt Symlinks.
+# Der aarch64-Cross-Linker (BFD) liest sonst nur den Symlink-Inhalt
+# (~50 Bytes) und meldet "file too short".
+if "settings_only: link_library_cp" not in text:
+    import re
+    m = re.search(
+        r'link_library\(\)\s*\{.*?\n\}\n',
+        text,
+        re.DOTALL)
+    if m:
+        new_fn = '''link_library() {
+    # settings_only: link_library_cp — echte Kopie statt Symlink,
+    # sonst meldet der Cross-Linker "file too short" beim BFD-ld.
+    pattern=$1
+    linkname=$2
+    library=$(find "$OUT/libs.aarch64" -maxdepth 1 -name "$pattern" -type f 2>/dev/null | head -n 1)
+    if [ -z "$library" ]; then
+        library=$(find "$SYSROOT_LIB" -maxdepth 1 -name "$pattern" -type f 2>/dev/null | head -n 1)
+    fi
+    if [ -z "$library" ]; then
+        library=$(find "$SYSROOT_LIB" -maxdepth 1 -name "$pattern" 2>/dev/null | head -n 1)
+    fi
+    if [ -z "$library" ]; then
+        echo "build.sh: no $pattern in SYSROOT_LIB=$SYSROOT_LIB" >&2
+        return 1
+    fi
+    cp -Lf "$library" "$OUT/lib/$linkname"
+    echo "  copied $linkname <- $(basename "$library") ($(stat -c%s "$OUT/lib/$linkname") Bytes)"
+    return 0
+}
+'''
+        text = text[:m.start()] + new_fn + text[m.end():]
+        print("port/knulli/build.sh: link_library nutzt jetzt cp -Lf.")
+    else:
+        print("WARNUNG: link_library-Funktion nicht gefunden.")
+        if 'ln -sf "$library"' in text:
+            text = text.replace(
+                'ln -sf "$library" "$OUT/lib/$linkname"',
+                '# settings_only: link_library_cp\n    cp -Lf "$library" "$OUT/lib/$linkname"',
+                1)
+            print("port/knulli/build.sh: ln -sf -> cp -Lf (Fallback).")
+
+    text = text.replace('linked libSDL2.so -> ', 'copied libSDL2.so <- ')
+    text = text.replace('linked libSDL3.so -> ', 'copied libSDL3.so <- ')
+    text = text.replace('linked libmali.so -> ', 'copied libmali.so <- ')
+    text = text.replace('linked libdecor.so -> ', 'copied libdecor.so <- ')
+
     with open(path, 'w') as f:
         f.write(text)
-    print("port/knulli/build.sh: -DHALO_ANDROID in CFLAGS")
+else:
+    print("port/knulli/build.sh: link_library_cp bereits vorhanden.")
 PYEOF
 fi
 
@@ -867,6 +918,7 @@ check_file  "port/linux/include/halo_menus.h"                                   
 check_file  "port/linux/src/menu_files.c"                                       "menu_files.c"
 check_file  "port/linux/game/menu_tags.c"                                       "menu_tags.c"
 check_file  "port/linux/game/menu_functions.c"                                  "menu_functions.c"
+check_file  "port/linux/game/port_settings_shim.c"                              "port_settings_shim.c"
 check_file  "port/third_party/expat/expat.h"                                    "expat.h"
 check_file  "port/third_party/zlib/zlib_prefixed.h"                             "zlib_prefixed.h (OpenCE)"
 check_file  "port/linux/src/hud_hires.c"                                        "hud_hires.c (OpenCE)"
@@ -877,6 +929,7 @@ check_patch "source/interface/ui_widget_event_handler_functions.c" "ui_widget_ev
 check_patch "source/cache/cache_files.c"        "cache_files_tag_instances"     "cache_files.c Accessors"
 check_patch "source/cache/cache_files.c"        "menu_tags_loaded"              "cache_files.c Menue-Hooks"
 check_patch "port/linux/src/menu_files.c"       "settings_only: externals"      "menu_files.c externals"
+check_patch "port/knulli/build.sh"              "settings_only: link_library_cp" "port/knulli/build.sh link_library_cp"
 check_patch "tools/linux_build.py"              "EXPAT_DIR"                     "linux_build.py Expat"
 check_patch "tools/linux_build.py"              "ZLIB_DIR"                      "linux_build.py zlib"
 check_patch "tools/android_build.py"            "EXPAT_DIR"                     "android_build.py Expat"
@@ -952,7 +1005,7 @@ stamp=$({
     done
     [ -f "$HERE/pgo/halo_linux.profdata" ] && sha256sum "$HERE/pgo/halo_linux.profdata" | cut -d' ' -f1
     echo "pgo-mode=$PGO_MODE"
-    echo "settings-only=v4"
+    echo "settings-only=v5"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 echo "$stamp" > "$SRC/.port-stamp"
@@ -982,9 +1035,16 @@ mkdir -p "$DIST"
 if [ -f "$SRC/build/knulli/halo" ]; then
     cp "$SRC/build/knulli/halo" "$DIST/halo"
 fi
-if [ -f "$SRC/build/knulli/halo_guest.elf" ]; then
-    cp "$SRC/build/knulli/halo_guest.elf" "$DIST/halo_guest.elf"
-fi
+# settings_only: guest ELF kann in build/knulli/ oder build/android/ liegen
+for candidate in \
+    "$SRC/build/knulli/halo_guest.elf" \
+    "$SRC/build/android/halo_guest.elf"; do
+    if [ -f "$candidate" ]; then
+        cp "$candidate" "$DIST/halo_guest.elf"
+        echo "== halo_guest.elf aus $candidate kopiert"
+        break
+    fi
+done
 [ -f "$SRC/port/knulli/Halo.sh" ] && cp "$SRC/port/knulli/Halo.sh" "$DIST/Halo.sh"
 [ -f "$SRC/port/knulli/halo_extract.py" ] && cp "$SRC/port/knulli/halo_extract.py" "$DIST/halo_extract.py"
 [ -f "$SRC/port/knulli/halo_screen.py" ] && cp "$SRC/port/knulli/halo_screen.py" "$DIST/halo_screen.py"
