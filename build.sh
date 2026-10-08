@@ -5,8 +5,8 @@ set -euo pipefail
 # Halo CE Universal — M9 Pro (RK3326 / Cortex-A35 + Mali-G31 MP2)
 #
 # Option 2: Upstream + Knulli-Patch + OpenCE-Merge per git apply --3way.
-# Nach dem Merge werden kritische Symbole geprüft und bei Fehlen die
-# betroffenen Dateien als rej/-Artefakt bereitgestellt.
+# Nach dem Merge werden kritische Symbole geprüft; bei Konflikten werden
+# die betroffenen Dateien als rej/-Artefakt bereitgestellt.
 # ══════════════════════════════════════════════════════════════════════
 PGO_MODE=${PGO_MODE:-use}
 
@@ -124,7 +124,7 @@ print("  XML-Hunk entfernt; Patch ist jetzt %d Bytes kleiner." % (len(text) - le
 PYEOF
 
 # ══════════════════════════════════════════════════════════════════════
-# 3. SDL3 bauen (nur wenn nicht vorhanden)
+# 3. SDL3: nur bauen, wenn die .so im sysroot fehlt
 # ══════════════════════════════════════════════════════════════════════
 if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
     echo "== SDL3 $SDL3_TAG: kompiliere aus dem Quellcode"
@@ -158,17 +158,24 @@ if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
     cp -L "$SDL3_LIB" "$SYSROOT_LIB/libSDL3.so.0"
     echo "== SDL3 kompiliert: $(stat -c%s "$SYSROOT_LIB/libSDL3.so.0") Bytes"
 else
-    echo "== libSDL3.so.0 bereits vorhanden"
+    echo "== libSDL3.so.0 bereits vorhanden (sysroot)"
 fi
 
 # ══════════════════════════════════════════════════════════════════════
-# 4. SDL2 bauen (nur wenn nicht vorhanden), mit KMSDRM-Pageflip-Patch
+# 4. SDL2: Header immer bereitstellen; .so nur bauen, wenn sie fehlt
+#
+# WICHTIG: port/knulli/build.sh braucht SDL2_INCLUDE mit SDL2/SDL.h.
+# Auch wenn die .so im sysroot liegt, braucht der Host-Build die Header.
+# Deshalb wird SDL2 (Headers + Bibliothek) in $WORK/sdl2-install gebaut,
+# sobald die Header dort fehlen — und die .so nur dann ins sysroot
+# kopiert, wenn sie dort noch nicht vorhanden ist.
 # ══════════════════════════════════════════════════════════════════════
-if [ ! -f "$SYSROOT_LIB/libSDL2-2.0.so.0" ]; then
-    echo "== SDL2 $SDL2_TAG: kompiliere aus dem Quellcode"
-    SDL2_SRC=$WORK/SDL2-src
-    SDL2_BUILD=$WORK/sdl2-build
-    SDL2_INSTALL=$WORK/sdl2-install
+SDL2_SRC=$WORK/SDL2-src
+SDL2_BUILD=$WORK/sdl2-build
+SDL2_INSTALL=$WORK/sdl2-install
+
+if [ ! -d "$SDL2_INSTALL/include/SDL2" ]; then
+    echo "== SDL2 $SDL2_TAG: Quellcode holen und Header bereitstellen"
     rm -rf "$SDL2_SRC" "$SDL2_BUILD" "$SDL2_INSTALL"
     mkdir -p "$SDL2_SRC" "$SDL2_BUILD" "$SDL2_INSTALL"
     curl -L -o "$WORK/sdl2.tar.gz" "$SDL2_ARCHIVE"
@@ -244,15 +251,29 @@ PATCH_EOF
         -DCMAKE_INSTALL_PREFIX="$SDL2_INSTALL"
     cmake --build "$SDL2_BUILD" -j "$JOBS"
     cmake --install "$SDL2_BUILD"
+
     SDL2_LIB=$(find "$SDL2_INSTALL" -name "libSDL2-2.0.so.0*" -type f | head -n 1)
     [ -n "$SDL2_LIB" ] || die "libSDL2-2.0.so.0 nicht gefunden"
-    cp -L "$SDL2_LIB" "$SYSROOT_LIB/libSDL2-2.0.so.0"
-    echo "== SDL2 kompiliert: $(stat -c%s "$SYSROOT_LIB/libSDL2-2.0.so.0") Bytes"
+    if [ ! -f "$SYSROOT_LIB/libSDL2-2.0.so.0" ]; then
+        cp -L "$SDL2_LIB" "$SYSROOT_LIB/libSDL2-2.0.so.0"
+        echo "== SDL2 nach sysroot kopiert: $(stat -c%s "$SYSROOT_LIB/libSDL2-2.0.so.0") Bytes"
+    else
+        echo "== libSDL2-2.0.so.0 liegt bereits in sysroot; nur Header bereitgestellt."
+    fi
 else
-    echo "== libSDL2-2.0.so.0 bereits vorhanden"
-    : "${SDL2_INSTALL:=$WORK/sdl2-install}"
+    echo "== SDL2-Header bereits in $SDL2_INSTALL"
+    if [ ! -f "$SYSROOT_LIB/libSDL2-2.0.so.0" ]; then
+        # Header da, .so fehlt: aus dem vorherigen Build nehmen, falls da
+        if [ -f "$SDL2_INSTALL/lib/libSDL2-2.0.so.0" ]; then
+            cp -L "$SDL2_INSTALL/lib/libSDL2-2.0.so.0" "$SYSROOT_LIB/libSDL2-2.0.so.0"
+            echo "== SDL2 .so aus $SDL2_INSTALL nach sysroot kopiert."
+        else
+            die "SDL2 .so fehlt in sysroot und $SDL2_INSTALL."
+        fi
+    fi
 fi
 export SDL2_INCLUDE="$SDL2_INSTALL/include"
+[ -f "$SDL2_INCLUDE/SDL2/SDL.h" ] || die "SDL2_INCLUDE=$SDL2_INCLUDE enthaelt kein SDL2/SDL.h"
 echo "== SDL2_INCLUDE=$SDL2_INCLUDE"
 
 # ══════════════════════════════════════════════════════════════════════
@@ -292,64 +313,75 @@ if [ ! -f "$OPENCE_APPLIED_MARKER" ] || [ "$(cat "$OPENCE_APPLIED_MARKER" 2>/dev
     echo ""
     echo "== Wende OpenCE-Patch per --3way an ..."
     rm -f "$OPENCE_APPLIED_MARKER"
+
+    # WICHTIG: --3way und --reject sind inkompatibel. Wir nutzen --3way
+    # und suchen danach nach Konfliktmarkern (<<<<<<<) in der Arbeitskopie.
     set +e
-    git -C "$SRC" apply --3way --reject "$OPENCE_PATCH" > "$WORK/opence-apply.log" 2>&1
+    git -C "$SRC" apply --3way "$OPENCE_PATCH" > "$WORK/opence-apply.log" 2>&1
     APPLY_STATUS=$?
     set -e
-    cat "$WORK/opence-apply.log"
+    cat "$WORK/opence-apply.log" | head -100
 
-    REJ_FILES=$(find "$SRC" -name '*.rej' 2>/dev/null | sort)
-    ORIG_FILES=$(find "$SRC" -name '*.orig' 2>/dev/null | sort)
-    UNMERGED=$(git -C "$SRC" diff --name-only --diff-filter=U 2>/dev/null | sort)
+    # Konflikte finden: git apply --3way schreibt <<<<<<<-Marker in
+    # betroffene Dateien.
+    CONFLICT_FILES=$(grep -rl '^<<<<<<< ' "$SRC" 2>/dev/null | grep -v '\.git/' | sort || true)
+    UNMERGED=$(git -C "$SRC" diff --name-only --diff-filter=U 2>/dev/null | sort || true)
 
-    if [ -n "$REJ_FILES" ] || [ -n "$ORIG_FILES" ] || [ -n "$UNMERGED" ]; then
+    if [ -n "$CONFLICT_FILES" ] || [ -n "$UNMERGED" ]; then
         echo ""
         echo "════════════════════════════════════════════════════════════"
         echo "  OPENCE-MERGE HAT KONFLIKTE — BUILD STOPPT HIER"
         echo "════════════════════════════════════════════════════════════"
         echo ""
-        [ -n "$REJ_FILES" ] && { echo "Konflikt-Dateien (.rej):"; echo "$REJ_FILES" | sed 's|^|  |'; }
-        [ -n "$ORIG_FILES" ] && { echo "Originale (.orig):"; echo "$ORIG_FILES" | sed 's|^|  |'; }
-        [ -n "$UNMERGED" ] && { echo "Unmerged paths:"; echo "$UNMERGED" | sed 's|^|  |'; }
+        if [ -n "$CONFLICT_FILES" ]; then
+            echo "Konflikt-Dateien (mit <<<<<<<-Markern):"
+            echo "$CONFLICT_FILES" | sed 's|^|  |'
+        fi
+        if [ -n "$UNMERGED" ]; then
+            echo "Unmerged paths (git-Index):"
+            echo "$UNMERGED" | sed 's|^|  |'
+        fi
         echo ""
         rm -rf "$REJ"
         mkdir -p "$REJ"
-        for f in $REJ_FILES; do
+        # Konfliktdateien in rej/ sammeln
+        for f in $CONFLICT_FILES; do
             rel=${f#"$SRC/"}
-            mkdir -p "$REJ/$(dirname "$rel")"
-            cp "$f" "$REJ/$rel"
+            mkdir -p "$REJ/conflict-$(dirname "$rel")"
+            cp "$f" "$REJ/conflict-$rel"
+            if [ -f "$OPENCE/$rel" ]; then
+                mkdir -p "$REJ/opence-$(dirname "$rel")"
+                cp "$OPENCE/$rel" "$REJ/opence-$rel"
+            fi
+            mkdir -p "$REJ/knulli-$(dirname "$rel")"
+            git -C "$SRC" show "$UPSTREAM_COMMIT:$rel" > "$REJ/knulli-$rel" 2>/dev/null || true
         done
-        for f in $ORIG_FILES; do
-            rel=${f#"$SRC/"}
-            mkdir -p "$REJ/orig-$(dirname "$rel")"
-            cp "$f" "$REJ/orig-$rel"
-        done
-        echo "$UNMERGED" > "$REJ/unmerged.txt"
+        # Unmerged paths zusätzlich
+        if [ -n "$UNMERGED" ]; then
+            echo "$UNMERGED" > "$REJ/unmerged.txt"
+            for rel in $UNMERGED; do
+                [ -f "$SRC/$rel" ] || continue
+                mkdir -p "$REJ/conflict-$(dirname "$rel")"
+                cp "$SRC/$rel" "$REJ/conflict-$rel" 2>/dev/null || true
+                if [ -f "$OPENCE/$rel" ]; then
+                    mkdir -p "$REJ/opence-$(dirname "$rel")"
+                    cp "$OPENCE/$rel" "$REJ/opence-$rel"
+                fi
+                mkdir -p "$REJ/knulli-$(dirname "$rel")"
+                git -C "$SRC" show "$UPSTREAM_COMMIT:$rel" > "$REJ/knulli-$rel" 2>/dev/null || true
+            done
+        fi
         cp "$WORK/opence-apply.log" "$REJ/opence-apply.log" 2>/dev/null || true
-        for f in $UNMERGED; do
-            mkdir -p "$REJ/current-$(dirname "$f")"
-            cp "$SRC/$f" "$REJ/current-$f" 2>/dev/null || true
-        done
-        for f in $UNMERGED; do
-            mkdir -p "$REJ/opence-$(dirname "$f")"
-            cp "$OPENCE/$f" "$REJ/opence-$f" 2>/dev/null || true
-            mkdir -p "$REJ/knulli-$(dirname "$f")"
-            git -C "$SRC" show "$UPSTREAM_COMMIT:$f" > "$REJ/knulli-$f" 2>/dev/null || true
-        done
         exit 2
     fi
 
     if [ "$APPLY_STATUS" -ne 0 ]; then
-        echo "== git apply --3way meldete Status $APPLY_STATUS, aber keine .rej."
+        echo "== git apply --3way meldete Status $APPLY_STATUS, aber keine Konfliktmarker."
         cat "$WORK/opence-apply.log"
         die "OpenCE-Patch-Anwendung fehlgeschlagen."
     fi
 
     # ─── p2p-Header und -Quellen komplett aus OpenCE übernehmen ──────
-    # Diese Dateien sind reine Header bzw. neue Quellen ohne Knulli-Konflikt
-    # und decken die Symbole ab, die menu_functions.c und p2p_lobby.c
-    # erwarten (P2P_LOBBY_SLOT_PREFIX, P2P_SEALED_TOKEN_SIZE,
-    # p2p_ed25519_to_x25519, p2p_signing_key, p2p_seal_token, p2p_sign).
     echo ""
     echo "== Uebernehme p2p-Header und -Quellen aus OpenCE ..."
     for f in \
@@ -508,7 +540,7 @@ wait_new = '''\tif (alertable && platform_run_apcs())
 \t\t\tbreak;
 \t\t}'''
 if wait_old not in text:
-    print("WARNUNG: WaitForSingleObjectEx-Muster nicht gefunden (evtl. bereits gepatcht).")
+    print("WARNUNG: WaitForSingleObjectEx-Muster nicht gefunden.")
 else:
     text = text.replace(wait_old, wait_new, 1)
 sleep_old = '''\tif (milliseconds == INFINITE)
@@ -552,7 +584,7 @@ sleep_new = '''\tif (milliseconds == INFINITE)
 \t}
 \treturn 0;'''
 if sleep_old not in text:
-    print("WARNUNG: SleepEx-Muster nicht gefunden (evtl. bereits gepatcht).")
+    print("WARNUNG: SleepEx-Muster nicht gefunden.")
 else:
     text = text.replace(sleep_old, sleep_new, 1)
 with open(path, 'w') as f:
@@ -596,7 +628,6 @@ with open(path, 'w') as f:
     f.write(text)
 PYEOF
 
-# ─── Fix 2e: -DHALO_ANDROID vor -DHALO_RELEASE ──────────────────────
 python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import sys
 path = sys.argv[1]
@@ -613,7 +644,6 @@ if anchor in text:
         f.write(text)
 PYEOF
 
-# ─── Fix 2b: clang-Builtin-Shim ─────────────────────────────────────
 python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import re, sys
 path = sys.argv[1]
@@ -664,7 +694,6 @@ with open(path, 'w') as f:
     f.write(text)
 PYEOF
 
-# ─── Fix 2c/2d: PGO-Training ────────────────────────────────────────
 if [ "$PGO_MODE" = "train" ]; then
     python3 - "$SRC/tools/android_build.py" <<'PYEOF'
 import sys
@@ -726,7 +755,7 @@ PYEOF
 fi
 
 # ══════════════════════════════════════════════════════════════════════
-# 9. Fix 3: linux_build.py (-O3 + Zusatz-Flags)
+# 9. Fix 3: linux_build.py
 # ══════════════════════════════════════════════════════════════════════
 python3 - "$SRC/tools/linux_build.py" <<'PYEOF'
 import sys
@@ -754,7 +783,7 @@ with open(path, 'w') as f:
 PYEOF
 
 # ══════════════════════════════════════════════════════════════════════
-# 10. port/knulli kopieren + Fix 3b (-DHALO_ANDROID)
+# 10. port/knulli kopieren + Fix 3b
 # ══════════════════════════════════════════════════════════════════════
 echo ""
 echo "== Kopiere port/knulli in den Quellbaum ..."
@@ -786,7 +815,7 @@ PYEOF
 fi
 
 # ══════════════════════════════════════════════════════════════════════
-# 11. Fix 4: restliche Python-Patches
+# 11. Restliche Python-Patches
 # ══════════════════════════════════════════════════════════════════════
 echo ""
 echo "== Wende restliche Patch-Skripte an ..."
@@ -807,7 +836,6 @@ for patch_script in \
     fi
 done
 
-# ─── Fix 4a: glUniform4f -> glUniform4fv ────────────────────────────
 if [ -f "$SRC/port/linux/src/d3d8_gl.c" ]; then
     python3 - "$SRC/port/linux/src/d3d8_gl.c" <<'PYEOF'
 import re, sys
@@ -828,7 +856,6 @@ if new_text != text:
 PYEOF
 fi
 
-# ─── Fix 4c: port_settings regenerieren ─────────────────────────────
 echo ""
 echo "== Regeneriere die In-Game-Settings-Menus ..."
 python3 - "$SRC" <<'PYEOF'
@@ -854,7 +881,6 @@ for name, lines in files.items():
     print(f"  geschrieben: {name}")
 PYEOF
 
-# ─── Fix 4d: Credits-Wasserzeichen ──────────────────────────────────
 if [ -f "$HERE/patches/patch_credits_xml.py" ]; then
     echo ""
     echo "== Credits-Wasserzeichen in Menue-XMLs ..."
@@ -862,7 +888,7 @@ if [ -f "$HERE/patches/patch_credits_xml.py" ]; then
 fi
 
 # ══════════════════════════════════════════════════════════════════════
-# 12. Fix 4b: Verifikation
+# 12. Verifikation
 # ══════════════════════════════════════════════════════════════════════
 echo ""
 echo "== Verifiziere Patch-Ergebnisse ..."
@@ -990,7 +1016,7 @@ stamp=$({
     [ -f "$HERE/pgo/halo_linux.profdata" ] && sha256sum "$HERE/pgo/halo_linux.profdata" | cut -d' ' -f1
     [ -f "$HERE/pgo/halo_android.profdata" ] && sha256sum "$HERE/pgo/halo_android.profdata" | cut -d' ' -f1
     echo "pgo-mode=$PGO_MODE"
-    echo "opence-menu=option2-v2"
+    echo "opence-menu=option2-v3"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 echo "$stamp" > "$SRC/.port-stamp"
@@ -1039,12 +1065,6 @@ if [ "$PGO_MODE" = "train" ]; then
 ────────────────────────────────────────────────────────────────────────
 TRAININGS-BUILD FERTIG
 ────────────────────────────────────────────────────────────────────────
-Naechste Schritte:
-1. dist/Halo.sh           nach /roms/ports/Halo.sh
-2. dist/halo_guest.elf    nach /roms/ports/halo-ce/halo_guest.elf
-3. dist/halo              nach /roms/ports/halo-ce/halo
-4. Spiel starten, SIGTERM senden, .profraw holen, mit llvm-profdata
-   zu pgo/halo_android.profdata mergen, dann PGO_MODE=use ./build.sh
 TRAINING
 else
     cat <<'RELEASE'
@@ -1052,24 +1072,7 @@ else
 ────────────────────────────────────────────────────────────────────────
 RELEASE-BUILD FERTIG (PGO use, LTO full, Frame-Pointer Option A)
 ────────────────────────────────────────────────────────────────────────
-
-Zu installieren auf dem M9 Pro:
-1. dist/Halo.sh           nach /roms/ports/Halo.sh
-2. dist/halo_guest.elf    nach /roms/ports/halo-ce/halo_guest.elf
-3. dist/halo              nach /roms/ports/halo-ce/halo
-4. dist/libs.aarch64/     nach /roms/ports/halo-ce/libs.aarch64/  (falls vorhanden)
-
-Aktiv in diesem Build (RK3326 / Mali-G31 MP2):
-  - HALO_ANDROID aktiv (Guest + Host).
-  - draw_framebuffer_bound, Mali-Subdata-Guard.
-  - Shader-Prewarming, Aggressives Culling, State-Batching.
-  - Texture-Prewarming.
-  - NEON in matrix_math, guest_string, index_extent.
-  - PC-Menus aus OpenCE (Option 2: vollstaendiger Merge).
-  - RK3326-Defaults (render_scale 0.75, model_detail 0.35).
-  - In-Game-Settings-Menue (OpenCE).
-  - Credits "St0len-One".
-
+Aktiv: HALO_ANDROID, PC-Menus aus OpenCE (Option 2), RK3326-Defaults.
 FERTIG.
 ────────────────────────────────────────────────────────────────────────
 RELEASE
