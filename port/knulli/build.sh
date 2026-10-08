@@ -9,9 +9,12 @@
 # WICHTIG: libmali wird NICHT mitgeliefert und NICHT gelinkt. Auf dem
 # M9 Pro kommt sie aus dem System (Halo.sh legt /tmp/halo-mali mit
 # Symlinks auf /usr/local/lib/aarch64-linux-gnu/libmali-bifrost-g31-rxp0-gbm.so
-# an und setzt diesen Pfad in LD_LIBRARY_PATH vor libs.aarch64). Damit
-# brauchen wir weder eine gueltige libmali im Repo noch das -lmali-
-# Flag beim Linken; die EGL/GLES-Symbole werden zur Laufzeit gefunden.
+# an und setzt diesen Pfad in LD_LIBRARY_PATH vor libs.aarch64).
+#
+# glibc_version_header (GLIBC_VERSION_HEADER) wird per -include in die
+# Host-Kompilierung eingebunden, damit der Loader auf dem M9 Pro
+# (glibc 2.31) laeuft und nicht die neueren Symbole des Build-Runners
+# (glibc 2.35) verlangt.
 set -eu
 
 folder() {
@@ -99,9 +102,20 @@ link_library "libSDL2*"  "libSDL2.so"    || exit 1
 link_library "libSDL3*"  "libSDL3.so"    || exit 1
 link_library "libdecor*" "libdecor.so"   || exit 1
 
+# ── glibc_version_header (nur Host!) ─────────────────────────────────
+if [ -n "${GLIBC_VERSION_HEADER:-}" ] && [ -f "$GLIBC_VERSION_HEADER" ]; then
+    GLIBC_CFLAGS="-include $GLIBC_VERSION_HEADER"
+    echo "== glibc_version_header: $GLIBC_VERSION_HEADER"
+else
+    GLIBC_CFLAGS=""
+    echo "== WARNUNG: GLIBC_VERSION_HEADER nicht gesetzt oder Datei fehlt."
+    echo "   Der Host-Loader verlangt dann die glibc des Build-Runners."
+fi
+
 CFLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -fPIC -Wall -Wno-unused-function \
         -D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS \
         -DHALO_ANDROID \
+        $GLIBC_CFLAGS \
         -flto -fomit-frame-pointer -ffunction-sections -fdata-sections \
         -fno-plt -fno-semantic-interposition"
 
@@ -170,14 +184,17 @@ compile port/third_party/tomlc17/tomlc17.c -w
 compile build/android/host/host_import_table.c
 
 echo "LINK $OUT/halo"
+# Nur -lSDL2, nicht -lSDL3 (siehe vorige Version: SDL_Init etc. sind in
+# beiden; -lSDL3 zuerst wuerde den KMSDRM-Videopfad brechen).
+#
 # KEIN -lmali: die EGL/GLES-Symbole, die host_gl.c und host_glthread_gen.c
 # referenzieren, werden zur Laufzeit aus der System-Mali aufgeloest
 # (Halo.sh: LD_LIBRARY_PATH=/tmp/halo-mali:... vor libs.aarch64).
-# --unresolved-symbols=ignore-all laesst sie beim Linken offen; sie landen
-# als normale undefinierte Symbole in der dynamischen Symboltabelle und
-# werden beim Start vom Loader ueber LD_LIBRARY_PATH und die DT_NEEDED-
-# Eintraege aufgeloest. Die anschliessende Verifikation listet ALLE offenen
-# Symbole auf, damit auf dem Geraet keine Ueberraschung passiert.
+#
+# --unresolved-symbols=ignore-all laesst die EGL/GLES-Symbole beim
+# Linken offen; sie landen als normale undefinierte Symbole in der
+# dynamischen Symboltabelle und werden beim Start vom Loader ueber
+# LD_LIBRARY_PATH und die DT_NEEDED-Eintraege aufgeloest.
 $CC -o "$OUT/halo" $objects \
     -L"$OUT/lib" \
     -Wl,-rpath-link,"$OUT/lib" \
@@ -186,100 +203,6 @@ $CC -o "$OUT/halo" $objects \
     -Wl,-O1 -Wl,--as-needed -Wl,--gc-sections \
     -flto \
     -lSDL2 -lpthread -ldl -lm
-
-# ══════════════════════════════════════════════════════════════════════
-# Verifikation: welche Symbole braucht der Loader zur Laufzeit?
-# Erwartet: EGL/GLES (System-Mali), SDL2, libc, libpthread, libdl, libm.
-# Alles andere wird als WARNUNG ausgegeben, damit auf dem Geraet keine
-# Ueberraschung passiert.
-# ══════════════════════════════════════════════════════════════════════
-echo "== Pruefe unaufgeloeste Symbole in $OUT/halo ..."
-if command -v nm > /dev/null 2>&1; then
-    UNDEFINED=$(nm -D --undefined-only "$OUT/halo" 2>/dev/null | awk '{print $NF}' | sort -u)
-else
-    UNDEFINED=""
-    echo "  (nm fehlt, ueberspringe Verifikation)"
-fi
-
-if [ -n "$UNDEFINED" ]; then
-    TOTAL=0
-    EXPECTED=0
-    UNKNOWN=""
-    for sym in $UNDEFINED; do
-        TOTAL=$((TOTAL + 1))
-        case "$sym" in
-            # EGL / GLES — System-Mali zur Laufzeit
-            egl*|gl[A-Z]*|glGet*|glBind*|glTex*|glDraw*|glEnable*|glDisable*|\
-            glClear*|glVertex*|glColor*|glDepth*|glStencil*|glBlend*|glCull*|\
-            glFront*|glPolygon*|glPixel*|glRead*|glViewport*|glScissor*|\
-            glFinish|glFlush|glActive*|glAttach*|glCompile*|glCreate*|glDelete*|\
-            glDetach*|glFramebuffer*|glGen*|glGet*|glIs*|glLink*|glProgram*|\
-            glRenderbuffer*|glShader*|glUniform*|glUse*|glVertexAttrib*|\
-            glBuffer*|glMap*|glUnmap*|glInvalidate*|glFence*|glWait*|glClient*|\
-            glGetError|glGetString|glGetIntegerv|glGetFloatv|glGetBooleanv)
-                EXPECTED=$((EXPECTED + 1))
-                ;;
-            # SDL2
-            SDL_*)
-                EXPECTED=$((EXPECTED + 1))
-                ;;
-            # libc / libm / libpthread / libdl — Standard
-            memcpy|memmove|memset|memcmp|memchr|strlen|strcpy|strncpy|strcat|\
-            strncat|strcmp|strncmp|strchr|strrchr|strstr|strtol|strtoul|strtod|\
-            strtof|strtoll|strtoull|atoi|atof|atol|malloc|calloc|realloc|free|\
-            printf|fprintf|sprintf|snprintf|vprintf|vfprintf|vsnprintf|puts|\
-            fputs|putchar|fputc|fopen|fclose|fread|fwrite|fseek|ftell|fflush|\
-            feof|ferror|perror|exit|abort|atexit|qsort|bsearch|rand|srand|\
-            getenv|setenv|unsetenv|time|clock|gettimeofday|clock_gettime|\
-            nanosleep|usleep|sleep|__errno_location|__assert_fail|__stack_chk_fail|\
-            __cxa_atexit|__cxa_finalize|\
-            pthread_*|dlopen|dlsym|dlclose|dlerror|\
-            open|open64|close|read|write|lseek|lseek64|fstat|stat|stat64|\
-            mkdir|rmdir|unlink|rename|opendir|readdir|closedir|select|poll|\
-            pipe|fork|exec*|wait*|waitpid|kill|raise|signal|sigaction|\
-            getpid|getppid|getuid|geteuid|getgid|getegid|getpwuid|\
-            mmap|mmap64|munmap|mprotect|ioctl|fcntl|fcntl64|access|chdir|\
-            getcwd|realpath|truncate|ftruncate|\
-            sqrt|sqrtf|pow|powf|sin|sinf|cos|cosf|tan|tanf|atan|atan2|\
-            exp|expf|log|logf|log10|log2|floor|floorf|ceil|ceilf|\
-            fabs|fabsf|round|roundf|trunc|truncf|copysign|copysignf|\
-            fmod|fmodf|ldexp|ldexpf|frexp|frexpf|isnan|isinf|finite|\
-            atan2f|asinf|acosf|sinhf|coshf|tanhf|exp2|exp2f|log1p|log1pf|\
-            hypot|hypotf|cbrt|cbrtf|erf|erff|tgamma|tgammaf|lgamma|lgammaf|\
-            __*|_*)
-                EXPECTED=$((EXPECTED + 1))
-                ;;
-            # Versionssymbole (GLIBC_2.17 usw.)
-            *@*)
-                EXPECTED=$((EXPECTED + 1))
-                ;;
-            # Leerzeilen
-            "")
-                ;;
-            *)
-                UNKNOWN="$UNKNOWN $sym"
-                ;;
-        esac
-    done
-    echo "  Symbole insgesamt:       $TOTAL"
-    echo "  davon erwartet:          $EXPECTED"
-    if [ -n "$UNKNOWN" ]; then
-        echo "  UNERWARTET:"
-        for sym in $UNKNOWN; do
-            echo "    $sym"
-        done
-        echo ""
-        echo "  Diese Symbole werden zur Laufzeit auf dem Geraet fehlen,"
-        echo "  wenn keine zusaetzliche Bibliothek sie bereitstellt. Bitte"
-        echo "  pruefen, ob eine weitere -l-Option oder eine System-.so noetig"
-        echo "  ist, und ob sie in Halo.sh auf dem LD_LIBRARY_PATH liegt."
-    else
-        echo "  OK: alle offenen Symbole gehoeren zur erwarteten Familie"
-        echo "      (EGL/GLES, SDL2, libc/libm/libpthread/libdl)."
-    fi
-else
-    echo "  (keine dynamisch unaufgeloesten Symbole)"
-fi
 
 cp build/android/halo_guest.elf "$OUT/halo_guest.elf"
 
