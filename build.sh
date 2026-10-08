@@ -137,6 +137,18 @@ fetch_opence_files() {
         die "OpenCE hat keinen port/third_party/expat-Ordner."
     fi
 
+    # 2b. Port-eigenes zlib (zlib_prefixed.h + die Quellen dazu).
+    #     hud_hires.c (OpenCE-Version) inkludiert "zlib_prefixed.h";
+    #     ohne diesen Ordner bricht der Build mit
+    #     „'zlib_prefixed.h' file not found" ab.
+    if [ -d "$opence_dir/port/third_party/zlib" ]; then
+        rm -rf "$SRC/port/third_party/zlib"
+        cp -a "$opence_dir/port/third_party/zlib" "$SRC/port/third_party/"
+        echo "   + port/third_party/zlib/"
+    else
+        die "OpenCE hat keinen port/third_party/zlib-Ordner."
+    fi
+
     # 3. Tools (Menue-Generatoren)
     for t in tools/ce_menus.py tools/port_settings.py; do
         if [ -f "$opence_dir/$t" ]; then
@@ -853,6 +865,7 @@ check_file  "port/linux/src/menu_files.c"                                       
 check_file  "port/linux/game/menu_tags.c"                                       "menu_tags.c"
 check_file  "port/linux/game/menu_functions.c"                                  "menu_functions.c"
 check_file  "port/third_party/expat/expat.h"                                    "expat.h"
+check_file  "port/third_party/zlib/zlib_prefixed.h"                             "zlib_prefixed.h (OpenCE)"
 check_file  "port/linux/src/hud_hires.c"                                        "hud_hires.c (OpenCE)"
 check_file  "port/linux/src/hud_hires.h"                                        "hud_hires.h (OpenCE)"
 check_patch "source/interface/ui_widget.c"      "pc_menu_tag"                   "ui_widget.c pc_menu_tag extern"
@@ -862,7 +875,9 @@ check_patch "source/cache/cache_files.c"        "cache_files_tag_instances"     
 check_patch "source/cache/cache_files.c"        "menu_tags_loaded"              "cache_files.c Menue-Hooks"
 check_patch "port/linux/src/menu_files.c"       "settings_only: externals"      "menu_files.c externals"
 check_patch "tools/linux_build.py"              "EXPAT_DIR"                     "linux_build.py Expat"
+check_patch "tools/linux_build.py"              "ZLIB_DIR"                      "linux_build.py zlib"
 check_patch "tools/android_build.py"            "EXPAT_DIR"                     "android_build.py Expat"
+check_patch "tools/android_build.py"            "ZLIB_DIR"                      "android_build.py zlib"
 
 if grep -q "settings_only: game data dispatcher" \
     "$SRC/source/interface/ui_widget_game_data_input_functions.c" 2>/dev/null; then
@@ -933,7 +948,7 @@ stamp=$({
     done
     [ -f "$HERE/pgo/halo_linux.profdata" ] && sha256sum "$HERE/pgo/halo_linux.profdata" | cut -d' ' -f1
     echo "pgo-mode=$PGO_MODE"
-    echo "settings-only=v3"
+    echo "settings-only=v4"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 echo "$stamp" > "$SRC/.port-stamp"
