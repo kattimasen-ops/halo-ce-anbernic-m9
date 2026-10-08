@@ -6,9 +6,10 @@
 #
 # POSIX-sh-kompatibel (dash): set -eu statt set -euo pipefail.
 #
-# WICHTIG: Der LLVM-Linker (lld) wird verwendet (-B/usr/bin -fuse-ld=lld),
-# weil der BFD-ld aus Ubuntu 20.04 (binutils 2.34) die moderne libmali.so.0
-# nicht lesen kann ("file too short"). lld versteht den modernen ELF-Standard.
+# WICHTIG: libmali wird NICHT gelinkt und NICHT ausgeliefert. Die Datei
+# im sysroot/ ist beschaedigt (fehlende Sektionstabellen). Die EGL/GLES-
+# Symbole werden zur Laufzeit aus der System-Mali geladen, die Halo.sh
+# bereits ueber /tmp/halo-mali bereitstellt.
 set -eu
 
 folder() {
@@ -58,8 +59,8 @@ copy_runtime_lib() {
     return 0
 }
 
+# libmali wird NICHT kopiert (siehe Kommentar oben).
 copy_runtime_lib "libSDL3"   "libSDL3.so.0"
-copy_runtime_lib "libmali"   "libmali.so.0"
 copy_runtime_lib "libSDL2"   "libSDL2-2.0.so.0"
 copy_runtime_lib "libdecor"  "libdecor-0.so.0"
 
@@ -80,14 +81,13 @@ link_library() {
     return 0
 }
 
+# libmali wird NICHT gelinkt (siehe Kommentar oben).
 link_library "libSDL2*"  "libSDL2.so"    || exit 1
 link_library "libSDL3*"  "libSDL3.so"    || exit 1
-link_library "libmali*"  "libmali.so"    || exit 1
 link_library "libdecor*" "libdecor.so"   || exit 1
 
 # WICHTIG: -B/usr/bin zeigt GCC, wo er seine Werkzeuge sucht; dort liegt
 # der ld.lld-Symlink (vom Workflow angelegt). -fuse-ld=lld wählt lld.
-# Ohne -B würde GCC den BFD-ld verwenden und an der libmali scheitern.
 CFLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -fPIC -Wall -Wno-unused-function \
         -D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS \
         -DHALO_ANDROID \
@@ -160,17 +160,14 @@ compile port/third_party/tomlc17/tomlc17.c -w
 compile build/android/host/host_import_table.c
 
 echo "LINK $OUT/halo (dynamisch, lld)"
-# Erst den Linker bestätigen, dann linken. -Wl,--version gibt llds Version aus.
-echo "  -> Linker-Version:"
-$CC $CFLAGS -Wl,--version -o /dev/null $objects 2>&1 | head -1 || true
-
 $CC $CFLAGS -o "$OUT/halo" $objects \
     -L"$OUT/lib" \
     -Wl,-rpath-link,"$OUT/lib" \
     -Wl,--allow-shlib-undefined \
+    -Wl,--unresolved-symbols=ignore-all \
     -Wl,-O1 -Wl,--as-needed -Wl,--gc-sections \
     -flto \
-    -lSDL2 -lmali -lpthread -ldl -lm
+    -lSDL2 -lpthread -ldl -lm
 
 cp build/android/halo_guest.elf "$OUT/halo_guest.elf"
 
