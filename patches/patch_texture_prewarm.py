@@ -2,25 +2,36 @@
 """
 Texture-Prewarming fuer Halo CE Universal (RK3326/Mali-G31).
 
-Fix ggue. dem urspruenglichen Patch:
-  texture_upload_queue wird in xbox_textures.c erst NACH
-  xgpu_texture_worker_start definiert (im Knulli-Patch unter
-  #ifdef HALO_ANDROID). xgpu_texture_prewarm_begin wird direkt nach
-  xgpu_texture_worker_start eingefuegt und ruft texture_upload_queue
-  auf, ohne dass eine Deklaration sichtbar ist -> C99-Fehler
-  "call to undeclared function".
+Das Problem:
+  Der Texture-Worker dekodiert Texturen asynchron, aber die erste
+  Textur einer Map wird immer noch im Gameplay hochgeladen, was zu
+  einem Spike fuehrt.
+
+Der Fix:
+  Beim Map-Load werden alle Texturen, die in den Tags der Map
+  referenziert werden, in die Upload-Queue des Workers geschoben.
+  Der Worker dekodiert sie im Hintergrund, waehrend die Map schon
+  spielbar ist.
+
+WICHTIG (2026-10-08):
+  xgpu_texture_prewarm_begin wird direkt nach xgpu_texture_worker_start
+  eingefuegt. Die Definition von texture_upload_queue steht in
+  xbox_textures.c aber NACH xgpu_texture_worker_start. Vor dem Aufruf
+  fehlt also eine Deklaration -> C99-Fehler:
+    "call to undeclared function 'texture_upload_queue'"
 
 Loesung:
-  Forward-Deklaration von texture_upload_queue VOR
-  xgpu_texture_prewarm_begin. Die echte Definition
-  (static BOOL texture_upload_queue(struct texture_entry *,
-  const D3DCOLOR *)) bleibt unveraendert; die Deklaration muss exakt
-  dazu passen.
+  Forward-Deklaration direkt vor xgpu_texture_prewarm_begin, mit
+  EXAKT derselben Signatur wie die Definition:
+    static BOOL texture_upload_queue(struct texture_entry *entry,
+                                     const D3DCOLOR *palette);
+  Kein Stub, keine zweite Definition.
 
 Idempotent. Bricht ab, wenn die Anker fehlen.
 """
 import os
 import sys
+
 
 MARKER = "texture_prewarm_guard"
 
@@ -52,16 +63,16 @@ def patch_xbox_textures(src_root):
     new = ANCHOR + '''
 
 #ifdef HALO_ANDROID
-/* texture_prewarm_guard: Texture-Prewarming beim Map-Load.
+/* ''' + MARKER + ''': Texture-Prewarming beim Map-Load.
 
-Die vorhandenen Texturen in der Cache-Tabelle werden auf einen Schlag in
-die Worker-Queue geschoben, sobald die Map geladen ist. Der Worker
-dekodiert sie im Hintergrund.
+Die vorhandenen Texturen in der Cache-Tabelle werden auf einen
+Schlag in die Worker-Queue geschoben, sobald die Map geladen ist.
+Der Worker dekodiert sie im Hintergrund.
 
-Wichtig: texture_upload_queue wird weiter unten in dieser Datei definiert
-(static BOOL texture_upload_queue(struct texture_entry *, const D3DCOLOR *)).
-Die Deklaration hier muss exakt zu dieser Definition passen, sonst
-meldet clang eine inkompatible Redefinition. */
+Forward-Deklaration: die Definition von texture_upload_queue steht
+weiter unten in dieser Datei (im Knulli-Patch). C99 verlangt eine
+Deklaration vor dem Aufruf. Signatur muss exakt zur Definition
+passen. Kein Stub - nur eine Deklaration. */
 static BOOL texture_upload_queue(struct texture_entry *entry, const D3DCOLOR *palette);
 
 void xgpu_texture_prewarm_begin(void)
@@ -75,6 +86,8 @@ void xgpu_texture_prewarm_begin(void)
 	prewarmed = 1;
 	if (!__atomic_load_n(&worker_running, __ATOMIC_ACQUIRE))
 		return;
+	/* (die Texture-Buckets durchgehen und alle gueltigen Eintraege
+	in die Queue schieben) */
 	for (bucket = 0; bucket < TEXTURE_BUCKET_COUNT; bucket++)
 	{
 		struct texture_entry *entry;
