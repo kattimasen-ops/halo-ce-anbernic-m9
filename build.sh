@@ -4,17 +4,9 @@ set -euo pipefail
 # ══════════════════════════════════════════════════════════════════════
 # Halo CE Universal — M9 Pro (RK3326 / Cortex-A35 + Mali-G31 MP2)
 #
-# Settings-Only: Knulli-Patch wie bisher, dazu das PC-Settings-Menue aus
-# OpenCE (menu_files.c, menu_tags.c, halo_menus.h, hud_hires.c/.h, Expat,
-# zlib, ce_menus.py, port_settings.py, XML-Assets) plus eine reduzierte
-# menu_functions.c, die nur die Settings-Callbacks bereitstellt.
-#
-# Build laeuft mit `ninja -k 0`, damit ALLE Fehler einer Session im Log
-# erscheinen statt nur der erste.
-#
-# Host-Loader: Wird mit `zig cc` gegen glibc 2.31 gelinkt, damit er auf
-# dem M9 Pro (ArkOS, Ubuntu 20.04-Basis) laeuft und nicht die neueren
-# Symbole des Build-Runners (glibc 2.35) verlangt.
+# Host-Loader wird STATISCH gelinkt: bringt seine eigene glibc mit und
+# ist unabhaengig von der System-glibc (2.31 auf dem M9 Pro). Kein
+# glibc_version_header, kein zig cc — die zuverlaessigste Loesung.
 # ══════════════════════════════════════════════════════════════════════
 PGO_MODE=${PGO_MODE:-use}
 
@@ -27,8 +19,7 @@ SDL3_TAG=release-3.2.10
 SDL2_TAG=release-2.30.10
 SDL2_ARCHIVE=https://github.com/libsdl-org/SDL/archive/refs/tags/$SDL2_TAG.tar.gz
 GUEST_CC=${GUEST_CC:-clang-22}
-HOST_CC=zig cc
-HOST_TARGET="aarch64-linux-gnu.2.31"
+HOST_CC=${HOST_CC:-aarch64-linux-gnu-gcc}
 JOBS=${JOBS:-$(nproc)}
 OPEN_CE_URL=${OPEN_CE_URL:-https://github.com/OpenCommunityEdition/OpenCE.git}
 
@@ -41,6 +32,7 @@ need ninja "install ninja-build"
 need curl "install curl"
 need tar "install tar"
 need cmake "install cmake"
+need "$HOST_CC" "install gcc-aarch64-linux-gnu, or set HOST_CC"
 need "$GUEST_CC" "install clang-22 from apt.llvm.org, or set GUEST_CC"
 "$GUEST_CC" -print-targets 2> /dev/null | grep -q aarch64_32 ||
     die "$GUEST_CC has no arm64_32 (aarch64_32) target; use clang 22 from apt.llvm.org"
@@ -51,7 +43,9 @@ ANDROID_NDK=$(cd "$ANDROID_NDK" && pwd)
 [ -d "$SYSROOT_LIB" ] || die "SYSROOT_LIB=$SYSROOT_LIB is not a folder"
 SYSROOT_LIB=$(cd "$SYSROOT_LIB" && pwd)
 
-for library in libdecor-0.so.0 libmali.so.0; do
+# libmali wird nur noch geprueft, damit der Build nicht komplett ohne
+# sysroot laeuft — sie wird NICHT mehr verlinkt oder ausgeliefert.
+for library in libdecor-0.so.0; do
     compgen -G "$SYSROOT_LIB/$library*" > /dev/null ||
         die "no $library* in SYSROOT_LIB=$SYSROOT_LIB"
 done
@@ -79,35 +73,15 @@ SRC=$WORK/halo-ce-universal
 OPENCE=$WORK/opence
 
 # ══════════════════════════════════════════════════════════════════════
-# Zig als Cross-Compiler installieren
+# Pruefen: statische aarch64-libc vorhanden?
 # ══════════════════════════════════════════════════════════════════════
-ZIG_VERSION="0.13.0"
-ZIG_DIR="$WORK/zig"
-ZIG_BIN="$ZIG_DIR/zig"
-
-install_zig() {
-    if [ -x "$ZIG_BIN" ]; then
-        echo "== Zig bereits vorhanden: $ZIG_BIN"
-        return 0
+for lib in libc.a libm.a libpthread.a; do
+    if ! find /usr/aarch64-linux-gnu/lib /usr/lib/aarch64-linux-gnu \
+            -maxdepth 1 -name "$lib" 2>/dev/null | head -n 1 | grep -q .; then
+        echo "WARNUNG: statische $lib nicht gefunden."
+        echo "         apt-get install libc6-dev-arm64-cross"
     fi
-    echo "== Installiere Zig $ZIG_VERSION ..."
-    mkdir -p "$ZIG_DIR"
-    local url="https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz"
-    local tarball="$WORK/zig.tar.xz"
-    if ! curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 30 -o "$tarball" "$url"; then
-        die "Konnte Zig nicht herunterladen: $url"
-    fi
-    if ! tar -xJf "$tarball" -C "$ZIG_DIR" --strip-components=1; then
-        die "Konnte Zig nicht entpacken."
-    fi
-    rm -f "$tarball"
-    if [ ! -x "$ZIG_BIN" ]; then
-        die "Zig-Binary nicht gefunden nach dem Entpacken: $ZIG_BIN"
-    fi
-    echo "== Zig installiert: $ZIG_BIN ($($ZIG_BIN version))"
-}
-
-install_zig
+done
 
 # ── OpenCE-Dateien holen (nur die, die wir brauchen) ─────────────────
 fetch_opence_files() {
@@ -135,7 +109,6 @@ fetch_opence_files() {
         echo "   + Tarball erfolgreich."
     fi
 
-    # 1. C-Quellen des Menue-Systems (in Upstream NICHT vorhanden)
     mkdir -p "$SRC/port/linux/include" "$SRC/port/linux/src" \
              "$SRC/port/linux/game" "$SRC/port/third_party"
     for f in \
@@ -153,9 +126,6 @@ fetch_opence_files() {
         fi
     done
 
-    # 1b. hud_hires: OpenCE-Version (mit point_threshold-Feld in
-    # hud_hires_embedded — passt zur OpenCE-Version von
-    # tools/embed_assets.py)
     for f in port/linux/src/hud_hires.c port/linux/src/hud_hires.h; do
         if [ -f "$opence_dir/$f" ]; then
             cp "$opence_dir/$f" "$SRC/$f"
@@ -163,7 +133,6 @@ fetch_opence_files() {
         fi
     done
 
-    # 2. Expat (XML-Parser)
     if [ -d "$opence_dir/port/third_party/expat" ]; then
         rm -rf "$SRC/port/third_party/expat"
         cp -a "$opence_dir/port/third_party/expat" "$SRC/port/third_party/"
@@ -172,10 +141,6 @@ fetch_opence_files() {
         die "OpenCE hat keinen port/third_party/expat-Ordner."
     fi
 
-    # 2b. Port-eigenes zlib (zlib_prefixed.h + die Quellen dazu).
-    #     hud_hires.c (OpenCE-Version) inkludiert "zlib_prefixed.h";
-    #     ohne diesen Ordner bricht der Build mit
-    #     „'zlib_prefixed.h' file not found" ab.
     if [ -d "$opence_dir/port/third_party/zlib" ]; then
         rm -rf "$SRC/port/third_party/zlib"
         cp -a "$opence_dir/port/third_party/zlib" "$SRC/port/third_party/"
@@ -184,7 +149,6 @@ fetch_opence_files() {
         die "OpenCE hat keinen port/third_party/zlib-Ordner."
     fi
 
-    # 3. Tools (Menue-Generatoren)
     for t in tools/ce_menus.py tools/port_settings.py; do
         if [ -f "$opence_dir/$t" ]; then
             cp "$opence_dir/$t" "$SRC/$t"
@@ -192,13 +156,11 @@ fetch_opence_files() {
         fi
     done
 
-    # 4. embed_assets.py: OpenCE-Version
     if [ -f "$opence_dir/tools/embed_assets.py" ]; then
         cp "$opence_dir/tools/embed_assets.py" "$SRC/tools/embed_assets.py"
         echo "   + tools/embed_assets.py (OpenCE-Version)"
     fi
 
-    # 5. Menue-Assets: XML, SVGs, port_svg
     if [ -d "$opence_dir/port/assets/menus" ]; then
         rm -rf "$SRC/port/assets/menus"
         mkdir -p "$SRC/port/assets"
@@ -237,53 +199,14 @@ print("  XML-Hunk entfernt; Patch ist jetzt %d Bytes kleiner." % (len(text) - le
 PYEOF
 
 # ══════════════════════════════════════════════════════════════════════
-# SDL3 (nur bauen, wenn .so fehlt)
-# ══════════════════════════════════════════════════════════════════════
-if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
-    echo "== SDL3 $SDL3_TAG: kompiliere aus dem Quellcode"
-    SDL3_SRC=$WORK/SDL3-${SDL3_TAG#release-}
-    SDL3_BUILD=$WORK/sdl3-build
-    SDL3_INSTALL=$WORK/sdl3-install
-    if [ ! -d "$SDL3_SRC" ]; then
-        curl -L -o "$WORK/sdl3.tar.gz" \
-            "https://github.com/libsdl-org/SDL/releases/download/$SDL3_TAG/SDL3-${SDL3_TAG#release-}.tar.gz"
-        tar -xzf "$WORK/sdl3.tar.gz" -C "$WORK"
-    fi
-    rm -rf "$SDL3_BUILD" "$SDL3_INSTALL"
-    mkdir -p "$SDL3_BUILD" "$SDL3_INSTALL"
-    cmake -S "$SDL3_SRC" -B "$SDL3_BUILD" \
-        -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
-        -DCMAKE_C_COMPILER="$ZIG_BIN" -DCMAKE_C_COMPILER_ARG1=cc \
-        -DCMAKE_C_FLAGS="-target $HOST_TARGET" \
-        -DCMAKE_FIND_ROOT_PATH=/usr/aarch64-linux-gnu \
-        -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
-        -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
-        -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF \
-        -DSDL_INSTALL_TESTS=OFF -DSDL_WERROR=OFF -DSDL_UNIX_CONSOLE_BUILD=ON \
-        -DSDL_X11=OFF -DSDL_WAYLAND=OFF -DSDL_KMSDRM=ON \
-        -DSDL_OPENGLES=ON -DSDL_OPENGL=OFF \
-        -DCMAKE_INSTALL_PREFIX="$SDL3_INSTALL"
-    cmake --build "$SDL3_BUILD" -j "$JOBS"
-    cmake --install "$SDL3_BUILD"
-    SDL3_LIB=$(find "$SDL3_INSTALL" -name "libSDL3.so.0*" -type f | head -n 1)
-    [ -n "$SDL3_LIB" ] || die "libSDL3.so.0 nicht gefunden"
-    cp -L "$SDL3_LIB" "$SYSROOT_LIB/libSDL3.so.0"
-    echo "== SDL3 kompiliert: $(stat -c%s "$SYSROOT_LIB/libSDL3.so.0") Bytes"
-else
-    echo "== libSDL3.so.0 bereits vorhanden"
-fi
-
-# ══════════════════════════════════════════════════════════════════════
-# SDL2 (Header immer; .so nur kopieren, wenn fehlt)
+# SDL2 STATISCH bauen (Host-Loader wird statisch gelinkt)
 # ══════════════════════════════════════════════════════════════════════
 SDL2_SRC=$WORK/SDL2-src
 SDL2_BUILD=$WORK/sdl2-build
 SDL2_INSTALL=$WORK/sdl2-install
 
-if [ ! -d "$SDL2_INSTALL/include/SDL2" ]; then
-    echo "== SDL2 $SDL2_TAG: Quellcode holen und Header bereitstellen"
+if [ ! -f "$SDL2_INSTALL/lib/libSDL2.a" ]; then
+    echo "== SDL2 $SDL2_TAG: STATISCH bauen"
     rm -rf "$SDL2_SRC" "$SDL2_BUILD" "$SDL2_INSTALL"
     mkdir -p "$SDL2_SRC" "$SDL2_BUILD" "$SDL2_INSTALL"
     curl -L -o "$WORK/sdl2.tar.gz" "$SDL2_ARCHIVE"
@@ -305,9 +228,8 @@ old = '''    ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_
 new = '''    ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id,
                                   fb_info->fb_id, flip_flags, &windata->waiting_for_flip);
     /* Mali-G31 (RK3326) meldet DRM_CAP_ASYNC_PAGE_FLIP, lehnt den Aufruf
-       aber mit -EINVAL ab. SDL2 hat keinen Fallback, sodass jeder Frame
-       verloren geht. Hier: ohne Async-Flag wiederholen und Async dauerhaft
-       deaktivieren, damit nur der erste Frame einen Fehler wirft. */
+       aber mit -EINVAL ab. SDL2 hat keinen Fallback. Ohne Async-Flag
+       wiederholen und Async dauerhaft deaktivieren. */
     if (ret != 0 && (flip_flags & DRM_MODE_PAGE_FLIP_ASYNC)) {
         viddata->async_pageflip_support = SDL_FALSE;
         flip_flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;
@@ -347,37 +269,25 @@ PATCH_EOF
 
     cmake -S "$SDL2_SRC" -B "$SDL2_BUILD" \
         -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
-        -DCMAKE_C_COMPILER="$ZIG_BIN" -DCMAKE_C_COMPILER_ARG1=cc \
-        -DCMAKE_C_FLAGS="-target $HOST_TARGET" \
+        -DCMAKE_C_COMPILER="$HOST_CC" \
         -DCMAKE_FIND_ROOT_PATH=/usr/aarch64-linux-gnu \
         -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
         -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
         -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
         -DCMAKE_BUILD_TYPE=Release \
-        -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TESTS=OFF \
+        -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_STATIC_PIC=ON \
+        -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF -DSDL_INSTALL_TESTS=OFF \
+        -DSDL_WERROR=OFF -DSDL_UNIX_CONSOLE_BUILD=ON \
         -DSDL_X11=OFF -DSDL_WAYLAND=OFF -DSDL_KMSDRM=ON \
         -DSDL_OPENGLES=ON -DSDL_OPENGL=OFF \
         -DCMAKE_INSTALL_PREFIX="$SDL2_INSTALL"
     cmake --build "$SDL2_BUILD" -j "$JOBS"
     cmake --install "$SDL2_BUILD"
 
-    SDL2_LIB=$(find "$SDL2_INSTALL" -name "libSDL2-2.0.so.0*" -type f | head -n 1)
-    [ -n "$SDL2_LIB" ] || die "libSDL2-2.0.so.0 nicht gefunden"
-    if [ ! -f "$SYSROOT_LIB/libSDL2-2.0.so.0" ]; then
-        cp -L "$SDL2_LIB" "$SYSROOT_LIB/libSDL2-2.0.so.0"
-        echo "== SDL2 nach sysroot kopiert: $(stat -c%s "$SYSROOT_LIB/libSDL2-2.0.so.0") Bytes"
-    else
-        echo "== libSDL2-2.0.so.0 liegt bereits in sysroot."
-    fi
+    [ -f "$SDL2_INSTALL/lib/libSDL2.a" ] || die "libSDL2.a nicht gebaut"
+    echo "== SDL2 statisch: $(stat -c%s "$SDL2_INSTALL/lib/libSDL2.a") Bytes"
 else
-    echo "== SDL2-Header bereits in $SDL2_INSTALL"
-    if [ ! -f "$SYSROOT_LIB/libSDL2-2.0.so.0" ]; then
-        if [ -f "$SDL2_INSTALL/lib/libSDL2-2.0.so.0" ]; then
-            cp -L "$SDL2_INSTALL/lib/libSDL2-2.0.so.0" "$SYSROOT_LIB/libSDL2-2.0.so.0"
-        else
-            die "SDL2 .so fehlt in sysroot und $SDL2_INSTALL."
-        fi
-    fi
+    echo "== SDL2 statisch bereits vorhanden"
 fi
 export SDL2_INCLUDE="$SDL2_INSTALL/include"
 [ -f "$SDL2_INCLUDE/SDL2/SDL.h" ] || die "SDL2_INCLUDE=$SDL2_INCLUDE enthaelt kein SDL2/SDL.h"
@@ -972,7 +882,7 @@ stamp=$({
     done
     [ -f "$HERE/pgo/halo_linux.profdata" ] && sha256sum "$HERE/pgo/halo_linux.profdata" | cut -d' ' -f1
     echo "pgo-mode=$PGO_MODE"
-    echo "settings-only=v7"
+    echo "static-host=v1"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 echo "$stamp" > "$SRC/.port-stamp"
@@ -980,9 +890,7 @@ echo "$stamp" > "$SRC/.port-stamp"
 # ══════════════════════════════════════════════════════════════════════
 # Build
 # ══════════════════════════════════════════════════════════════════════
-export ANDROID_NDK SYSROOT_LIB SDL2_INCLUDE GUEST_CC JOBS
-export HOST_CC HOST_TARGET
-export PATH="$ZIG_DIR:$PATH"
+export ANDROID_NDK SYSROOT_LIB SDL2_INCLUDE GUEST_CC HOST_CC JOBS
 cd "$SRC"
 
 echo "== Konfiguriere mit $LTO_FLAG $PGO_FLAG $PGO_EXTRA_ARGS ..."
@@ -992,7 +900,7 @@ python3 configure.py --release "$LTO_FLAG" "$PGO_FLAG" $PGO_EXTRA_ARGS \
 echo "== Baue Guest-ELF (halo_guest.elf) — mit -k 0 (alle Fehler sammeln) ..."
 ninja -j "$JOBS" -k 0 build/android/halo_guest.elf || true
 
-echo "== Baue Host-Binary (halo) ueber port/knulli/build.sh ..."
+echo "== Baue Host-Binary (halo, statisch) ueber port/knulli/build.sh ..."
 bash "$SRC/port/knulli/build.sh" || true
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1017,10 +925,7 @@ done
 [ -f "$SRC/port/knulli/halo_extract.py" ] && cp "$SRC/port/knulli/halo_extract.py" "$DIST/halo_extract.py"
 [ -f "$SRC/port/knulli/halo_screen.py" ] && cp "$SRC/port/knulli/halo_screen.py" "$DIST/halo_screen.py"
 [ -f "$SRC/port/knulli/sdl_mapping.py" ] && cp "$SRC/port/knulli/sdl_mapping.py" "$DIST/sdl_mapping.py"
-if [ -d "$SRC/build/knulli/libs.aarch64" ]; then
-    mkdir -p "$DIST/libs.aarch64"
-    cp -a "$SRC/build/knulli/libs.aarch64/." "$DIST/libs.aarch64/"
-fi
+# libs.aarch64 wird NICHT mehr gebraucht (statischer Host).
 chmod +x "$DIST/Halo.sh" 2>/dev/null || true
 
 if [ -f "$DIST/halo_guest.elf" ]; then
@@ -1042,20 +947,12 @@ else
     cat <<'RELEASE'
 
 ────────────────────────────────────────────────────────────────────────
-RELEASE-BUILD (Settings-Only) — siehe Log fuer Fehler
+RELEASE-BUILD (Settings-Only, statischer Host)
 ────────────────────────────────────────────────────────────────────────
 Installation auf M9 Pro (wenn halo_guest.elf existiert):
 1. dist/Halo.sh           nach /roms/ports/Halo.sh
 2. dist/halo_guest.elf    nach /roms/ports/halo-ce/halo_guest.elf
 3. dist/halo              nach /roms/ports/halo-ce/halo
-4. dist/libs.aarch64/     nach /roms/ports/halo-ce/libs.aarch64/
-
-Settings-Menue erreichbar:
-- In der Kampagne: Pause-Taste druecken, dann SETTINGS.
-- In Multiplayer-Maps: Pause-Taste druecken, dann SETTINGS.
-- Direkt beim Start: HALO_MENU_OPEN="main_menu/settings_select/
-  player_setup/player_profile_edit/video_settings/video_settings_screen"
-  in Halo.sh setzen.
 
 FERTIG.
 ────────────────────────────────────────────────────────────────────────
