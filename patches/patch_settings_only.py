@@ -4,7 +4,7 @@
 Setzt folgende Hooks:
   1. ui_widget.c: Forward-Deklaration `pc_menu_tag`
   2. ui_widget_event_handler_functions.c: Dispatcher + Name-Lookup
-  3. ui_widget_game_data_input_functions.c: Dispatcher
+  3. ui_widget_game_data_input_functions.c: Dispatcher (robust, per Regex)
   4. cache_files.c: Tag-Accessors + menu_tags_loaded/unloaded
   5. menu_tags.c: Solo-Pause-Patch (SETTINGS auch in der Kampagne)
   6. tools/linux_build.py + tools/android_build.py: Expat
@@ -14,6 +14,7 @@ Idempotent ueber Marker-Kommentare.
 """
 import json
 import os
+import re
 import sys
 
 
@@ -46,7 +47,7 @@ def patch_ui_widget(src_root):
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 2. ui_widget_event_handler_functions.c
+# 2. ui_widget_event_handler_functions.c: Dispatcher + Name-Lookup
 # ══════════════════════════════════════════════════════════════════════
 def patch_event_dispatcher(src_root):
     path = os.path.join(src_root, "source", "interface",
@@ -60,88 +61,151 @@ def patch_event_dispatcher(src_root):
         print("  ui_widget_event_handler_functions.c: bereits gepatcht.")
         return
 
+    # halo_menus.h-Include (fuer PC_MENU_FUNCTION_BASE)
     anchor = '#include "text/unicode.h"\n'
     if anchor in text and '#include "halo_menus.h"' not in text:
-        text = text.replace(anchor, anchor + '#include "halo_menus.h" /* settings_only */\n', 1)
+        text = text.replace(anchor,
+            anchor + '#include "halo_menus.h" /* settings_only */\n', 1)
 
-    needle = 'boolean ui_widget_event_handler_function_invoke(\n'
-    idx = text.find(needle)
-    if idx < 0:
-        print("FEHLER: ui_widget_event_handler_function_invoke fehlt.", file=sys.stderr)
-        sys.exit(1)
-    close = text.find(')\n{', idx)
-    if close < 0:
-        print("FEHLER: Funktion-Rumpf nicht gefunden.", file=sys.stderr)
-        sys.exit(1)
-    insert_at = close + 3
-    dispatch = (
-        '\n\t/* settings_only: dispatcher */\n'
-        '\tif (function_index >= PC_MENU_FUNCTION_BASE && function_index < 0x8000)\n'
-        '\t{\n'
-        '\t\textern boolean pc_menu_event_function_invoke(struct widget_instance *widget,\n'
-        '\t\t\tstruct event_record *event, long function_index, boolean *widget_deleted);\n'
-        '\t\treturn pc_menu_event_function_invoke(widget, event,\n'
-        '\t\t\tfunction_index - PC_MENU_FUNCTION_BASE, widget_deleted);\n'
-        '\t}\n'
-    )
-    text = text[:insert_at] + dispatch + text[insert_at:]
+    # Robuste Suche: jede Funktionsdefinition, deren Name
+    # "event_handler_function_invoke" enthaelt.
+    pattern = re.compile(
+        r'\n(?:void|boolean|short|long|int)\s+'
+        r'([a-zA-Z_][a-zA-Z0-9_]*event_handler_function_invoke)\s*'
+        r'\(([^)]*)\)\s*\n?\{',
+        re.MULTILINE)
 
-    text += (
-        '\n\n'
-        '/* settings_only: name-lookup fuer menu_tags.c */\n'
-        'char const *ui_widget_event_handler_function_name(long function_index)\n'
-        '{\n'
-        '\treturn function_index >= 0 && function_index < (long)NUMBEROF(event_handler_function_list.names) ?\n'
-        '\t\tevent_handler_function_list.names[function_index] : NULL;\n'
-        '}\n'
-    )
+    match = None
+    for m in pattern.finditer(text):
+        if m.start() < len(text) // 2:
+            match = m
+            break
+
+    if not match:
+        print("  WARNUNG: event_handler_function_invoke-Dispatcher nicht gefunden.")
+        print("           Menue-Aktionen werden nicht ausgefuehrt.")
+    else:
+        fn_name = match.group(1)
+        args_str = match.group(2)
+        args = [a.strip() for a in args_str.split(',')]
+        param_name = "function_index"
+        if args and args[-1]:
+            parts = args[-1].split()
+            if parts:
+                param_name = parts[-1].lstrip('*')
+
+        insert_at = match.end()
+        dispatch = (
+            '\n\t/* settings_only: dispatcher */\n'
+            '\tif ((long)' + param_name + ' >= PC_MENU_FUNCTION_BASE && '
+            '(long)' + param_name + ' < 0x8000)\n'
+            '\t{\n'
+            '\t\textern boolean pc_menu_event_function_invoke('
+            'struct widget_instance *widget, struct event_record *event, '
+            'long function_index, boolean *widget_deleted);\n'
+            '\t\treturn pc_menu_event_function_invoke(widget, event, '
+            '(long)' + param_name + ' - PC_MENU_FUNCTION_BASE, widget_deleted);\n'
+            '\t}\n'
+        )
+        text = text[:insert_at] + dispatch + text[insert_at:]
+        print(f"  ui_widget_event_handler_functions.c: Dispatcher in "
+              f"{fn_name}() eingebaut (Parameter: {param_name}).")
+
+    # Name-Lookup-Funktion am Ende anhaengen, falls nicht vorhanden
+    if "ui_widget_event_handler_function_name" not in text:
+        text += (
+            '\n\n'
+            '/* settings_only: name-lookup fuer menu_tags.c */\n'
+            'char const *ui_widget_event_handler_function_name(long function_index)\n'
+            '{\n'
+            '\treturn function_index >= 0 && '
+            'function_index < (long)NUMBEROF(event_handler_function_list.names) ?\n'
+            '\t\tevent_handler_function_list.names[function_index] : NULL;\n'
+            '}\n'
+        )
+        print("  ui_widget_event_handler_functions.c: Name-Lookup eingebaut.")
+    else:
+        print("  ui_widget_event_handler_functions.c: Name-Lookup bereits vorhanden.")
+
     with open(path, "w") as f:
         f.write(text)
-    print("  ui_widget_event_handler_functions.c: Dispatcher + Name-Lookup eingebaut.")
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 3. ui_widget_game_data_input_functions.c
+# 3. ui_widget_game_data_input_functions.c: Dispatcher (robust)
+#
+# Sucht die Dispatch-Funktion per Regex, akzeptiert mehrere Rueckgabe-
+# typen und Parameternamen. Bricht nicht ab, wenn sie fehlt (dann
+# funktioniert das Menue trotzdem, nur der Live-Help-Text der Settings
+# aktualisiert sich nicht).
 # ══════════════════════════════════════════════════════════════════════
 def patch_game_data_dispatcher(src_root):
     path = os.path.join(src_root, "source", "interface",
                         "ui_widget_game_data_input_functions.c")
     if not os.path.exists(path):
-        print(f"FEHLER: {path} nicht gefunden.", file=sys.stderr)
-        sys.exit(1)
+        print(f"  WARNUNG: {path} fehlt. Dispatcher wird uebersprungen.")
+        return
     with open(path) as f:
         text = f.read()
     if "settings_only: game data dispatcher" in text:
         print("  ui_widget_game_data_input_functions.c: bereits gepatcht.")
         return
 
+    # halo_menus.h-Include (fuer PC_MENU_FUNCTION_BASE)
     anchor = '#include "cseries.h"\n'
     if anchor in text and '#include "halo_menus.h"' not in text:
-        text = text.replace(anchor, anchor + '#include "halo_menus.h" /* settings_only */\n', 1)
+        text = text.replace(anchor,
+            anchor + '#include "halo_menus.h" /* settings_only */\n', 1)
 
-    needle = 'void ui_widget_game_data_input_function_invoke(\n'
-    idx = text.find(needle)
-    if idx < 0:
-        print("FEHLER: ui_widget_game_data_input_function_invoke fehlt.", file=sys.stderr)
-        sys.exit(1)
-    close = text.find(')\n{', idx)
-    if close < 0:
-        print("FEHLER: Funktion-Rumpf nicht gefunden.", file=sys.stderr)
-        sys.exit(1)
-    insert_at = close + 3
+    # Robuste Suche: jede Funktionsdefinition, deren Name
+    # "game_data_input" enthaelt.
+    pattern = re.compile(
+        r'\n(?:void|boolean|short|long|int)\s+'
+        r'([a-zA-Z_][a-zA-Z0-9_]*game_data_input[a-zA-Z0-9_]*)\s*'
+        r'\(([^)]*)\)\s*\n?\{',
+        re.MULTILINE)
+
+    match = None
+    for m in pattern.finditer(text):
+        if m.start() < len(text) // 2:
+            match = m
+            break
+
+    if not match:
+        print("  WARNUNG: game_data_input-Dispatcher nicht gefunden.")
+        print("           Einstellungen werden trotzdem gespeichert; nur der")
+        print("           Hilfe-Text der Settings aktualisiert sich nicht live.")
+        with open(path, "w") as f:
+            f.write(text)
+        return
+
+    fn_name = match.group(1)
+    args_str = match.group(2)
+    args = [a.strip() for a in args_str.split(',')]
+    param_name = "function_index"
+    if args and args[-1]:
+        parts = args[-1].split()
+        if parts:
+            param_name = parts[-1].lstrip('*')
+
+    insert_at = match.end()
     dispatch = (
         '\n\t/* settings_only: game data dispatcher */\n'
-        '\tif (function >= PC_MENU_FUNCTION_BASE && function < 0x8000)\n'
+        '\tif ((long)' + param_name + ' >= PC_MENU_FUNCTION_BASE && '
+        '(long)' + param_name + ' < 0x8000)\n'
         '\t{\n'
-        '\t\textern void pc_menu_game_data_function_invoke(struct widget_instance *widget, long function);\n'
-        '\t\tpc_menu_game_data_function_invoke(widget, function - PC_MENU_FUNCTION_BASE);\n'
+        '\t\textern void pc_menu_game_data_function_invoke('
+        'struct widget_instance *widget, long function);\n'
+        '\t\tpc_menu_game_data_function_invoke(widget, '
+        '(long)' + param_name + ' - PC_MENU_FUNCTION_BASE);\n'
         '\t\treturn;\n'
         '\t}\n'
     )
     text = text[:insert_at] + dispatch + text[insert_at:]
     with open(path, "w") as f:
         f.write(text)
-    print("  ui_widget_game_data_input_functions.c: Dispatcher eingebaut.")
+    print(f"  ui_widget_game_data_input_functions.c: Dispatcher in "
+          f"{fn_name}() eingebaut (Parameter: {param_name}).")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -219,12 +283,6 @@ def patch_cache_files(src_root):
 
 # ══════════════════════════════════════════════════════════════════════
 # 5. menu_tags.c: Solo-Pause-Patch
-#
-# Erweitert die Guard-Bedingung so, dass die Menue-Tags auch auf
-# Solo-Maps geladen werden (nicht nur bei display.menus = "pc" und
-# nicht nur auf Multiplayer-Maps). Der Pause-Patch wird in zwei
-# Funktionen aufgeteilt: pause_patch_multiplayer (unveraendert) und
-# pause_patch_solo (neu, fuer ui\shell\solo_game).
 # ══════════════════════════════════════════════════════════════════════
 def patch_menu_tags_solo_pause(src_root):
     path = os.path.join(src_root, "port", "linux", "game", "menu_tags.c")
@@ -237,7 +295,7 @@ def patch_menu_tags_solo_pause(src_root):
         print("  menu_tags.c: Solo-Pause-Patch bereits aktiv.")
         return
 
-    # ── 5a. SOLO_COLLECTION define ──────────────────────────────────
+    # 5a. SOLO_COLLECTION define
     anchor = '#define MULTIPLAYER_COLLECTION "ui\\\\shell\\\\multiplayer"\n'
     if anchor not in text:
         print("FEHLER: MULTIPLAYER_COLLECTION-Anker fehlt.", file=sys.stderr)
@@ -248,15 +306,17 @@ def patch_menu_tags_solo_pause(src_root):
     )
     text = text.replace(anchor, add, 1)
 
-    # ── 5b. pause_patch -> pause_patch_multiplayer umbenennen ───────
+    # 5b. pause_patch -> pause_patch_multiplayer umbenennen
     old_def = 'static void pause_patch(struct cache_file_tag_instance *instances)\n'
-    new_def = 'static void pause_patch_multiplayer(struct cache_file_tag_instance *instances) /* settings_only: solo_pause */\n'
+    new_def = ('static void pause_patch_multiplayer('
+               'struct cache_file_tag_instance *instances) '
+               '/* settings_only: solo_pause */\n')
     if old_def not in text:
         print("FEHLER: pause_patch-Definition nicht gefunden.", file=sys.stderr)
         sys.exit(1)
     text = text.replace(old_def, new_def, 1)
 
-    # ── 5c. pause_patch_solo vor menu_tags_loaded einfuegen ─────────
+    # 5c. pause_patch_solo vor menu_tags_loaded einfuegen
     anchor = 'void menu_tags_loaded(\n'
     if anchor not in text:
         print("FEHLER: menu_tags_loaded-Anker fehlt.", file=sys.stderr)
@@ -372,7 +432,7 @@ static void pause_patch_solo(struct cache_file_tag_instance *instances)
 '''
     text = text.replace(anchor, solo_fn + anchor, 1)
 
-    # ── 5d. Guard in menu_tags_loaded erweitern ─────────────────────
+    # 5d. Guard in menu_tags_loaded erweitern
     old_guard = '''	boolean game_map = strcmp(map_name, "ui") != 0;
 
 	/* (ui.map, and a multiplayer map: its pause menu's SETTINGS) */
@@ -398,7 +458,7 @@ static void pause_patch_solo(struct cache_file_tag_instance *instances)
         sys.exit(1)
     text = text.replace(old_guard, new_guard, 1)
 
-    # ── 5e. pause_patch-Aufruf ersetzen ─────────────────────────────
+    # 5e. pause_patch-Aufruf ersetzen
     old_call = '''	if (game_map)
 	{
 		pause_patch(instances);
@@ -424,9 +484,6 @@ static void pause_patch_solo(struct cache_file_tag_instance *instances)
         print("FEHLER: pause_patch-Aufruf in menu_tags_loaded nicht gefunden.", file=sys.stderr)
         sys.exit(1)
     text = text.replace(old_call, new_call, 1)
-
-    # ── 5f. PC-Menue-Wurzel nur setzen, wenn display.menus = "pc" ───
-    # (bereits durch use_pc_menus in 5e erledigt)
 
     with open(path, "w") as f:
         f.write(text)
@@ -530,7 +587,7 @@ def apply_patch(src_root):
     patch_event_dispatcher(src_root)
     patch_game_data_dispatcher(src_root)
     patch_cache_files(src_root)
-    patch_menu_tags_solo_pause(src_root)  # NEU: Solo-Pause-Patch
+    patch_menu_tags_solo_pause(src_root)
     patch_linux_build(src_root)
     patch_android_build(src_root)
     patch_port_json(src_root)
