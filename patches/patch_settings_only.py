@@ -19,6 +19,27 @@ import sys
 
 
 # ══════════════════════════════════════════════════════════════════════
+# Hilfsfunktion: findet den Parameter, der einen Funktionsindex enthaelt
+# ══════════════════════════════════════════════════════════════════════
+def _find_function_param(args, strict=False):
+    """Sucht in den Argumenten den Parameter, dessen Name 'function'
+    enthaelt. strict=True: nur wenn gefunden (sonst None). strict=False:
+    Fallback auf das letzte Argument."""
+    for arg in args:
+        parts = arg.split()
+        if not parts:
+            continue
+        name = parts[-1].lstrip('*')
+        if 'function' in name.lower():
+            return name
+    if strict:
+        return None
+    if args:
+        return args[-1].split()[-1].lstrip('*')
+    return 'function_index'
+
+
+# ══════════════════════════════════════════════════════════════════════
 # 1. ui_widget.c: pc_menu_tag forward decl
 # ══════════════════════════════════════════════════════════════════════
 def patch_ui_widget(src_root):
@@ -61,14 +82,11 @@ def patch_event_dispatcher(src_root):
         print("  ui_widget_event_handler_functions.c: bereits gepatcht.")
         return
 
-    # halo_menus.h-Include (fuer PC_MENU_FUNCTION_BASE)
     anchor = '#include "text/unicode.h"\n'
     if anchor in text and '#include "halo_menus.h"' not in text:
         text = text.replace(anchor,
             anchor + '#include "halo_menus.h" /* settings_only */\n', 1)
 
-    # Robuste Suche: jede Funktionsdefinition, deren Name
-    # "event_handler_function_invoke" enthaelt.
     pattern = re.compile(
         r'\n(?:void|boolean|short|long|int)\s+'
         r'([a-zA-Z_][a-zA-Z0-9_]*event_handler_function_invoke)\s*'
@@ -83,16 +101,11 @@ def patch_event_dispatcher(src_root):
 
     if not match:
         print("  WARNUNG: event_handler_function_invoke-Dispatcher nicht gefunden.")
-        print("           Menue-Aktionen werden nicht ausgefuehrt.")
     else:
         fn_name = match.group(1)
         args_str = match.group(2)
         args = [a.strip() for a in args_str.split(',')]
-        param_name = "function_index"
-        if args and args[-1]:
-            parts = args[-1].split()
-            if parts:
-                param_name = parts[-1].lstrip('*')
+        param_name = _find_function_param(args)
 
         insert_at = match.end()
         dispatch = (
@@ -111,7 +124,6 @@ def patch_event_dispatcher(src_root):
         print(f"  ui_widget_event_handler_functions.c: Dispatcher in "
               f"{fn_name}() eingebaut (Parameter: {param_name}).")
 
-    # Name-Lookup-Funktion am Ende anhaengen, falls nicht vorhanden
     if "ui_widget_event_handler_function_name" not in text:
         text += (
             '\n\n'
@@ -134,10 +146,10 @@ def patch_event_dispatcher(src_root):
 # ══════════════════════════════════════════════════════════════════════
 # 3. ui_widget_game_data_input_functions.c: Dispatcher (robust)
 #
-# Sucht die Dispatch-Funktion per Regex, akzeptiert mehrere Rueckgabe-
-# typen und Parameternamen. Bricht nicht ab, wenn sie fehlt (dann
-# funktioniert das Menue trotzdem, nur der Live-Help-Text der Settings
-# aktualisiert sich nicht).
+# Sucht eine Funktion mit "game_data"/"input_function"/"function_invoke"
+# im Namen, die einen Parameter mit "function" hat. Bricht nicht ab,
+# wenn sie fehlt (dann funktioniert das Menue trotzdem, nur der
+# Live-Help-Text aktualisiert sich nicht).
 # ══════════════════════════════════════════════════════════════════════
 def patch_game_data_dispatcher(src_root):
     path = os.path.join(src_root, "source", "interface",
@@ -151,28 +163,30 @@ def patch_game_data_dispatcher(src_root):
         print("  ui_widget_game_data_input_functions.c: bereits gepatcht.")
         return
 
-    # halo_menus.h-Include (fuer PC_MENU_FUNCTION_BASE)
     anchor = '#include "cseries.h"\n'
     if anchor in text and '#include "halo_menus.h"' not in text:
         text = text.replace(anchor,
             anchor + '#include "halo_menus.h" /* settings_only */\n', 1)
 
-    # Robuste Suche: jede Funktionsdefinition, deren Name
-    # "game_data_input" enthaelt.
     pattern = re.compile(
         r'\n(?:void|boolean|short|long|int)\s+'
-        r'([a-zA-Z_][a-zA-Z0-9_]*game_data_input[a-zA-Z0-9_]*)\s*'
+        r'([a-zA-Z_][a-zA-Z0-9_]*(?:game_data|input_function|function_invoke)[a-zA-Z0-9_]*)\s*'
         r'\(([^)]*)\)\s*\n?\{',
         re.MULTILINE)
 
     match = None
     for m in pattern.finditer(text):
+        args_str = m.group(2)
+        args = [a.strip() for a in args_str.split(',')]
+        param_name = _find_function_param(args, strict=True)
+        if param_name is None:
+            continue
         if m.start() < len(text) // 2:
             match = m
             break
 
     if not match:
-        print("  WARNUNG: game_data_input-Dispatcher nicht gefunden.")
+        print("  WARNUNG: game_data-Dispatcher nicht gefunden.")
         print("           Einstellungen werden trotzdem gespeichert; nur der")
         print("           Hilfe-Text der Settings aktualisiert sich nicht live.")
         with open(path, "w") as f:
@@ -182,11 +196,7 @@ def patch_game_data_dispatcher(src_root):
     fn_name = match.group(1)
     args_str = match.group(2)
     args = [a.strip() for a in args_str.split(',')]
-    param_name = "function_index"
-    if args and args[-1]:
-        parts = args[-1].split()
-        if parts:
-            param_name = parts[-1].lstrip('*')
+    param_name = _find_function_param(args)
 
     insert_at = match.end()
     dispatch = (
