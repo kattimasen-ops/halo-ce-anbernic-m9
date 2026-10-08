@@ -14,6 +14,7 @@ jobs:
   build:
     name: Build guest + host (arm64_32 + aarch64)
     runs-on: ubuntu-22.04
+    container: ubuntu:20.04
     timeout-minutes: 180
 
     env:
@@ -31,11 +32,12 @@ jobs:
           fetch-depth: 0
           submodules: false
 
-      - name: "System-Pakete installieren"
+      - name: "System-Pakete installieren (Ubuntu 20.04)"
         run: |
           set -e
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
             build-essential \
             cmake \
             ninja-build \
@@ -49,27 +51,30 @@ jobs:
             xz-utils \
             unzip \
             pkg-config \
+            wget \
+            gnupg \
+            lsb-release \
+            software-properties-common \
             gcc-aarch64-linux-gnu \
             g++-aarch64-linux-gnu \
             libc6-dev-arm64-cross \
-            libstdc++-11-dev-arm64-cross
+            libstdc++-9-dev-arm64-cross
 
       - name: "clang-22 installieren"
         run: |
           set -e
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
-            | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
-          . /etc/os-release
-          echo "deb http://apt.llvm.org/${VERSION_CODENAME}/ llvm-toolchain-${VERSION_CODENAME}-22 main" \
-            | sudo tee /etc/apt/sources.list.d/llvm-22.list
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+            | apt-key add -
+          echo "deb http://apt.llvm.org/focal/ llvm-toolchain-focal-22 main" \
+            > /etc/apt/sources.list.d/llvm-22.list
+          apt-get update
+          apt-get install -y --no-install-recommends \
             clang-22 lld-22 llvm-22
-          sudo ln -sf /usr/bin/clang-22 /usr/local/bin/clang-22
-          sudo ln -sf /usr/bin/ld.lld-22 /usr/local/bin/ld.lld-22
+          ln -sf /usr/bin/clang-22 /usr/local/bin/clang-22
+          ln -sf /usr/bin/ld.lld-22 /usr/local/bin/ld.lld-22
           clang-22 --version
           clang-22 -print-targets | grep -q aarch64_32 \
-            && echo "OK: arm64_32 target verfügbar" \
+            && echo "OK: arm64_32 target verfuegbar" \
             || { echo "FEHLER: clang-22 hat kein arm64_32-Target"; exit 1; }
 
       - name: "Python-Pakete installieren"
@@ -122,6 +127,11 @@ jobs:
             echo "FEHLER: libmali.so.0 und libdecor-0.so.0 müssen in sysroot/ liegen."
             exit 1
           fi
+
+      - name: "glibc-Version im Container pruefen"
+        run: |
+          echo "== glibc im Container:"
+          ldd --version | head -1
 
       - name: "rej/-Ordner vorbereiten"
         run: mkdir -p rej
