@@ -17,16 +17,11 @@ jobs:
     timeout-minutes: 180
 
     env:
-      # Der Build läuft im Repo-Root; SYSROOT_LIB liegt im Repo selbst.
       SYSROOT_LIB: ${{ github.workspace }}/sysroot
-      # Der NDK wird im Schritt "Install NDK" unter $RUNNER_TEMP/ndk-r28c entpackt.
-      ANDROID_NDK: ${{ runner.temp }}/ndk-r28c
-      # Guest-/Host-Compiler.
+      ANDROID_NDK: ${{ github.workspace }}/ndk-r28c
       GUEST_CC: clang-22
       HOST_CC: aarch64-linux-gnu-gcc
-      # PGO-Modus: use|off|train (Default in build.sh: use)
       PGO_MODE: use
-      # Damit ninja parallel baut, ohne den Runner zu überlasten.
       JOBS: "4"
 
     steps:
@@ -52,6 +47,7 @@ jobs:
             python3-yaml \
             ca-certificates \
             xz-utils \
+            unzip \
             pkg-config \
             gcc-aarch64-linux-gnu \
             g++-aarch64-linux-gnu \
@@ -61,7 +57,6 @@ jobs:
       - name: "clang-22 installieren"
         run: |
           set -e
-          # apt.llvm.org Repo für clang-22
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
             | sudo tee /etc/apt/trusted.gpg.d/apt.llvm.org.asc > /dev/null
           . /etc/os-release
@@ -81,7 +76,6 @@ jobs:
         run: |
           set -e
           python3 -m pip install --upgrade pip
-          # Für tools/ce_menus.py, tools/hud_assets.py, tools/title_assets.py
           python3 -m pip install --no-cache-dir \
             Pillow \
             numpy \
@@ -90,14 +84,15 @@ jobs:
       - name: "Android NDK r28c installieren"
         run: |
           set -e
-          cd "$RUNNER_TEMP"
+          cd "$GITHUB_WORKSPACE"
           NDK_ZIP="android-ndk-r28c-linux.zip"
           if [ ! -f "$NDK_ZIP" ]; then
             curl -fL --retry 3 --retry-delay 5 -o "$NDK_ZIP" \
               "https://dl.google.com/android/repository/android-ndk-r28c-linux.zip"
           fi
-          unzip -q "$NDK_ZIP" -d "$RUNNER_TEMP"
-          mv "$RUNNER_TEMP/android-ndk-r28c" "$ANDROID_NDK"
+          unzip -q "$NDK_ZIP" -d "$GITHUB_WORKSPACE"
+          mv "$GITHUB_WORKSPACE/android-ndk-r28c" "$ANDROID_NDK"
+          rm -f "$NDK_ZIP"
           test -d "$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64"
           echo "NDK: $ANDROID_NDK"
 
@@ -106,28 +101,30 @@ jobs:
           set -e
           echo "== SYSROOT_LIB=$SYSROOT_LIB"
           ls -la "$SYSROOT_LIB" || true
-          for lib in libdecor-0.so.0 libmali.so.0 libSDL3.so.0 libSDL2-2.0.so.0; do
+          missing=0
+          for lib in libmali.so.0 libdecor-0.so.0; do
             if compgen -G "$SYSROOT_LIB/$lib*" > /dev/null; then
               echo "  OK: $lib"
             else
-              echo "  FEHLT: $lib"
-              # libdecor und libmali sind harte Voraussetzungen; SDL2/SDL3
-              # baut der Build aus dem Quellcode, wenn sie fehlen.
-              case "$lib" in
-                libdecor-0.so.0|libmali.so.0)
-                  echo "FEHLER: $lib ist eine harte Voraussetzung."
-                  exit 1
-                  ;;
-              esac
+              echo "  FEHLT (harte Voraussetzung): $lib"
+              missing=1
             fi
           done
+          for lib in libSDL3.so.0 libSDL2-2.0.so.0; do
+            if compgen -G "$SYSROOT_LIB/$lib*" > /dev/null; then
+              echo "  OK: $lib"
+            else
+              echo "  HINWEIS: $lib fehlt, build.sh baut sie aus dem Quellcode."
+            fi
+          done
+          if [ "$missing" -ne 0 ]; then
+            echo ""
+            echo "FEHLER: libmali.so.0 und libdecor-0.so.0 müssen in sysroot/ liegen."
+            exit 1
+          fi
 
-      - name: "Repo-Analyse-Bericht vorbereiten"
-        run: |
-          set -e
-          # Stellt sicher, dass der rej/-Ordner existiert, damit der
-          # Artefakt-Upload im Fehlerfall nicht scheitert.
-          mkdir -p rej
+      - name: "rej/-Ordner vorbereiten"
+        run: mkdir -p rej
 
       - name: "Build ausführen (build.sh)"
         id: build
@@ -135,9 +132,6 @@ jobs:
           set -e
           chmod +x build.sh
           bash build.sh 2>&1 | tee build.log
-        env:
-          PGO_MODE: ${{ env.PGO_MODE }}
-          JOBS: ${{ env.JOBS }}
 
       - name: "Fehleranalyse sammeln"
         if: failure()
@@ -152,11 +146,11 @@ jobs:
             echo "Repo: ${{ github.repository }}"
             echo "Commit: ${{ github.sha }}"
             echo ""
-            echo "--- Letzte 200 Zeilen build.log ---"
-            tail -n 200 build.log 2>/dev/null || echo "(kein build.log)"
+            echo "--- Letzte 300 Zeilen build.log ---"
+            tail -n 300 build.log 2>/dev/null || echo "(kein build.log)"
             echo ""
-            echo "--- Erste 200 Fehlerzeilen aus build.log ---"
-            grep -E "error:|FEHLER|FAILED|Traceback|ninja: build stopped" build.log 2>/dev/null | head -200 || true
+            echo "--- Erste 300 Fehlerzeilen aus build.log ---"
+            grep -E "error:|FEHLER|FAILED|Traceback|ninja: build stopped|does not apply|conflict" build.log 2>/dev/null | head -300 || true
             echo ""
             echo "--- Inhalt rej/ (falls vorhanden) ---"
             if [ -d rej ]; then
@@ -174,20 +168,23 @@ jobs:
             echo ""
             echo "--- opence-apply.log (falls vorhanden) ---"
             if [ -f rej/opence-apply.log ]; then
-              tail -n 100 rej/opence-apply.log
+              tail -n 200 rej/opence-apply.log
             else
               echo "(kein opence-apply.log)"
             fi
             echo ""
-            echo "--- Build-Artefakte (Zwischenstand) ---"
-            find work -maxdepth 4 -name "*.o" -o -name "*.rej" -o -name "*.orig" 2>/dev/null | head -50 || true
+            echo "--- Zwischenstand der .o/.rej/.orig-Dateien ---"
+            find work -maxdepth 6 \( -name "*.o" -o -name "*.rej" -o -name "*.orig" \) 2>/dev/null | head -80 || true
+            echo ""
+            echo "--- Work-Verzeichnisstruktur (falls vorhanden) ---"
+            if [ -d work ]; then
+              find work -maxdepth 2 -type d 2>/dev/null | head -60 || true
+            fi
             echo ""
             echo "════════════════════════════════════════════════════════════"
             echo "ENDE DER FEHLERANALYSE"
             echo "════════════════════════════════════════════════════════════"
           } > build-error-analysis.txt
-          # Beide Dateien in rej/ kopieren, damit der Artefakt-Upload
-          # alles zusammen hochladen kann
           cp build-error-analysis.txt rej/ 2>/dev/null || true
           cp build.log rej/ 2>/dev/null || true
           echo "Analyse geschrieben: build-error-analysis.txt"
@@ -244,8 +241,7 @@ jobs:
             echo "Konflikte (unmerged):"
             cat rej/unmerged.txt
             echo ""
-            echo "Lade das Artefakt 'rej-and-error-analysis' herunter,"
-            echo "um die Konfliktdateien zu sehen."
+            echo "Lade das Artefakt 'rej-and-error-analysis' herunter."
           fi
           if [ -f build-error-analysis.txt ]; then
             echo ""
