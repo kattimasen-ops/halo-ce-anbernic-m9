@@ -89,13 +89,12 @@ jobs:
             && echo "OK: arm64_32 target verfuegbar" \
             || { echo "FEHLER: clang-22 hat kein arm64_32-Target"; exit 1; }
 
-          # Wrapper fuer aarch64-Cross-Compile mit Clang 22.
-          # -mcpu=cortex-a35 entspricht ARMv8.0-A: keine LSE-Atomics.
           cat > /usr/local/bin/aarch64-clang <<'WRAPPER'
           #!/bin/sh
           exec /usr/bin/clang-22 \
               --target=aarch64-linux-gnu \
-              --sysroot=/usr/aarch64-linux-gnu \
+              --sysroot=/ \
+              --gcc-toolchain=/usr \
               -march=armv8-a \
               -mno-outline-atomics \
               "$@"
@@ -104,10 +103,12 @@ jobs:
           chmod +x /usr/local/bin/aarch64-clang
           echo "== aarch64-clang Wrapper:"
           cat /usr/local/bin/aarch64-clang
-          echo "== Test:"
+          echo "== Test-Link (32-bit AArch64 Hello World):"
           printf 'int main(void){return 0;}\n' > /tmp/test.c
           /usr/local/bin/aarch64-clang -o /tmp/test /tmp/test.c
           file /tmp/test
+          echo "== Test-Inspect:"
+          readelf -h /tmp/test | head -5
 
       - name: "Python-Pakete installieren"
         run: |
@@ -202,9 +203,9 @@ jobs:
             fi
             echo ""
             echo "════════════════════════════════════════════════════════════"
-            echo "4. Verwendeter Linker"
+            echo "4. Verwendeter Compiler/Linker"
             echo "════════════════════════════════════════════════════════════"
-            grep -E "ld\.lld|LLD|GNU ld|Linker|fuse-ld|aarch64-clang" build.log 2>/dev/null | head -20 || true
+            grep -E "ld\.lld|LLD|GNU ld|Clang|aarch64-clang|Target:" build.log 2>/dev/null | head -20 || true
             echo ""
             echo "════════════════════════════════════════════════════════════"
             echo "ENDE DER FEHLERANALYSE"
