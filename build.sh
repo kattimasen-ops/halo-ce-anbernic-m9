@@ -4,9 +4,9 @@ set -euo pipefail
 # ══════════════════════════════════════════════════════════════════════
 # Halo CE Universal — M9 Pro (RK3326 / Cortex-A35 + Mali-G31 MP2)
 #
-# Host-Loader wird STATISCH gelinkt: bringt seine eigene glibc mit und
-# ist unabhaengig von der System-glibc (2.31 auf dem M9 Pro). Kein
-# glibc_version_header, kein zig cc — die zuverlaessigste Loesung.
+# Laeuft in einem Ubuntu-20.04-Docker-Container (glibc 2.31, wie der
+# M9 Pro). Host-Loader wird dynamisch gelinkt, wie es vor der
+# glibc-Kompatibilitaetskrise funktionierte.
 # ══════════════════════════════════════════════════════════════════════
 PGO_MODE=${PGO_MODE:-use}
 
@@ -43,9 +43,7 @@ ANDROID_NDK=$(cd "$ANDROID_NDK" && pwd)
 [ -d "$SYSROOT_LIB" ] || die "SYSROOT_LIB=$SYSROOT_LIB is not a folder"
 SYSROOT_LIB=$(cd "$SYSROOT_LIB" && pwd)
 
-# libmali wird nur noch geprueft, damit der Build nicht komplett ohne
-# sysroot laeuft — sie wird NICHT mehr verlinkt oder ausgeliefert.
-for library in libdecor-0.so.0; do
+for library in libdecor-0.so.0 libmali.so.0; do
     compgen -G "$SYSROOT_LIB/$library*" > /dev/null ||
         die "no $library* in SYSROOT_LIB=$SYSROOT_LIB"
 done
@@ -61,6 +59,8 @@ esac
 
 echo "== Upstream: $UPSTREAM_URL @ $UPSTREAM_COMMIT"
 echo "== PGO-Modus: $PGO_MODE"
+echo "== glibc-Version des Build-Containers:"
+ldd --version 2>/dev/null | head -1 || true
 
 WORK=${WORK:-$HERE/work}
 DIST=${DIST:-$HERE/dist}
@@ -72,18 +72,7 @@ REJ=$(cd "$REJ" && pwd)
 SRC=$WORK/halo-ce-universal
 OPENCE=$WORK/opence
 
-# ══════════════════════════════════════════════════════════════════════
-# Pruefen: statische aarch64-libc vorhanden?
-# ══════════════════════════════════════════════════════════════════════
-for lib in libc.a libm.a libpthread.a; do
-    if ! find /usr/aarch64-linux-gnu/lib /usr/lib/aarch64-linux-gnu \
-            -maxdepth 1 -name "$lib" 2>/dev/null | head -n 1 | grep -q .; then
-        echo "WARNUNG: statische $lib nicht gefunden."
-        echo "         apt-get install libc6-dev-arm64-cross"
-    fi
-done
-
-# ── OpenCE-Dateien holen (nur die, die wir brauchen) ─────────────────
+# ── OpenCE-Dateien holen ─────────────────────────────────────────────
 fetch_opence_files() {
     local opence_dir="$WORK/opence-source"
     local opence_tarball="$WORK/opence-main.tar.gz"
@@ -199,14 +188,52 @@ print("  XML-Hunk entfernt; Patch ist jetzt %d Bytes kleiner." % (len(text) - le
 PYEOF
 
 # ══════════════════════════════════════════════════════════════════════
-# SDL2 STATISCH bauen (Host-Loader wird statisch gelinkt)
+# SDL3 (nur bauen, wenn .so fehlt)
+# ══════════════════════════════════════════════════════════════════════
+if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
+    echo "== SDL3 $SDL3_TAG: kompiliere aus dem Quellcode"
+    SDL3_SRC=$WORK/SDL3-${SDL3_TAG#release-}
+    SDL3_BUILD=$WORK/sdl3-build
+    SDL3_INSTALL=$WORK/sdl3-install
+    if [ ! -d "$SDL3_SRC" ]; then
+        curl -L -o "$WORK/sdl3.tar.gz" \
+            "https://github.com/libsdl-org/SDL/releases/download/$SDL3_TAG/SDL3-${SDL3_TAG#release-}.tar.gz"
+        tar -xzf "$WORK/sdl3.tar.gz" -C "$WORK"
+    fi
+    rm -rf "$SDL3_BUILD" "$SDL3_INSTALL"
+    mkdir -p "$SDL3_BUILD" "$SDL3_INSTALL"
+    cmake -S "$SDL3_SRC" -B "$SDL3_BUILD" \
+        -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
+        -DCMAKE_C_COMPILER="$HOST_CC" \
+        -DCMAKE_FIND_ROOT_PATH=/usr/aarch64-linux-gnu \
+        -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
+        -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
+        -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF \
+        -DSDL_INSTALL_TESTS=OFF -DSDL_WERROR=OFF -DSDL_UNIX_CONSOLE_BUILD=ON \
+        -DSDL_X11=OFF -DSDL_WAYLAND=OFF -DSDL_KMSDRM=ON \
+        -DSDL_OPENGLES=ON -DSDL_OPENGL=OFF \
+        -DCMAKE_INSTALL_PREFIX="$SDL3_INSTALL"
+    cmake --build "$SDL3_BUILD" -j "$JOBS"
+    cmake --install "$SDL3_BUILD"
+    SDL3_LIB=$(find "$SDL3_INSTALL" -name "libSDL3.so.0*" -type f | head -n 1)
+    [ -n "$SDL3_LIB" ] || die "libSDL3.so.0 nicht gefunden"
+    cp -L "$SDL3_LIB" "$SYSROOT_LIB/libSDL3.so.0"
+    echo "== SDL3 kompiliert: $(stat -c%s "$SYSROOT_LIB/libSDL3.so.0") Bytes"
+else
+    echo "== libSDL3.so.0 bereits vorhanden"
+fi
+
+# ══════════════════════════════════════════════════════════════════════
+# SDL2 (Header immer; .so nur kopieren, wenn fehlt)
 # ══════════════════════════════════════════════════════════════════════
 SDL2_SRC=$WORK/SDL2-src
 SDL2_BUILD=$WORK/sdl2-build
 SDL2_INSTALL=$WORK/sdl2-install
 
-if [ ! -f "$SDL2_INSTALL/lib/libSDL2.a" ]; then
-    echo "== SDL2 $SDL2_TAG: STATISCH bauen"
+if [ ! -d "$SDL2_INSTALL/include/SDL2" ]; then
+    echo "== SDL2 $SDL2_TAG: Quellcode holen und Header bereitstellen"
     rm -rf "$SDL2_SRC" "$SDL2_BUILD" "$SDL2_INSTALL"
     mkdir -p "$SDL2_SRC" "$SDL2_BUILD" "$SDL2_INSTALL"
     curl -L -o "$WORK/sdl2.tar.gz" "$SDL2_ARCHIVE"
@@ -275,28 +302,34 @@ PATCH_EOF
         -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
         -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
         -DCMAKE_BUILD_TYPE=Release \
-        -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_STATIC_PIC=ON \
-        -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF -DSDL_INSTALL_TESTS=OFF \
-        -DSDL_WERROR=OFF -DSDL_UNIX_CONSOLE_BUILD=ON \
+        -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TESTS=OFF \
         -DSDL_X11=OFF -DSDL_WAYLAND=OFF -DSDL_KMSDRM=ON \
         -DSDL_OPENGLES=ON -DSDL_OPENGL=OFF \
         -DCMAKE_INSTALL_PREFIX="$SDL2_INSTALL"
     cmake --build "$SDL2_BUILD" -j "$JOBS"
     cmake --install "$SDL2_BUILD"
 
-    [ -f "$SDL2_INSTALL/lib/libSDL2.a" ] || die "libSDL2.a nicht gebaut"
-    echo "== SDL2 statisch: $(stat -c%s "$SDL2_INSTALL/lib/libSDL2.a") Bytes"
+    SDL2_LIB=$(find "$SDL2_INSTALL" -name "libSDL2-2.0.so.0*" -type f | head -n 1)
+    [ -n "$SDL2_LIB" ] || die "libSDL2-2.0.so.0 nicht gefunden"
+    if [ ! -f "$SYSROOT_LIB/libSDL2-2.0.so.0" ]; then
+        cp -L "$SDL2_LIB" "$SYSROOT_LIB/libSDL2-2.0.so.0"
+        echo "== SDL2 nach sysroot kopiert: $(stat -c%s "$SYSROOT_LIB/libSDL2-2.0.so.0") Bytes"
+    else
+        echo "== libSDL2-2.0.so.0 liegt bereits in sysroot."
+    fi
 else
-    echo "== SDL2 statisch bereits vorhanden"
+    echo "== SDL2-Header bereits in $SDL2_INSTALL"
+    if [ ! -f "$SYSROOT_LIB/libSDL2-2.0.so.0" ]; then
+        if [ -f "$SDL2_INSTALL/lib/libSDL2-2.0.so.0" ]; then
+            cp -L "$SDL2_INSTALL/lib/libSDL2-2.0.so.0" "$SYSROOT_LIB/libSDL2-2.0.so.0"
+        else
+            die "SDL2 .so fehlt in sysroot und $SDL2_INSTALL."
+        fi
+    fi
 fi
 export SDL2_INCLUDE="$SDL2_INSTALL/include"
 [ -f "$SDL2_INCLUDE/SDL2/SDL.h" ] || die "SDL2_INCLUDE=$SDL2_INCLUDE enthaelt kein SDL2/SDL.h"
 echo "== SDL2_INCLUDE=$SDL2_INCLUDE"
-
-# ── SDL2_LIB_DIR fuer den Host-Build exportieren ──────────────────────
-export SDL2_LIB_DIR="$SDL2_INSTALL/lib"
-echo "== SDL2_LIB_DIR=$SDL2_LIB_DIR"
-[ -f "$SDL2_LIB_DIR/libSDL2.a" ] || die "libSDL2.a fehlt in $SDL2_LIB_DIR"
 
 # ══════════════════════════════════════════════════════════════════════
 # Upstream klonen + Knulli-Patch + OpenCE-Dateien
@@ -887,7 +920,7 @@ stamp=$({
     done
     [ -f "$HERE/pgo/halo_linux.profdata" ] && sha256sum "$HERE/pgo/halo_linux.profdata" | cut -d' ' -f1
     echo "pgo-mode=$PGO_MODE"
-    echo "static-host=v2"
+    echo "ubuntu-2004-dynamic=v1"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 echo "$stamp" > "$SRC/.port-stamp"
@@ -895,7 +928,7 @@ echo "$stamp" > "$SRC/.port-stamp"
 # ══════════════════════════════════════════════════════════════════════
 # Build
 # ══════════════════════════════════════════════════════════════════════
-export ANDROID_NDK SYSROOT_LIB SDL2_INCLUDE SDL2_LIB_DIR GUEST_CC HOST_CC JOBS
+export ANDROID_NDK SYSROOT_LIB SDL2_INCLUDE GUEST_CC HOST_CC JOBS
 cd "$SRC"
 
 echo "== Konfiguriere mit $LTO_FLAG $PGO_FLAG $PGO_EXTRA_ARGS ..."
@@ -905,7 +938,7 @@ python3 configure.py --release "$LTO_FLAG" "$PGO_FLAG" $PGO_EXTRA_ARGS \
 echo "== Baue Guest-ELF (halo_guest.elf) — mit -k 0 (alle Fehler sammeln) ..."
 ninja -j "$JOBS" -k 0 build/android/halo_guest.elf || true
 
-echo "== Baue Host-Binary (halo, statisch) ueber port/knulli/build.sh ..."
+echo "== Baue Host-Binary (halo, dynamisch) ueber port/knulli/build.sh ..."
 bash "$SRC/port/knulli/build.sh" || true
 
 # ══════════════════════════════════════════════════════════════════════
@@ -930,7 +963,10 @@ done
 [ -f "$SRC/port/knulli/halo_extract.py" ] && cp "$SRC/port/knulli/halo_extract.py" "$DIST/halo_extract.py"
 [ -f "$SRC/port/knulli/halo_screen.py" ] && cp "$SRC/port/knulli/halo_screen.py" "$DIST/halo_screen.py"
 [ -f "$SRC/port/knulli/sdl_mapping.py" ] && cp "$SRC/port/knulli/sdl_mapping.py" "$DIST/sdl_mapping.py"
-# libs.aarch64 wird NICHT mehr gebraucht (statischer Host).
+if [ -d "$SRC/build/knulli/libs.aarch64" ]; then
+    mkdir -p "$DIST/libs.aarch64"
+    cp -a "$SRC/build/knulli/libs.aarch64/." "$DIST/libs.aarch64/"
+fi
 chmod +x "$DIST/Halo.sh" 2>/dev/null || true
 
 if [ -f "$DIST/halo_guest.elf" ]; then
@@ -952,12 +988,13 @@ else
     cat <<'RELEASE'
 
 ────────────────────────────────────────────────────────────────────────
-RELEASE-BUILD (Settings-Only, statischer Host)
+RELEASE-BUILD (Settings-Only, Ubuntu 20.04, dynamisch)
 ────────────────────────────────────────────────────────────────────────
 Installation auf M9 Pro (wenn halo_guest.elf existiert):
 1. dist/Halo.sh           nach /roms/ports/Halo.sh
 2. dist/halo_guest.elf    nach /roms/ports/halo-ce/halo_guest.elf
 3. dist/halo              nach /roms/ports/halo-ce/halo
+4. dist/libs.aarch64/     nach /roms/ports/halo-ce/libs.aarch64/
 
 FERTIG.
 ────────────────────────────────────────────────────────────────────────
