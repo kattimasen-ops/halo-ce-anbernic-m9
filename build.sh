@@ -28,13 +28,14 @@ set -euo pipefail
 #  15. patch_config_defaults     — RK3326-abgestimmte Defaults
 #  16. patch_credits             — St0len-One-Credits
 #  17. patch_credits_xml         — Credits-Wasserzeichen in statische XMLs
+#  18. patch_forward_declarations — C99-Forward-Deklarationen (shader + texture)
 # ══════════════════════════════════════════════════════════════════════
 PGO_MODE=${PGO_MODE:-use}
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 UPSTREAM_URL=${UPSTREAM_URL:-https://github.com/cybersecurity/halo-ce-universal.git}
 UPSTREAM_COMMIT=$(tr -d '[:space:]' < "$HERE/UPSTREAM_COMMIT")
-PATCH=$HERE/patches/halo-ce-universal-knulli.patch
+PATCH=$HERE/patches/halo-ce-universal-knnli.patch
 SDL3_TAG=release-3.2.10
 SDL2_TAG=release-2.30.10
 SDL2_ARCHIVE=https://github.com/libsdl-org/SDL/archive/refs/tags/$SDL2_TAG.tar.gz
@@ -362,6 +363,11 @@ fi
 
 # ══════════════════════════════════════════════════════════════════════
 # PGO-Konfiguration
+#
+# Hinweis: Das Linux-Profil ist das richtige Profil fuer den Guest-Build
+# (arm64_32). Es gibt kein Android-Profil in diesem Repo. Die Reihenfolge
+# ist daher: lokales Linux > Upstream Linux > Fallback Linux > Notfall
+# Android > kein PGO.
 # ══════════════════════════════════════════════════════════════════════
 PGO_FLAG="--pgo=off"
 PGO_EXTRA_ARGS=""
@@ -853,7 +859,8 @@ for patch_script in patch_memory_pools.py patch_neon_math.py \
                     patch_texture_prewarm.py \
                     patch_settings_menu.py \
                     patch_config_defaults.py \
-                    patch_credits.py; do
+                    patch_credits.py \
+                    patch_forward_declarations.py; do
     if [ -f "$HERE/patches/$patch_script" ]; then
         echo "== Wende $patch_script an ..."
         if ! python3 "$HERE/patches/$patch_script" "$SRC"; then
@@ -977,6 +984,10 @@ check_patch "port/linux/src/xbox_textures.c"              "texture_prewarm_guard
 check_patch "tools/android_build.py"                      '"-DHALO_ANDROID"'                   "android_build.py -DHALO_ANDROID"
 check_patch "source/main/main.c"                          "St0len-One"                          "main.c Credits"
 
+# Forward-Deklarationen (patch_forward_declarations.py)
+check_patch "port/linux/src/d3d8_gl.c"                    "shader_prewarm_fwd_decl"            "d3d8_gl.c Forward-Decl shader-prewarm"
+check_patch "port/linux/src/xbox_textures.c"              "texture_upload_queue_fwd_decl"      "xbox_textures.c Forward-Decl texture-upload-queue"
+
 if [ -f "$SRC/tools/port_settings.py" ]; then
     check_patch "tools/port_settings.py" "display.fast_shaders"  "port_settings.py Video-Rows"
     check_patch "tools/port_settings.py" "button_top"            "port_settings.py button_top"
@@ -1078,7 +1089,8 @@ stamp=$({
              patch_shader_prewarm.py patch_aggressive_culling.py \
              patch_state_batching.py patch_texture_prewarm.py \
              patch_settings_menu.py patch_config_defaults.py \
-             patch_credits.py patch_credits_xml.py; do
+             patch_credits.py patch_credits_xml.py \
+             patch_forward_declarations.py; do
         cat "$HERE/patches/$p" 2>/dev/null || true
     done
     if [ -f "$HERE/pgo/halo_linux.profdata" ]; then
@@ -1098,6 +1110,7 @@ stamp=$({
     echo "aggressive-culling=1.5x-v1"
     echo "state-batching=opaque-sort-v1"
     echo "texture-prewarm=map-load-v1"
+    echo "forward-declarations=c99-shader-texture"
     echo "glthread-health-check=tolerant"
     echo "xml-hunk-removed=1"
     echo "settings-menu=regenerated"
@@ -1195,6 +1208,7 @@ Aktiv in diesem Build (RK3326 / Mali-G31 MP2):
   - State-Batching: opaque Draws nach Zustand sortiert.
   - Texture-Prewarming: Map-Texturen vor dem ersten Draw.
   - NEON in matrix_math, guest_string, index_extent.
+  - Forward-Deklarationen: C99-konform (shader + texture).
   - Defaults auf RK3326 abgestimmt (render_scale 0.75, model_detail 0.35,
     distant_objects 8.0, obstruction_ticks 3, lighting_divisor 2).
   - In-Game-Settings-Menue mit 20 Zeilen, ohne Luecken (OpenCE).
