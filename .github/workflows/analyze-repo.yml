@@ -1,0 +1,425 @@
+name: Analyze Repo for Menu Integration
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'port/**'
+      - 'source/**'
+      - 'tools/**'
+      - 'patches/**'
+      - 'build.sh'
+      - '.github/workflows/analyze-repo.yml'
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create report header
+        run: |
+          REPORT="$GITHUB_WORKSPACE/repo-analysis.txt"
+          {
+            echo "════════════════════════════════════════════════════════════════════"
+            echo "REPO ANALYSIS — Halo CE RK3326 Port"
+            echo "Date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "Commit: $GITHUB_SHA"
+            echo "Repo: $GITHUB_REPOSITORY"
+            echo "════════════════════════════════════════════════════════════════════"
+            echo ""
+          } > "$REPORT"
+
+      - name: Section 1 — Git and top-level structure
+        run: |
+          REPORT="$GITHUB_WORKSPACE/repo-analysis.txt"
+          {
+            echo "════════════════════════════════════════════════════════════════════"
+            echo "SECTION 1 — GIT AND TOP-LEVEL STRUCTURE"
+            echo "════════════════════════════════════════════════════════════════════"
+            echo ""
+            echo "--- git log (last 5) ---"
+            git log --oneline -5 2>&1 || true
+            echo ""
+            echo "--- top-level entries ---"
+            ls -la 2>&1 || true
+            echo ""
+            echo "--- UPSTREAM_COMMIT ---"
+            cat UPSTREAM_COMMIT 2>&1 || echo "(not found)"
+            echo ""
+            echo "--- all tracked files (top 3 levels) ---"
+            git ls-files 2>&1 | awk -F/ 'NF<=3' | head -300 || true
+            echo ""
+            echo "--- total tracked file count ---"
+            git ls-files 2>&1 | wc -l || true
+            echo ""
+          } >> "$REPORT"
+
+      - name: Section 2 — patches/ directory
+        run: |
+          REPORT="$GITHUB_WORKSPACE/repo-analysis.txt"
+          {
+            echo "════════════════════════════════════════════════════════════════════"
+            echo "SECTION 2 — patches/ DIRECTORY"
+            echo "════════════════════════════════════════════════════════════════════"
+            echo ""
+            echo "--- ls -la patches/ ---"
+            ls -la patches/ 2>&1 || echo "(no patches/ directory)"
+            echo ""
+            echo "--- file sizes ---"
+            find patches/ -type f -printf '%10s  %p\n' 2>/dev/null | sort || true
+            echo ""
+            echo "--- head of each .patch file (30 lines) ---"
+            for f in patches/*.patch; do
+              [ -f "$f" ] || continue
+              echo "===== $f ====="
+              head -30 "$f" 2>&1 || true
+              echo ""
+            done
+            echo ""
+            echo "--- names of all .py patch scripts ---"
+            find patches/ -maxdepth 1 -name '*.py' -printf '%f\n' 2>/dev/null | sort || true
+            echo ""
+          } >> "$REPORT"
+
+      - name: Section 3 — build.sh analysis
+        run: |
+          REPORT="$GITHUB_WORKSPACE/repo-analysis.txt"
+          {
+            echo "════════════════════════════════════════════════════════════════════"
+            echo "SECTION 3 — build.sh ANALYSIS"
+            echo "════════════════════════════════════════════════════════════════════"
+            echo ""
+            echo "--- files matching *build*.sh anywhere ---"
+            find . -name '*build*.sh' -type f -not -path './.git/*' -printf '%p\n' 2>/dev/null || true
+            echo ""
+            echo "--- root build.sh: first 60 lines ---"
+            head -60 build.sh 2>&1 || echo "(no root build.sh)"
+            echo ""
+            echo "--- root build.sh: PGO / LTO / patch references ---"
+            grep -n 'PGO\|LTO\|patch_\|UPSTREAM\|OpenCE\|OPENCE\|EXpat\|expat\|hud_hires\|menu_files\|menu_tags\|menu_functions' build.sh 2>/dev/null || true
+            echo ""
+            echo "--- port/knulli/build.sh: first 80 lines ---"
+            head -80 port/knulli/build.sh 2>&1 || echo "(not found)"
+            echo ""
+          } >> "$REPORT"
+
+      - name: Section 4 — port/linux structure
+        run: |
+          REPORT="$GITHUB_WORKSPACE/repo-analysis.txt"
+          {
+            echo "════════════════════════════════════════════════════════════════════"
+            echo "SECTION 4 — port/linux STRUCTURE"
+            echo "════════════════════════════════════════════════════════════════════"
+            echo ""
+            echo "--- port/linux/src/ ---"
+            ls -la port/linux/src/ 2>&1 || echo "(not found)"
+            echo ""
+            echo "--- port/linux/game/ ---"
+            ls -la port/linux/game/ 2>&1 || echo "(not found)"
+            echo ""
+            echo "--- port/linux/include/ ---"
+            ls -la port/linux/include/ 2>&1 || echo "(not found)"
+            echo ""
+            echo "--- port/linux/port.json (if present) ---"
+            cat port/linux/port.json 2>&1 || echo "(not found)"
+            echo ""
+            echo "--- port/ directory, top 3 levels ---"
+            find port/ -maxdepth 3 -type f -printf '%10s  %p\n' 2>/dev/null | sort -k2 | head -400 || true
+            echo ""
+          } >> "$REPORT"
+
+      - name: Section 5 — OpenCE menu-system files (present or missing)
+        run: |
+          REPORT="$GITHUB_WORKSPACE/repo-analysis.txt"
+          {
+            echo "════════════════════════════════════════════════════════════════════"
+            echo "SECTION 5 — OpenCE MENU SYSTEM FILES"
+            echo "════════════════════════════════════════════════════════════════════"
+            echo ""
+            echo "For each file, either its size and line count (if present) or MISSING:"
+            echo ""
+            for f in \
+              port/linux/src/menu_files.c \
+              port/linux/src/menu_files.h \
+              port/linux/include/halo_menus.h \
+              port/linux/game/menu_tags.c \
+              port/linux/game/menu_functions.c \
+              port/linux/game/custom_edition_cache.c \
+              port/linux/game/custom_edition_cache.h \
+              port/linux/game/custom_edition_maps.c \
+              port/linux/game/custom_edition_maps.h \
+              port/linux/game/ui_widget_port_hooks.c \
+              port/linux/src/hud_hires.c \
+              port/linux/src/hud_hires.h \
+              port/linux/src/p2p.c \
+              port/linux/src/p2p.h \
+              port/linux/src/p2p_crypto.c \
+              port/linux/src/p2p_lobby.c \
+              tools/ce_menus.py \
+              tools/port_settings.py \
+              tools/embed_assets.py \
+              tools/hud_assets.py \
+              tools/title_assets.py \
+              tools/menu_art.py \
+              tools/menu_files.py \
+              port/assets/menus/README.md \
+              port/assets/menus/menus.json \
+              ; do
+              if [ -f "$f" ]; then
+                lines=$(wc -l < "$f" 2>/dev/null || echo "?")
+                bytes=$(stat -c%s "$f" 2>/dev/null || echo "?")
+                printf 'PRESENT  %8s bytes  %6s lines  %s\n' "$bytes" "$lines" "$f"
+              else
+                printf 'MISSING  %s\n' "$f"
+              fi
+            done
+            echo ""
+            echo "--- port/third_party/ contents ---"
+            ls -la port/third_party/ 2>&1 || echo "(not found)"
+            echo ""
+            echo "--- port/third_party/expat/ ---"
+            ls -la port/third_party/expat/ 2>&1 || echo "(not found)"
+            echo ""
+            echo "--- port/assets/ contents ---"
+            ls -la port/assets/ 2>&1 || echo "(not found)"
+            echo ""
+            echo "--- port/assets/menus/ ---"
+            ls -la port/assets/menus/ 2>&1 || echo "(not found)"
+            echo ""
+            echo "--- port/assets/menus/ce/ first 20 entries ---"
+            ls port/assets/menus/ce/ 2>/dev/null | head -20 || echo "(not found)"
+            echo ""
+            echo "--- count of .xml under port/assets/menus/ ---"
+            find port/assets/menus/ -name '*.xml' 2>/dev/null | wc -l || true
+            echo ""
+            echo "--- port/assets/hud/ ---"
+            ls port/assets/hud/ 2>&1 | head -30 || echo "(not found)"
+            echo ""
+          } >> "$REPORT"
+
+      - name: Section 6 — existing port hooks in source/
+        run: |
+          REPORT="$GITHUB_WORKSPACE/repo-analysis.txt"
+          {
+            echo "════════════════════════════════════════════════════════════════════"
+            echo "SECTION 6 — EXISTING PORT HOOKS (source/ and port/)"
+            echo "════════════════════════════════════════════════════════════════════"
+            echo ""
+            echo "--- ui_widget_port_* functions (declaration or definition) ---"
+            grep -rn 'ui_widget_port_' source/ port/ --include='*.c' --include='*.h' 2>/dev/null | head -100 || true
+            echo ""
+            echo "--- pc_menu_* functions ---"
+            grep -rn 'pc_menu_' source/ port/ --include='*.c' --include='*.h' 2>/dev/null | head -60 || true
+            echo ""
+            echo "--- menu_tags_loaded / menu_tags_unloaded ---"
+            grep -rn 'menu_tags_loaded\|menu_tags_unloaded' source/ port/ --include='*.c' --include='*.h' 2>/dev/null || true
+            echo ""
+            echo "--- pc_menus_root_name / pc_menus_screen ---"
+            grep -rn 'pc_menus_root_name\|pc_menus_screen' source/ port/ --include='*.c' --include='*.h' 2>/dev/null || true
+            echo ""
+            echo "--- cache_files_tag_instances / cache_files_set_tag_instances ---"
+            grep -rn 'cache_files_tag_instances\|cache_files_set_tag_instances' source/ port/ --include='*.c' --include='*.h' 2>/dev/null || true
+            echo ""
+            echo "--- scenario_tags_load / scenario_tags_unload ---"
+            grep -rn 'scenario_tags_load\|scenario_tags_unload' source/ --include='*.c' --include='*.h' 2>/dev/null | head -20 || true
+            echo ""
+            echo "--- platform_log / platform_display_apply / platform_request_quit ---"
+            grep -rn 'void platform_log\|platform_display_apply\|platform_request_quit' port/ --include='*.c' --include='*.h' 2>/dev/null | head -20 || true
+            echo ""
+            echo "--- config_string / config_boolean / config_write / config_real / config_integer ---"
+            grep -rn 'char const \*config_string\|int config_boolean\|int config_write\|double config_real\|long config_integer\|config_default' port/linux/src/ --include='*.c' --include='*.h' 2>/dev/null | head -30 || true
+            echo ""
+            echo "--- hud_hires_png_texture ---"
+            grep -rn 'hud_hires_png_texture\|hud_hires' port/ --include='*.c' --include='*.h' 2>/dev/null | head -30 || true
+            echo ""
+            echo "--- rasterizer_bitmap_new / rasterizer_bitmap_delete ---"
+            grep -rn 'rasterizer_bitmap_new\|rasterizer_bitmap_delete' source/ port/ --include='*.c' --include='*.h' 2>/dev/null | head -20 || true
+            echo ""
+          } >> "$REPORT"
+
+      - name: Section 7 — source/interface/ui_widget.c hook-points
+        run: |
+          REPORT="$GITHUB_WORKSPACE/repo-analysis.txt"
+          {
+            echo "════════════════════════════════════════════════════════════════════"
+            echo "SECTION 7 — source/interface/ui_widget.c HOOK ANALYSIS"
+            echo "════════════════════════════════════════════════════════════════════"
+            echo ""
+            echo "--- file size ---"
+            wc -l source/interface/ui_widget.c 2>&1 || true
+            echo ""
+            echo "--- ui_widget_event_handler_function_invoke definition (first 40 lines) ---"
+            grep -n -A40 'ui_widget_event_handler_function_invoke' source/interface/ui_widget_event_handler_functions.c 2>/dev/null | head -60 || true
+            echo ""
+            echo "--- ui_widget_game_data_input_function_invoke definition (first 40 lines) ---"
+            grep -n -A40 'ui_widget_game_data_input_function_invoke' source/interface/ui_widget.c source/interface/ui_widget_event_handler_functions.c 2>/dev/null | head -60 || true
+            echo ""
+            echo "--- does ui_widget.c reference PC_MENU_FUNCTION_BASE ---"
+            grep -rn 'PC_MENU_FUNCTION_BASE' source/ port/ 2>/dev/null || true
+            echo ""
+            echo "--- pc_menu_frame_placement (call-site in ui_widget.c) ---"
+            grep -n 'pc_menu_frame_placement' source/interface/ui_widget.c 2>/dev/null || true
+            echo ""
+            echo "--- ui_widget_load_children_recursive / widget_takes_events_of_controller ---"
+            grep -n 'ui_widget_load_children_recursive\|widget_takes_events_of_controller' source/interface/ui_widget.c 2>/dev/null | head -10 || true
+            echo ""
+          } >> "$REPORT"
+
+      - name: Section 8 — d3d8_gl.c current state (renderer)
+        run: |
+          REPORT="$GITHUB_WORKSPACE/repo-analysis.txt"
+          {
+            echo "════════════════════════════════════════════════════════════════════"
+            echo "SECTION 8 — port/linux/src/d3d8_gl.c ANALYSIS"
+            echo "════════════════════════════════════════════════════════════════════"
+            echo ""
+            echo "--- file size ---"
+            wc -l port/linux/src/d3d8_gl.c 2>&1 || true
+            echo ""
+            echo "--- first 40 lines (includes) ---"
+            head -40 port/linux/src/d3d8_gl.c 2>&1 || true
+            echo ""
+            echo "--- xgpu_shader_prewarm_begin occurrences ---"
+            grep -n 'xgpu_shader_prewarm_begin\|shader_prewarm_fwd_decl\|shader_prewarm_guard' port/linux/src/d3d8_gl.c 2>/dev/null || true
+            echo ""
+            echo "--- hd_* / halo_screen_* functions ---"
+            grep -n 'halo_screen_commit\|halo_screen_width\|halo_screen_pixel_scale\|halo_frame_due' port/linux/src/d3d8_gl.c 2>/dev/null | head -20 || true
+            echo ""
+          } >> "$REPORT"
+
+      - name: Section 9 — full content of small critical files
+        run: |
+          REPORT="$GITHUB_WORKSPACE/repo-analysis.txt"
+          {
+            echo "════════════════════════════════════════════════════════════════════"
+            echo "SECTION 9 — FULL CONTENT OF SMALL CRITICAL FILES"
+            echo "════════════════════════════════════════════════════════════════════"
+            echo ""
+            for f in \
+              port/linux/src/menu_files.h \
+              port/linux/include/halo_menus.h \
+              port/linux/game/custom_edition_cache.h \
+              port/linux/game/custom_edition_maps.h \
+              port/linux/src/hud_hires.h \
+              port/linux/src/p2p.h \
+              port/linux/include/platform.h \
+              port/linux/port.json \
+              ; do
+              echo "----- BEGIN $f -----"
+              if [ -f "$f" ]; then
+                cat "$f" 2>&1 || true
+              else
+                echo "(MISSING)"
+              fi
+              echo "----- END $f -----"
+              echo ""
+            done
+          } >> "$REPORT"
+
+      - name: Section 10 — xgpu.h and gl.h (GL API surface)
+        run: |
+          REPORT="$GITHUB_WORKSPACE/repo-analysis.txt"
+          {
+            echo "════════════════════════════════════════════════════════════════════"
+            echo "SECTION 10 — xgpu.h AND gl.h"
+            echo "════════════════════════════════════════════════════════════════════"
+            echo ""
+            echo "----- BEGIN port/linux/src/xgpu.h -----"
+            cat port/linux/src/xgpu.h 2>&1 || echo "(MISSING)"
+            echo "----- END port/linux/src/xgpu.h -----"
+            echo ""
+            echo "----- BEGIN port/linux/src/gl.h (first 200 lines) -----"
+            head -200 port/linux/src/gl.h 2>&1 || echo "(MISSING)"
+            echo "----- END port/linux/src/gl.h (first 200 lines) -----"
+            echo ""
+          } >> "$REPORT"
+
+      - name: Section 11 — port_config.c settings keys
+        run: |
+          REPORT="$GITHUB_WORKSPACE/repo-analysis.txt"
+          {
+            echo "════════════════════════════════════════════════════════════════════"
+            echo "SECTION 11 — port_config.c SETTINGS KEYS"
+            echo "════════════════════════════════════════════════════════════════════"
+            echo ""
+            echo "--- all string keys in config_settings[] ---"
+            grep -n '"display\.\|"audio\.\|"input\.\|"controls\.\|"network\.\|"update\.\|"debug\.\|"profile\.' \
+              port/linux/src/port_config.c 2>/dev/null | head -120 || true
+            echo ""
+            echo "--- config_setting struct declaration ---"
+            grep -n -B2 -A20 'struct config_setting' port/linux/src/port_config.c 2>/dev/null | head -40 || true
+            echo ""
+            echo "--- config_folder / config_load / config_write / config_string / config_boolean declarations ---"
+            grep -n 'config_folder\|config_load\|config_write\|config_string\|config_boolean\|config_real\|config_integer\|config_default' port/linux/src/port_config.c 2>/dev/null | head -40 || true
+            echo ""
+          } >> "$REPORT"
+
+      - name: Section 12 — tools/ directory
+        run: |
+          REPORT="$GITHUB_WORKSPACE/repo-analysis.txt"
+          {
+            echo "════════════════════════════════════════════════════════════════════"
+            echo "SECTION 12 — tools/ DIRECTORY"
+            echo "════════════════════════════════════════════════════════════════════"
+            echo ""
+            echo "--- ls -la tools/ ---"
+            ls -la tools/ 2>&1 || echo "(not found)"
+            echo ""
+            echo "--- Python files and their sizes ---"
+            find tools/ -maxdepth 2 -name '*.py' -printf '%10s  %p\n' 2>/dev/null | sort || true
+            echo ""
+            echo "--- references to menu/embed/hud in any tools/*.py ---"
+            grep -rln 'menu_files\|menu_tags\|embed_assets\|hud_assets\|title_assets\|ce_menus\|port_settings\|halo_menus' tools/ 2>/dev/null || true
+            echo ""
+          } >> "$REPORT"
+
+      - name: Section 13 — port/android structure (for completeness)
+        run: |
+          REPORT="$GITHUB_WORKSPACE/repo-analysis.txt"
+          {
+            echo "════════════════════════════════════════════════════════════════════"
+            echo "SECTION 13 — port/android STRUCTURE"
+            echo "════════════════════════════════════════════════════════════════════"
+            echo ""
+            echo "--- port/android/guest/runtime/ ---"
+            ls -la port/android/guest/runtime/ 2>&1 || echo "(not found)"
+            echo ""
+            echo "--- port/android/host/ ---"
+            ls -la port/android/host/ 2>&1 || echo "(not found)"
+            echo ""
+            echo "--- port/android/include/ ---"
+            ls -la port/android/include/ 2>&1 || echo "(not found)"
+            echo ""
+            echo "--- port/android/host_imports.list ---"
+            cat port/android/host_imports.list 2>&1 || echo "(MISSING)"
+            echo ""
+          } >> "$REPORT"
+
+      - name: Section 14 — compression and artifact
+        run: |
+          REPORT="$GITHUB_WORKSPACE/repo-analysis.txt"
+          {
+            echo "════════════════════════════════════════════════════════════════════"
+            echo "END OF REPORT"
+            echo "Size: $(stat -c%s "$REPORT") bytes, $(wc -l < "$REPORT") lines"
+            echo "════════════════════════════════════════════════════════════════════"
+          } >> "$REPORT"
+          # Also print to the workflow log so it can be copied directly
+          echo ""
+          echo "════════════════════════════════════════════════════════════════════"
+          echo "FULL REPORT (also available as artifact 'repo-analysis')"
+          echo "════════════════════════════════════════════════════════════════════"
+          cat "$REPORT"
+
+      - name: Upload report as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: repo-analysis
+          path: repo-analysis.txt
+          retention-days: 30
+          if-no-files-found: error
