@@ -6,7 +6,7 @@ set -euo pipefail
 #
 # Settings-Only: Knulli-Patch wie bisher, dazu das PC-Settings-Menue aus
 # OpenCE (menu_files.c, menu_tags.c, halo_menus.h, hud_hires.c/.h, Expat,
-# ce_menus.py, port_settings.py, XML-Assets) plus eine reduzierte
+# zlib, ce_menus.py, port_settings.py, XML-Assets) plus eine reduzierte
 # menu_functions.c, die nur die Settings-Callbacks bereitstellt.
 #
 # Build laeuft mit `ninja -k 0`, damit ALLE Fehler einer Session im Log
@@ -755,7 +755,8 @@ for patch_script in \
         patch_shader_prewarm.py patch_aggressive_culling.py \
         patch_state_batching.py patch_texture_prewarm.py \
         patch_settings_menu.py patch_config_defaults.py \
-        patch_credits.py patch_forward_declarations.py; do
+        patch_credits.py patch_forward_declarations.py \
+        patch_config_changes.py; do
     if [ -f "$HERE/patches/$patch_script" ]; then
         echo "== $patch_script"
         if ! python3 "$HERE/patches/$patch_script" "$SRC"; then
@@ -850,6 +851,8 @@ check_patch "port/linux/src/port_config.c"      "HALO_MIN_OBJECT_PIXELS"        
 check_patch "port/linux/src/port_config.c"      "HALO_LIGHTING_REFRESH_DIVISOR" "port_config.c Lighting"
 check_patch "port/linux/src/port_config.c"      "HALO_FPS_OVERLAY_CORNER"       "port_config.c FPS"
 check_patch "port/linux/src/port_config.c"      "HALO_FAST_SHADERS"             "port_config.c Knulli"
+check_patch "port/linux/src/port_config.c"      "settings_only: config_changes_impl" "port_config.c config_changes()"
+check_patch "port/linux/src/hud_hires.c"        "settings_only: config_changes_hud"  "hud_hires.c config_changes decl"
 check_patch "port/linux/src/xinput_sdl.c"       "button_remap"                  "xinput_sdl.c Remap"
 check_patch "port/linux/src/d3d8_gl.c"          "__builtin_elementwise_min"     "d3d8_gl.c index_extent"
 check_patch "port/linux/src/d3d8_gl.c"          "fps_overlay_enabled"           "d3d8_gl.c FPS-Overlay"
@@ -943,6 +946,7 @@ stamp=$({
              patch_settings_menu.py patch_config_defaults.py \
              patch_credits.py patch_credits_xml.py \
              patch_forward_declarations.py patch_settings_only.py \
+             patch_config_changes.py \
              settings_only_menu_functions.c; do
         cat "$HERE/patches/$p" 2>/dev/null || true
     done
