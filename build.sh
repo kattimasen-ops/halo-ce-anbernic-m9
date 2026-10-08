@@ -5,30 +5,30 @@ set -euo pipefail
 # Halo CE Universal — M9 Pro (RK3326 / Cortex-A35 + Mali-G31 MP2)
 # Build-Skript: Host (aarch64) + Guest (arm64_32 ILP32 AArch64)
 #
-# Zieht port_settings.py und den Menue-Ordner aus dem OpenCE-Fork.
-# Der Clone verwendet KEIN --filter=blob:none (das schlaegt in manchen
-# Git-Versionen/Netzwerken fehl); OpenCE ist nur ~45 MB, ein normaler
-# Shallow-Clone ist robust. Fallback: Tarball von GitHub.
+# Zieht port_settings.py, die Menü-Assets UND den kompletten
+# OpenCE-Menü-C-Code (menu_files.c, menu_tags.c, menu_functions.c,
+# halo_menus.h, Expat, ui_widget-Hooks) aus dem OpenCE-Fork.
 #
 # Patch-Kette (Reihenfolge ist wichtig!):
 #   1. Knulli-Patch (monolithisch)
-#   2. patch_memory_pools        — Debug-Allocator aus, __thread-Arrays
-#   3. patch_neon_math           — NEON in matrix_math + guest_string
-#   4. patch_vita_optimizations  — Vita-Port-Ideen (LOD, Lighting, Sound)
-#   5. patch_button_remap        — A/B/X/Y-Tausch
-#   6. patch_index_extent_neon   — NEON fuer index_extent
-#   7. patch_fps_overlay         — In-Game-FPS-Overlay
-#   8. patch_draw_framebuffer_bound — GL_INVALID_OPERATION-Fix
-#   9. patch_mali_subdata        — Mali-G31 Mirror-Subdata-Guard
-#  10. patch_shader_prewarm      — Offline-Shader-Cache + Prewarming
-#  11. patch_aggressive_culling  — Aggressives Objekt-Culling
-#  12. patch_state_batching      — Render-Command-Batching
-#  13. patch_texture_prewarm     — Texture-Prewarming beim Map-Load
-#  14. patch_settings_menu       — In-Game-Settings-Menue
-#  15. patch_config_defaults     — RK3326-abgestimmte Defaults
-#  16. patch_credits             — St0len-One-Credits
-#  17. patch_credits_xml         — Credits-Wasserzeichen in statische XMLs
-#  18. patch_forward_declarations — C99-Forward-Deklarationen (shader + texture)
+#   2. OpenCE-Menü-Dateien kopieren + Hooks setzen
+#   3. patch_memory_pools        — Debug-Allocator aus, __thread-Arrays
+#   4. patch_neon_math           — NEON in matrix_math + guest_string
+#   5. patch_vita_optimizations  — Vita-Port-Ideen (LOD, Lighting, Sound)
+#   6. patch_button_remap        — A/B/X/Y-Tausch
+#   7. patch_index_extent_neon   — NEON fuer index_extent
+#   8. patch_fps_overlay         — In-Game-FPS-Overlay
+#   9. patch_draw_framebuffer_bound — GL_INVALID_OPERATION-Fix
+#  10. patch_mali_subdata        — Mali-G31 Mirror-Subdata-Guard
+#  11. patch_shader_prewarm      — Offline-Shader-Cache + Prewarming
+#  12. patch_aggressive_culling  — Aggressives Objekt-Culling
+#  13. patch_state_batching      — Render-Command-Batching
+#  14. patch_texture_prewarm     — Texture-Prewarming beim Map-Load
+#  15. patch_settings_menu       — In-Game-Settings-Menue
+#  16. patch_config_defaults     — RK3326-abgestimmte Defaults
+#  17. patch_credits             — St0len-One-Credits
+#  18. patch_credits_xml         — Credits-Wasserzeichen in statische XMLs
+#  19. patch_forward_declarations — C99-Forward-Deklarationen (shader)
 # ══════════════════════════════════════════════════════════════════════
 PGO_MODE=${PGO_MODE:-use}
 
@@ -96,16 +96,12 @@ fetch_opence_files() {
     local opence_tarball="$WORK/opence-main.tar.gz"
 
     echo ""
-    echo "== Hole OpenCE-Dateien (port_settings.py + Menue-Ordner) ..."
+    echo "== Hole OpenCE-Dateien (Menue-System + Assets) ..."
     rm -rf "$opence_dir"
 
-    # OpenCE ist ~45 MB. Ein normaler Shallow-Clone ist robuster als
-    # --filter=blob:none --sparse, das in manchen Git-Versionen oder
-    # bei instabilen Netzwerken fehlschlaegt.
     if git clone --depth 1 "$OPEN_CE_URL" "$opence_dir" > /dev/null 2>&1; then
         echo "   + Git-Clone erfolgreich."
     else
-        # Fallback: Repository-Archiv als Tarball von GitHub laden
         echo "   Git-Clone fehlgeschlagen, versuche Tarball ..."
         rm -f "$opence_tarball"
         if ! curl -fsSL --retry 3 --retry-delay 5 --connect-timeout 30 \
@@ -119,7 +115,7 @@ fetch_opence_files() {
         echo "   + Tarball erfolgreich."
     fi
 
-    # 1. tools/port_settings.py
+    # 1. tools/port_settings.py + ce_menus.py + custom_edition_script_names.py
     if [ -f "$opence_dir/tools/port_settings.py" ]; then
         mkdir -p "$SRC/tools"
         cp "$opence_dir/tools/port_settings.py" "$SRC/tools/"
@@ -127,14 +123,14 @@ fetch_opence_files() {
     else
         die "OpenCE hat keine tools/port_settings.py."
     fi
+    for t in tools/ce_menus.py tools/custom_edition_script_names.py tools/menu_art.py tools/menu_files.py; do
+        if [ -f "$opence_dir/$t" ]; then
+            cp "$opence_dir/$t" "$SRC/tools/"
+            echo "   + $t"
+        fi
+    done
 
-    # 2. tools/ce_menus.py (Generator)
-    if [ -f "$opence_dir/tools/ce_menus.py" ]; then
-        cp "$opence_dir/tools/ce_menus.py" "$SRC/tools/"
-        echo "   + tools/ce_menus.py"
-    fi
-
-    # 3. port/assets/menus/ce (kompletter Ordner)
+    # 2. port/assets/menus/ce (XML-Dateien) + svg + port_svg + menus.json
     if [ -d "$opence_dir/port/assets/menus/ce" ]; then
         mkdir -p "$SRC/port/assets/menus"
         rm -rf "$SRC/port/assets/menus/ce"
@@ -145,24 +141,88 @@ fetch_opence_files() {
     else
         die "OpenCE hat keinen port/assets/menus/ce Ordner."
     fi
-
-    # 4. Weitere Verzeichnisse, die der Menue-Build braucht
-    for extra in port/assets/menus/port_svg port/assets/menus/strings; do
+    for extra in port/assets/menus/svg port/assets/menus/port_svg port/assets/menus/strings; do
         if [ -d "$opence_dir/$extra" ]; then
+            mkdir -p "$SRC/$(dirname "$extra")"
+            rm -rf "$SRC/$extra"
             cp -a "$opence_dir/$extra" "$SRC/$(dirname "$extra")/"
             echo "   + $extra"
         fi
     done
-
-    # 5. Weitere tools
-    for t in tools/menu_art.py tools/menu_files.py; do
-        if [ -f "$opence_dir/$t" ]; then
-            cp "$opence_dir/$t" "$SRC/tools/"
-            echo "   + $t"
+    for f in port/assets/menus/menus.json \
+             port/assets/menus/UNWIRED.md \
+             port/assets/menus/NON_HANDDRAWN.md \
+             port/assets/menus/README.md; do
+        if [ -f "$opence_dir/$f" ]; then
+            mkdir -p "$SRC/$(dirname "$f")"
+            cp "$opence_dir/$f" "$SRC/$f"
+            echo "   + $f"
         fi
     done
 
-    # Aufraeumen
+    # 3. Menue-C-Quellen (in Upstream NICHT vorhanden)
+    mkdir -p "$SRC/port/linux/include" "$SRC/port/linux/src" \
+             "$SRC/port/linux/game" "$SRC/port/third_party"
+    for f in \
+        port/linux/include/halo_menus.h \
+        port/linux/include/halo_keyboard.h \
+        port/linux/src/menu_files.c \
+        port/linux/src/menu_files.h \
+        port/linux/src/p2p_lobby.c \
+        port/linux/game/menu_tags.c \
+        port/linux/game/menu_functions.c \
+        ; do
+        if [ -f "$opence_dir/$f" ]; then
+            cp "$opence_dir/$f" "$SRC/$f"
+            echo "   + $f"
+        else
+            echo "   WARNUNG: $f fehlt in OpenCE."
+        fi
+    done
+
+    # 4. OpenCE-Versionen ersetzen (Knulli fasst sie NICHT an)
+    for f in \
+        source/interface/ui_widget.c \
+        source/interface/ui_widget_event_handler_functions.c \
+        source/interface/ui_widget_game_data_input_functions.c \
+        port/linux/src/p2p.h \
+        tools/embed_assets.py \
+        ; do
+        if [ -f "$opence_dir/$f" ]; then
+            cp "$opence_dir/$f" "$SRC/$f"
+            echo "   + $f (OpenCE-Version)"
+        else
+            echo "   WARNUNG: $f fehlt in OpenCE."
+        fi
+    done
+
+    # 5. Expat (XML-Parser, nicht im Upstream)
+    if [ -d "$opence_dir/port/third_party/expat" ]; then
+        rm -rf "$SRC/port/third_party/expat"
+        cp -a "$opence_dir/port/third_party/expat" "$SRC/port/third_party/"
+        echo "   + port/third_party/expat/"
+    else
+        die "OpenCE hat keinen port/third_party/expat-Ordner."
+    fi
+
+    # 6. Stubs aus patches/stubs (Coop und Custom Edition deaktiviert)
+    if [ -f "$HERE/patches/stubs/network_coop_stub.c" ]; then
+        cp "$HERE/patches/stubs/network_coop_stub.c" \
+           "$SRC/port/linux/game/network_coop.c"
+        cp "$HERE/patches/stubs/network_coop.h" \
+           "$SRC/port/linux/game/network_coop.h"
+        echo "   + network_coop.c (Stub)"
+    fi
+    if [ -f "$HERE/patches/stubs/custom_edition_stub.c" ]; then
+        cp "$HERE/patches/stubs/custom_edition_stub.c" \
+           "$SRC/port/linux/game/custom_edition_maps.c"
+        if [ -f "$opence_dir/port/linux/game/custom_edition_maps.h" ]; then
+            cp "$opence_dir/port/linux/game/custom_edition_maps.h" \
+               "$SRC/port/linux/game/custom_edition_maps.h"
+        fi
+        echo "   + custom_edition_maps.c (Stub)"
+    fi
+
     rm -rf "$opence_dir" "$opence_tarball"
     echo "== OpenCE-Dateien geholt."
 }
@@ -347,7 +407,7 @@ if ! tree_is_patched; then
     git -C "$SRC" reset -q --hard
     git -C "$SRC" clean -q -fd
 
-    # 1. OpenCE-Dateien holen
+    # 1. OpenCE-Dateien holen (Menue-System + Assets + Expat + Stubs)
     fetch_opence_files
 
     # 2. Knulli-Patch pruefen und anwenden
@@ -359,15 +419,28 @@ if ! tree_is_patched; then
     echo "== Knulli-Patch ist sauber anwendbar. Wende an ..."
     git -C "$SRC" apply "$PATCH"
     git -C "$SRC" apply --summary "$PATCH" | awk '$1 == "create" { print $4 }' | xargs -r git -C "$SRC" add -N --
+
+    # 3. Menue-Hooks in cache_files.c (nach Knulli)
+    echo ""
+    echo "== Setze OpenCE-Menue-Hooks in cache_files.c ..."
+    if [ -f "$HERE/patches/patch_opence_menu_cache_hooks.py" ]; then
+        python3 "$HERE/patches/patch_opence_menu_cache_hooks.py" "$SRC"
+    else
+        echo "WARNUNG: patch_opence_menu_cache_hooks.py fehlt."
+    fi
+
+    # 4. Build-Registrierung (Expat in linux_build.py / android_build.py / port.json)
+    echo ""
+    echo "== Registriere Menue-Dateien in den Builds ..."
+    if [ -f "$HERE/patches/patch_opence_menu_build.py" ]; then
+        python3 "$HERE/patches/patch_opence_menu_build.py" "$SRC"
+    else
+        echo "WARNUNG: patch_opence_menu_build.py fehlt."
+    fi
 fi
 
 # ══════════════════════════════════════════════════════════════════════
 # PGO-Konfiguration
-#
-# Hinweis: Das Linux-Profil ist das richtige Profil fuer den Guest-Build
-# (arm64_32). Es gibt kein Android-Profil in diesem Repo. Die Reihenfolge
-# ist daher: lokales Linux > Upstream Linux > Fallback Linux > Notfall
-# Android > kein PGO.
 # ══════════════════════════════════════════════════════════════════════
 PGO_FLAG="--pgo=off"
 PGO_EXTRA_ARGS=""
@@ -952,6 +1025,15 @@ check_patch() {
         verification_failed=1
     fi
 }
+check_file() {
+    local file="$1" name="$2"
+    if [ -f "$SRC/$file" ]; then
+        echo "   OK: $name"
+    else
+        echo "   FEHLT: $name ($file)"
+        verification_failed=1
+    fi
+}
 check_patch "source/cseries/cseries.h"                    "HALO_DEBUG_ALLOCATOR"               "cseries.h Debug-Allocator"
 check_patch "source/effects/decals.c"                     "static __thread long surface_queue" "decals.c __thread-Arrays"
 check_patch "source/math/matrix_math.c"                   "vmulq_n_f32"                        "matrix_math.c NEON"
@@ -984,9 +1066,20 @@ check_patch "port/linux/src/xbox_textures.c"              "texture_prewarm_guard
 check_patch "tools/android_build.py"                      '"-DHALO_ANDROID"'                   "android_build.py -DHALO_ANDROID"
 check_patch "source/main/main.c"                          "St0len-One"                          "main.c Credits"
 
-# Forward-Deklarationen (patch_forward_declarations.py)
+# OpenCE-Menü-Marker
 check_patch "port/linux/src/d3d8_gl.c"                    "shader_prewarm_fwd_decl"            "d3d8_gl.c Forward-Decl shader-prewarm"
-check_patch "port/linux/src/xbox_textures.c"              "texture_upload_queue_fwd_decl"      "xbox_textures.c Forward-Decl texture-upload-queue"
+check_file  "port/linux/include/halo_menus.h"                                                 "halo_menus.h"
+check_file  "port/linux/src/menu_files.c"                                                     "menu_files.c"
+check_file  "port/linux/src/menu_files.h"                                                     "menu_files.h"
+check_file  "port/linux/game/menu_tags.c"                                                     "menu_tags.c"
+check_file  "port/linux/game/menu_functions.c"                                                "menu_functions.c"
+check_file  "port/linux/game/network_coop.c"                                                  "network_coop.c (Stub)"
+check_file  "port/linux/game/custom_edition_maps.c"                                           "custom_edition_maps.c (Stub)"
+check_file  "port/third_party/expat/expat.h"                                                  "expat.h"
+check_patch "source/cache/cache_files.c"                  "port: opence-menu-cache"            "cache_files.c Menü-Hooks"
+check_patch "tools/linux_build.py"                        "port: opence-menu"                  "linux_build.py Menü-Registrierung"
+check_patch "tools/android_build.py"                      "port: opence-menu"                  "android_build.py Menü-Registrierung"
+check_patch "port/linux/port.json"                        '"dl"'                               "port.json dl"
 
 if [ -f "$SRC/tools/port_settings.py" ]; then
     check_patch "tools/port_settings.py" "display.fast_shaders"  "port_settings.py Video-Rows"
@@ -1090,8 +1183,13 @@ stamp=$({
              patch_state_batching.py patch_texture_prewarm.py \
              patch_settings_menu.py patch_config_defaults.py \
              patch_credits.py patch_credits_xml.py \
-             patch_forward_declarations.py; do
+             patch_forward_declarations.py \
+             patch_opence_menu_cache_hooks.py \
+             patch_opence_menu_build.py; do
         cat "$HERE/patches/$p" 2>/dev/null || true
+    done
+    for s in network_coop_stub.c network_coop.h custom_edition_stub.c; do
+        cat "$HERE/patches/stubs/$s" 2>/dev/null || true
     done
     if [ -f "$HERE/pgo/halo_linux.profdata" ]; then
         sha256sum "$HERE/pgo/halo_linux.profdata" | cut -d' ' -f1
@@ -1110,13 +1208,14 @@ stamp=$({
     echo "aggressive-culling=1.5x-v1"
     echo "state-batching=opaque-sort-v1"
     echo "texture-prewarm=map-load-v1"
-    echo "forward-declarations=c99-shader-texture"
+    echo "forward-declarations=c99-shader"
+    echo "opence-menu=cache-files-hooks-v1"
     echo "glthread-health-check=tolerant"
     echo "xml-hunk-removed=1"
     echo "settings-menu=regenerated"
     echo "config-defaults=m9-rk3326"
     echo "credits=st0len-one"
-    echo "opence-files=fetched-v2"
+    echo "opence-files=fetched-v3-menu"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 if [ -f "$SRC/.port-stamp" ] && [ "$(cat "$SRC/.port-stamp")" = "$stamp" ]; then
@@ -1208,7 +1307,9 @@ Aktiv in diesem Build (RK3326 / Mali-G31 MP2):
   - State-Batching: opaque Draws nach Zustand sortiert.
   - Texture-Prewarming: Map-Texturen vor dem ersten Draw.
   - NEON in matrix_math, guest_string, index_extent.
-  - Forward-Deklarationen: C99-konform (shader + texture).
+  - Forward-Deklaration: C99-konform (shader).
+  - PC-Menus aus OpenCE: XML-basierte Menues statt ui.map-Widgets.
+  - Custom Edition Maps und Coop sind in diesem Build deaktiviert (Stubs).
   - Defaults auf RK3326 abgestimmt (render_scale 0.75, model_detail 0.35,
     distant_objects 8.0, obstruction_ticks 3, lighting_divisor 2).
   - In-Game-Settings-Menue mit 20 Zeilen, ohne Luecken (OpenCE).
