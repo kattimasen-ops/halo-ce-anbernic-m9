@@ -29,7 +29,7 @@ OUT=build/knulli
 OBJ=$OUT/obj
 
 # Statisches SDL2 (von der Root-build.sh gebaut)
-SDL2_LIB_DIR="${SDL2_LIB_DIR:?SDL2_LIB_DIR not set by root build.sh}"
+SDL2_LIB_DIR="${SDL2_LIB_DIR:?SDL2_LIB_DIR not set}"
 
 ninja -j "$JOBS" build/android/halo_guest.elf build/android/host/host_import_table.c
 mkdir -p "$OBJ" "$OUT/gl_include" "$OUT/lib"
