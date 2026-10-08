@@ -71,9 +71,7 @@ link_library() {
         return 1
     fi
     # settings_only: link_library_robust — erst die (evtl. kaputte) Symlink
-    # ENTFERNEN, dann die echte Datei kopieren. Ohne rm -f kann cp -Lf durch
-    # eine bestehende Symlink schreiben und eine leere Zieldatei hinterlassen.
-    # (Der aarch64-Cross-BFD-ld meldet dann "file too short".)
+    # ENTFERNEN, dann die echte Datei kopieren.
     rm -f "$OUT/lib/$linkname" "$OUT/lib/$linkname.0" "$OUT/lib/$linkname.tmp"
     if ! ln "$library" "$OUT/lib/$linkname" 2>/dev/null; then
         cp -L "$library" "$OUT/lib/$linkname" || {
@@ -95,6 +93,21 @@ link_library "libSDL2*" "libSDL2.so"    || exit 1
 link_library "libSDL3*" "libSDL3.so"    || exit 1
 link_library "libmali*" "libmali.so"    || exit 1
 link_library "libdecor*" "libdecor.so"  || exit 1
+
+# ── Diagnose: ist libmali.so.0 wirklich eine gueltige ELF? ───────────
+echo "== Diagnose libmali.so.0:"
+if [ -f "$OUT/libs.aarch64/libmali.so.0" ]; then
+    ls -la "$OUT/libs.aarch64/libmali.so.0"
+    if command -v file > /dev/null 2>&1; then
+        file "$OUT/libs.aarch64/libmali.so.0" || true
+    fi
+    echo -n "  Erste 16 Bytes: "
+    head -c 16 "$OUT/libs.aarch64/libmali.so.0" 2>/dev/null | od -An -tx1 || true
+    if command -v readelf > /dev/null 2>&1; then
+        echo "  readelf -h:"
+        readelf -h "$OUT/libs.aarch64/libmali.so.0" 2>&1 | head -8 || true
+    fi
+fi
 
 CFLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -fPIC -Wall -Wno-unused-function \
         -D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS \
@@ -167,21 +180,26 @@ compile port/third_party/tomlc17/tomlc17.c -w
 compile build/android/host/host_import_table.c
 
 echo "LINK $OUT/halo"
-# WICHTIG: Nur -lSDL2, nicht -lSDL3. Der GNU-Linker löst Symbole in der
-# Reihenfolge der -l-Flags auf. SDL_Init, SDL_CreateWindow und
-# SDL_GL_CreateContext existieren in beiden Bibliotheken – mit -lSDL3
-# zuerst landen sie alle in SDL3 statt SDL2, was den KMSDRM-Videopfad
-# bricht. host_sdl3_events.c braucht SDL3 nur als Header (die Größe
-# von SDL_Event), nicht als Symbol.
+# WICHTIG: KEIN -lmali / -l:libmali.so.0.
+# Der BFD-ld kann die 9,3-MB-Datei aus dem Repo nicht lesen ("file too
+# short" = ungueltiger/truncated ELF-Header). Zur Laufzeit laedt SDL2
+# die echte Mali-Bibliothek ueber LD_LIBRARY_PATH (Halo.sh setzt
+# /tmp/halo-mali vor libs.aarch64). EGL/GLES-Symbole, die unsere
+# Host-Objekte referenzieren, werden mit --unresolved-symbols=ignore-all
+# beim Linken offen gelassen und zur Laufzeit aufgeloest.
+#
+# Nur -lSDL2, nicht -lSDL3 (siehe vorige Version).
 $CC -o "$OUT/halo" $objects \
     -L"$OUT/lib" \
     -L"$OUT/libs.aarch64" \
     -Wl,-rpath-link,"$OUT/lib" \
     -Wl,-rpath-link,"$OUT/libs.aarch64" \
     -Wl,--allow-shlib-undefined \
+    -Wl,--unresolved-symbols=ignore-all \
+    -Wl,--warn-unresolved-symbols \
     -Wl,-O1 -Wl,--as-needed -Wl,--gc-sections \
     -flto \
-    -lSDL2 "-l:libmali.so.0" -lpthread -ldl -lm
+    -lSDL2 -lpthread -ldl -lm
 
 cp build/android/halo_guest.elf "$OUT/halo_guest.elf"
 
