@@ -70,10 +70,24 @@ link_library() {
         echo "build.sh: no $pattern in SYSROOT_LIB=$SYSROOT_LIB" >&2
         return 1
     fi
-    # settings_only: link_library_cp — echte Kopie statt Symlink,
-    # sonst meldet der BFD-ld "file too short" beim Linken.
-    cp -Lf "$library" "$OUT/lib/$linkname"
-    echo "  copied $linkname <- $(basename "$library")"
+    # settings_only: link_library_robust — erst die (evtl. kaputte) Symlink
+    # ENTFERNEN, dann die echte Datei kopieren. Ohne rm -f kann cp -Lf durch
+    # eine bestehende Symlink schreiben und eine leere Zieldatei hinterlassen.
+    # (Der aarch64-Cross-BFD-ld meldet dann "file too short".)
+    rm -f "$OUT/lib/$linkname" "$OUT/lib/$linkname.0" "$OUT/lib/$linkname.tmp"
+    if ! ln "$library" "$OUT/lib/$linkname" 2>/dev/null; then
+        cp -L "$library" "$OUT/lib/$linkname" || {
+            echo "build.sh: cp fehlgeschlagen fuer $linkname" >&2
+            return 1
+        }
+    fi
+    size=$(stat -c%s "$OUT/lib/$linkname" 2>/dev/null || echo 0)
+    if [ "$size" -lt 1024 ]; then
+        echo "build.sh: $OUT/lib/$linkname ist nur $size Bytes gross" >&2
+        ls -la "$OUT/lib/" >&2
+        return 1
+    fi
+    echo "  copied $linkname <- $(basename "$library") ($size Bytes)"
     return 0
 }
 
@@ -161,11 +175,13 @@ echo "LINK $OUT/halo"
 # von SDL_Event), nicht als Symbol.
 $CC -o "$OUT/halo" $objects \
     -L"$OUT/lib" \
+    -L"$OUT/libs.aarch64" \
     -Wl,-rpath-link,"$OUT/lib" \
+    -Wl,-rpath-link,"$OUT/libs.aarch64" \
     -Wl,--allow-shlib-undefined \
     -Wl,-O1 -Wl,--as-needed -Wl,--gc-sections \
     -flto \
-    -lSDL2 -lmali -lpthread -ldl -lm
+    -lSDL2 "-l:libmali.so.0" -lpthread -ldl -lm
 
 cp build/android/halo_guest.elf "$OUT/halo_guest.elf"
 
