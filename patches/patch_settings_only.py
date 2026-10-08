@@ -7,8 +7,11 @@ Setzt folgende Hooks:
   3. ui_widget_game_data_input_functions.c: Dispatcher (robust, per Regex)
   4. cache_files.c: Tag-Accessors + menu_tags_loaded/unloaded
   5. menu_tags.c: Solo-Pause-Patch (SETTINGS auch in der Kampagne)
-  6. menu_files.c: externe Deklarationen (config_folder, hud_hires_png_texture)
-  7. tools/linux_build.py + tools/android_build.py: Expat
+  6. menu_files.c: externe Deklaration von config_folder
+     (hud_hires.h wird bereits von menu_files.c eingebunden, daher KEINE
+     manuelle hud_hires_png_texture-Deklaration mehr — sonst Konflikt
+     mit dem const-void-Prototyp im OpenCE-Header)
+  7. tools/linux_build.py + tools/android_build.py: Expat UND zlib
   8. port/linux/port.json: "dl" in libraries
 
 Idempotent ueber Marker-Kommentare.
@@ -515,11 +518,16 @@ static void pause_patch_solo(struct cache_file_tag_instance *instances)
 # ══════════════════════════════════════════════════════════════════════
 # 5b. menu_files.c: externe Deklarationen
 #
-# Die OpenCE-Version von menu_files.c ruft config_folder() und
-# hud_hires_png_texture() auf. Die Header im Knulli-Baum deklarieren
-# beide nicht (hud_hires_png_texture ist dort static, config_folder
-# fehlt ganz). Wir fuegen die Deklarationen direkt in menu_files.c ein,
-# damit der Compiler sie kennt.
+# Die OpenCE-Version von menu_files.c bindet bereits "hud_hires.h" ein
+# (siehe opence/port/linux/src/menu_files.c, Abschnitt 08 der
+# OPENCE-ANALYSE). Damit ist hud_hires_png_texture dort bereits
+# deklariert — eine zweite, manuelle Deklaration fuehrte zum Konflikt
+# "conflicting types for 'hud_hires_png_texture'", weil der OpenCE-Header
+# `const void *` verwendet, die manuelle Deklaration aber
+# `const unsigned char *`.
+#
+# Nur config_folder() fehlt: sie ist im Knulli-Baum nicht in einem
+# oeffentlich sichtbaren Header deklariert.
 # ══════════════════════════════════════════════════════════════════════
 def patch_menu_files_externs(src_root):
     path = os.path.join(src_root, "port", "linux", "src", "menu_files.c")
@@ -546,22 +554,24 @@ def patch_menu_files_externs(src_root):
     if anchor is None:
         print("  WARNUNG: menu_files.c Anker nicht gefunden.")
         return
+    # hud_hires_png_texture wird NICHT mehr manuell deklariert:
+    # menu_files.c bindet bereits "hud_hires.h" ein (OpenCE-Version),
+    # die den Prototyp mit `const void *` bereitstellt. Nur
+    # config_folder() fehlt.
     externs = anchor + (
-        '\n/* settings_only: externals — Funktionen aus dem Knulli-Baum,\n'
-        'deren Deklaration in den Headern fehlt (config_folder) oder die\n'
-        'im Original static waren (hud_hires_png_texture). */\n'
+        '\n/* settings_only: externals — config_folder() ist im Knulli-Baum\n'
+        'nicht oeffentlich deklariert; hud_hires_png_texture() kommt aus\n'
+        'dem bereits eingebundenen "hud_hires.h" (OpenCE-Version). */\n'
         'void config_folder(char *path, unsigned long size);\n'
-        'unsigned int hud_hires_png_texture(const unsigned char *png,\n'
-        '    unsigned long size, unsigned long *levels);\n'
     )
     text = text.replace(anchor, externs, 1)
     with open(path, "w") as f:
         f.write(text)
-    print("  menu_files.c: externals eingebaut.")
+    print("  menu_files.c: config_folder-Deklaration eingebaut.")
 
 
 # ══════════════════════════════════════════════════════════════════════
-# 6. tools/linux_build.py + tools/android_build.py: Expat
+# 6. tools/linux_build.py + tools/android_build.py: Expat UND zlib
 # ══════════════════════════════════════════════════════════════════════
 def patch_linux_build(src_root):
     path = os.path.join(src_root, "tools", "linux_build.py")
@@ -570,31 +580,45 @@ def patch_linux_build(src_root):
         return
     with open(path) as f:
         text = f.read()
-    if "EXPAT_DIR" in text:
-        print("  linux_build.py: Expat bereits aktiv.")
+    if "EXPAT_DIR" in text and "ZLIB_DIR" in text:
+        print("  linux_build.py: Expat + zlib bereits aktiv.")
         return
     anchor = 'TOML_DIR = Path("port/third_party/tomlc17")\n'
-    if anchor in text:
+    if anchor in text and "EXPAT_DIR" not in text:
         add = anchor + (
             '# settings_only: XML-Parser fuer menu_files.c\n'
             'EXPAT_DIR = Path("port/third_party/expat")\n'
             'EXPAT_SOURCES = ("xmlparse.c", "xmlrole.c", "xmltok.c")\n'
+            '# settings_only: port-eigenes zlib fuer hud_hires.c\n'
+            '# (zlib_prefixed.h) und die Menue-PNGs\n'
+            'ZLIB_DIR = Path("port/third_party/zlib")\n'
+            'ZLIB_SOURCES = ("adler32.c", "crc32.c", "inffast.c", "inflate.c",\n'
+            '                "inftrees.c", "uncompr.c", "zutil.c")\n'
+            'ZLIB_DEFINES = ("-DZ_PREFIX", "-Dz_errmsg=z_port_errmsg")\n'
         )
         text = text.replace(anchor, add, 1)
     anchor = 'f"-I{TOML_DIR}",\n'
-    if anchor in text:
-        text = text.replace(anchor, anchor + '            f"-I{EXPAT_DIR}",\n', 1)
+    if anchor in text and 'f"-I{EXPAT_DIR}"' not in text:
+        text = text.replace(anchor,
+            anchor + '            f"-I{EXPAT_DIR}",\n'
+                     '            f"-I{ZLIB_DIR}",\n', 1)
+    elif anchor in text and 'f"-I{ZLIB_DIR}"' not in text:
+        text = text.replace(anchor,
+            anchor + '            f"-I{ZLIB_DIR}",\n', 1)
     anchor = '        add_object(TOML_DIR / "tomlc17.c", " ".join([abi, "-std=gnu11", "-w"]))\n'
-    if anchor in text:
+    if anchor in text and 'EXPAT_SOURCES' not in text.split(anchor, 1)[1][:400]:
         add = anchor + (
             '        # settings_only: Expat\n'
             '        for name in EXPAT_SOURCES:\n'
             '            add_object(EXPAT_DIR / name, " ".join([abi, "-std=gnu11", f"-I{EXPAT_DIR}", "-w"]))\n'
+            '        # settings_only: zlib\n'
+            '        for name in ZLIB_SOURCES:\n'
+            '            add_object(ZLIB_DIR / name, " ".join([abi, "-std=gnu11", *ZLIB_DEFINES, "-w"]))\n'
         )
         text = text.replace(anchor, add, 1)
     with open(path, "w") as f:
         f.write(text)
-    print("  linux_build.py: Expat eingebaut.")
+    print("  linux_build.py: Expat + zlib eingebaut.")
 
 
 def patch_android_build(src_root):
@@ -604,31 +628,45 @@ def patch_android_build(src_root):
         return
     with open(path) as f:
         text = f.read()
-    if "EXPAT_DIR" in text:
-        print("  android_build.py: Expat bereits aktiv.")
+    if "EXPAT_DIR" in text and "ZLIB_DIR" in text:
+        print("  android_build.py: Expat + zlib bereits aktiv.")
         return
     anchor = 'TOML_DIR = Path("port/third_party/tomlc17")\n'
-    if anchor in text:
+    if anchor in text and "EXPAT_DIR" not in text:
         add = anchor + (
             '# settings_only: XML-Parser fuer menu_files.c\n'
             'EXPAT_DIR = Path("port/third_party/expat")\n'
             'EXPAT_SOURCES = ("xmlparse.c", "xmlrole.c", "xmltok.c")\n'
+            '# settings_only: port-eigenes zlib fuer hud_hires.c\n'
+            '# (zlib_prefixed.h) und die Menue-PNGs\n'
+            'ZLIB_DIR = Path("port/third_party/zlib")\n'
+            'ZLIB_SOURCES = ("adler32.c", "crc32.c", "inffast.c", "inflate.c",\n'
+            '                "inftrees.c", "uncompr.c", "zutil.c")\n'
+            'ZLIB_DEFINES = ("-DZ_PREFIX", "-Dz_errmsg=z_port_errmsg")\n'
         )
         text = text.replace(anchor, add, 1)
     anchor = 'f"-I{TOML_DIR}",'
-    if anchor in text:
-        text = text.replace(anchor, anchor + ' f"-I{EXPAT_DIR}",', 1)
+    if anchor in text and 'f"-I{EXPAT_DIR}"' not in text:
+        text = text.replace(anchor,
+            anchor + ' f"-I{EXPAT_DIR}", f"-I{ZLIB_DIR}",', 1)
+    elif anchor in text and 'f"-I{ZLIB_DIR}"' not in text:
+        text = text.replace(anchor, anchor + ' f"-I{ZLIB_DIR}",', 1)
     anchor = '    objects.append(guest_object(TOML_DIR / "tomlc17.c", platform_cflags))\n'
-    if anchor in text:
+    if anchor in text and 'EXPAT_SOURCES' not in text.split(anchor, 1)[1][:400]:
         add = anchor + (
             '    # settings_only: Expat\n'
             '    for name in EXPAT_SOURCES:\n'
             '        objects.append(guest_object(EXPAT_DIR / name, platform_cflags))\n'
+            '    # settings_only: zlib (ohne ARM-CRC32-Instruktionen, die der\n'
+            '    # Assembly-Schritt des Guests nicht kennt)\n'
+            '    for name in ZLIB_SOURCES:\n'
+            '        objects.append(guest_object(ZLIB_DIR / name,\n'
+            '            " ".join([platform_cflags, *ZLIB_DEFINES, "-U__ARM_FEATURE_CRC32"])))\n'
         )
         text = text.replace(anchor, add, 1)
     with open(path, "w") as f:
         f.write(text)
-    print("  android_build.py: Expat eingebaut.")
+    print("  android_build.py: Expat + zlib eingebaut.")
 
 
 # ══════════════════════════════════════════════════════════════════════
