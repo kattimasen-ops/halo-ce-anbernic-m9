@@ -24,7 +24,7 @@ jobs:
       SYSROOT_LIB: ${{ github.workspace }}/sysroot
       ANDROID_NDK: ${{ github.workspace }}/ndk-r28c
       GUEST_CC: clang-22
-      HOST_CC: aarch64-linux-gnu-gcc
+      HOST_CC: aarch64-clang
       PGO_MODE: use
       JOBS: "4"
       DEBIAN_FRONTEND: noninteractive
@@ -42,8 +42,6 @@ jobs:
           ldd --version 2>/dev/null | head -1 || true
           echo "== Architektur:"
           uname -m
-          echo "== Shell:"
-          echo "$SHELL"
 
       - name: "System-Pakete installieren (Ubuntu 20.04)"
         run: |
@@ -74,7 +72,7 @@ jobs:
             libc6-dev-arm64-cross \
             libstdc++-9-dev-arm64-cross
 
-      - name: "clang-22 + lld-22 installieren"
+      - name: "clang-22 + Wrapper fuer aarch64-Cross-Compile"
         run: |
           set -e
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
@@ -86,15 +84,30 @@ jobs:
             clang-22 lld-22 llvm-22
           ln -sf /usr/bin/clang-22 /usr/local/bin/clang-22
           ln -sf /usr/bin/ld.lld-22 /usr/local/bin/ld.lld-22
-          ln -sf /usr/bin/ld.lld-22 /usr/bin/ld.lld
-          ln -sf /usr/bin/ld.lld-22 /usr/local/bin/ld.lld
-          mkdir -p /usr/aarch64-linux-gnu/bin
-          ln -sf /usr/bin/ld.lld-22 /usr/aarch64-linux-gnu/bin/ld.lld
           clang-22 --version
-          ld.lld-22 --version
           clang-22 -print-targets | grep -q aarch64_32 \
             && echo "OK: arm64_32 target verfuegbar" \
             || { echo "FEHLER: clang-22 hat kein arm64_32-Target"; exit 1; }
+
+          # Wrapper fuer aarch64-Cross-Compile mit Clang 22.
+          # -mcpu=cortex-a35 entspricht ARMv8.0-A: keine LSE-Atomics.
+          cat > /usr/local/bin/aarch64-clang <<'WRAPPER'
+          #!/bin/sh
+          exec /usr/bin/clang-22 \
+              --target=aarch64-linux-gnu \
+              --sysroot=/usr/aarch64-linux-gnu \
+              -march=armv8-a \
+              -mno-outline-atomics \
+              "$@"
+          WRAPPER
+          sed -i 's/^          //' /usr/local/bin/aarch64-clang
+          chmod +x /usr/local/bin/aarch64-clang
+          echo "== aarch64-clang Wrapper:"
+          cat /usr/local/bin/aarch64-clang
+          echo "== Test:"
+          printf 'int main(void){return 0;}\n' > /tmp/test.c
+          /usr/local/bin/aarch64-clang -o /tmp/test /tmp/test.c
+          file /tmp/test
 
       - name: "Python-Pakete installieren"
         run: |
@@ -117,18 +130,11 @@ jobs:
           test -d "$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64"
           echo "NDK: $ANDROID_NDK"
 
-      - name: "SYSROOT_LIB pruefen (libmali wird nicht mehr gelinkt)"
+      - name: "SYSROOT_LIB pruefen"
         run: |
           set -e
           echo "== SYSROOT_LIB=$SYSROOT_LIB"
           ls -la "$SYSROOT_LIB" || true
-
-          echo ""
-          echo "== libmali.so.0 (wird NICHT gelinkt, NICHT kopiert):"
-          if [ -f "$SYSROOT_LIB/libmali.so.0" ]; then
-            file "$SYSROOT_LIB/libmali.so.0" || true
-            echo "  (wird ignoriert; die System-Mali auf dem Geraet wird genutzt)"
-          fi
 
           missing=0
           for lib in libdecor-0.so.0; do
@@ -181,40 +187,12 @@ jobs:
             grep -nE "error:|error :|fatal error:|FAILED:" build.log 2>/dev/null | head -500 || echo "(keine error-Zeilen)"
             echo ""
             echo "════════════════════════════════════════════════════════════"
-            echo "2. error:-Zeilen mit Kontext"
-            echo "════════════════════════════════════════════════════════════"
-            grep -nA5 "error:" build.log 2>/dev/null | head -3000 || echo "(keine error-Zeilen)"
-            echo ""
-            echo "════════════════════════════════════════════════════════════"
-            echo "3. Fehlerklassen-Zusammenfassung"
-            echo "════════════════════════════════════════════════════════════"
-            echo "  undefined reference:  $(grep -c "undefined reference" build.log 2>/dev/null || echo 0)"
-            echo "  undeclared identifier: $(grep -c "use of undeclared identifier" build.log 2>/dev/null || echo 0)"
-            echo "  implicit declaration: $(grep -c "implicit-function-declaration" build.log 2>/dev/null || echo 0)"
-            echo "  no member named:       $(grep -c "no member named" build.log 2>/dev/null || echo 0)"
-            echo "  incompatible:          $(grep -c "incompatible" build.log 2>/dev/null || echo 0)"
-            echo "  conflicting types:     $(grep -c "conflicting types" build.log 2>/dev/null || echo 0)"
-            echo "  fatal error:           $(grep -c "fatal error:" build.log 2>/dev/null || echo 0)"
-            echo "  FAILED:                $(grep -c "^FAILED:" build.log 2>/dev/null || echo 0)"
-            echo ""
-            echo "════════════════════════════════════════════════════════════"
-            echo "4. Betroffene Dateien (unique)"
-            echo "════════════════════════════════════════════════════════════"
-            grep -oE "^[a-zA-Z0-9_/.-]+\.c:[0-9]+:[0-9]+: error:" build.log 2>/dev/null \
-              | cut -d: -f1 | sort -u || echo "(keine Dateien)"
-            echo ""
-            echo "════════════════════════════════════════════════════════════"
-            echo "5. Letzte 500 Zeilen build.log"
+            echo "2. Letzte 500 Zeilen build.log"
             echo "════════════════════════════════════════════════════════════"
             tail -n 500 build.log 2>/dev/null || echo "(kein build.log)"
             echo ""
             echo "════════════════════════════════════════════════════════════"
-            echo "6. ninja-Status"
-            echo "════════════════════════════════════════════════════════════"
-            tail -n 30 build.log 2>/dev/null | grep -E "ninja|FAILED|stopped" || true
-            echo ""
-            echo "════════════════════════════════════════════════════════════"
-            echo "7. Host-Binary-Info"
+            echo "3. Host-Binary-Info"
             echo "════════════════════════════════════════════════════════════"
             if [ -f dist/halo ]; then
               file dist/halo 2>&1 || true
@@ -224,9 +202,9 @@ jobs:
             fi
             echo ""
             echo "════════════════════════════════════════════════════════════"
-            echo "8. Verwendeter Linker"
+            echo "4. Verwendeter Linker"
             echo "════════════════════════════════════════════════════════════"
-            grep -E "ld\.lld|LLD|GNU ld|Linker|fuse-ld" build.log 2>/dev/null | head -20 || true
+            grep -E "ld\.lld|LLD|GNU ld|Linker|fuse-ld|aarch64-clang" build.log 2>/dev/null | head -20 || true
             echo ""
             echo "════════════════════════════════════════════════════════════"
             echo "ENDE DER FEHLERANALYSE"
@@ -234,7 +212,6 @@ jobs:
           } > build-error-analysis.txt
           cp build-error-analysis.txt rej/ 2>/dev/null || true
           cp build.log rej/ 2>/dev/null || true
-          echo "Analyse geschrieben: build-error-analysis.txt"
 
       - name: "Upload Konflikt- und Fehleranalyse"
         if: always()
@@ -264,30 +241,20 @@ jobs:
           if-no-files-found: warn
           retention-days: 30
 
-      - name: "Kurze Zusammenfassung im Log"
+      - name: "Kurze Zusammenfassung"
         if: always()
         run: |
           echo "════════════════════════════════════════════════════════════"
           echo "  BUILD-ZUSAMMENFASSUNG"
           echo "════════════════════════════════════════════════════════════"
-          echo ""
-          if [ -f build.log ]; then
-            ERRORS=$(grep -c "error:" build.log 2>/dev/null || echo 0)
-            FAILED=$(grep -c "^FAILED:" build.log 2>/dev/null || echo 0)
-            echo "Fehler: $ERRORS, fehlgeschlagene Targets: $FAILED"
-          fi
           if [ -f dist/halo_guest.elf ]; then
-            GUEST_SIZE=$(stat -c%s dist/halo_guest.elf 2>/dev/null || echo 0)
-            echo "Guest-ELF: $GUEST_SIZE Bytes"
+            echo "Guest-ELF: $(stat -c%s dist/halo_guest.elf) Bytes"
           else
             echo "Guest-ELF: FEHLT"
           fi
           if [ -f dist/halo ]; then
-            HOST_SIZE=$(stat -c%s dist/halo 2>/dev/null || echo 0)
-            echo "Host-Binary: $HOST_SIZE Bytes"
+            echo "Host-Binary: $(stat -c%s dist/halo) Bytes"
           else
             echo "Host-Binary: FEHLT"
           fi
-          echo ""
-          echo "Fehleranalyse in Artefakt 'rej-and-error-analysis'."
           echo "════════════════════════════════════════════════════════════"
