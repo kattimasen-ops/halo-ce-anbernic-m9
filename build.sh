@@ -4,14 +4,19 @@ set -euo pipefail
 # ══════════════════════════════════════════════════════════════════════
 # Halo CE Universal — M9 Pro (RK3326 / Cortex-A35 + Mali-G31 MP2)
 #
-# Host-Loader wird mit Clang 22 (aarch64-clang) gebaut, weil GCC 9 aus
-# Ubuntu 20.04 LSE-Atomics (ARMv8.1) erzeugt und der RK3326 (ARMv8.0)
-# darauf mit SIGILL stirbt.
+# Host-Loader + SDL2 werden mit Clang 22 (Wrapper: aarch64-clang)
+# gebaut, weil GCC 9 aus Ubuntu 20.04 trotz -mcpu=cortex-a35
+# LSE-Atomics (ARMv8.1) erzeugt und der RK3326 (ARMv8.0) darauf mit
+# SIGILL stirbt.
 #
-# ZUSAETZLICH: Der Host wird STATISCH gelinkt. Die System-glibc auf dem
-# M9 Pro enthaelt ebenfalls LSE-Instruktionen und verursacht einen
-# SIGILL. Eine statisch gelinkte glibc (aus dem Container, ARMv8.0)
-# umgeht das Problem vollstaendig.
+# Der Wrapper aarch64-clang setzt:
+#   --target=aarch64-linux-gnu --sysroot=/ --gcc-toolchain=/usr
+#   -march=armv8-a -mno-outline-atomics
+#
+# SDL2 wird als statische UND dynamische Bibliothek gebaut
+# (-DSDL_STATIC=ON -DSDL_STATIC_PIC=ON), damit port/knulli/build.sh den
+# Host vollstaendig statisch dagegen linken kann — siehe den Kommentar
+# dort.
 # ══════════════════════════════════════════════════════════════════════
 PGO_MODE=${PGO_MODE:-use}
 
@@ -28,7 +33,8 @@ HOST_CC=${HOST_CC:-aarch64-clang}
 JOBS=${JOBS:-$(nproc)}
 OPEN_CE_URL=${OPEN_CE_URL:-https://github.com/OpenCommunityEdition/OpenCE.git}
 
-# Archiver fuer statische Bibliotheken
+# Archiver fuer statische Bibliotheken (SDL2main, SDL2_test, libSDL2.a).
+# CMake findet bei einem Clang-Wrapper nicht automatisch llvm-ar-22.
 AR=${AR:-/usr/bin/llvm-ar-22}
 RANLIB=${RANLIB:-/usr/bin/llvm-ranlib-22}
 
@@ -230,7 +236,8 @@ if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
         -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
         -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
         -DCMAKE_BUILD_TYPE=Release \
-        -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF \
+        -DSDL_SHARED=ON -DSDL_STATIC=ON -DSDL_STATIC_PIC=ON \
+        -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF \
         -DSDL_INSTALL_TESTS=OFF -DSDL_WERROR=OFF -DSDL_UNIX_CONSOLE_BUILD=ON \
         -DSDL_X11=OFF -DSDL_WAYLAND=OFF -DSDL_KMSDRM=ON \
         -DSDL_OPENGLES=ON -DSDL_OPENGL=OFF \
@@ -246,14 +253,14 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════════
-# SDL2 (Header immer; .so nur kopieren, wenn fehlt) — mit aarch64-clang
+# SDL2 — mit aarch64-clang, ARMv8.0, shared UND static
 # ══════════════════════════════════════════════════════════════════════
 SDL2_SRC=$WORK/SDL2-src
 SDL2_BUILD=$WORK/sdl2-build
 SDL2_INSTALL=$WORK/sdl2-install
 
-if [ ! -d "$SDL2_INSTALL/include/SDL2" ]; then
-    echo "== SDL2 $SDL2_TAG: Quellcode holen und mit aarch64-clang bauen"
+if [ ! -f "$SDL2_INSTALL/lib/libSDL2.a" ] || [ ! -d "$SDL2_INSTALL/include/SDL2" ]; then
+    echo "== SDL2 $SDL2_TAG: Quellcode holen und mit aarch64-clang bauen (shared + static)"
     rm -rf "$SDL2_SRC" "$SDL2_BUILD" "$SDL2_INSTALL"
     mkdir -p "$SDL2_SRC" "$SDL2_BUILD" "$SDL2_INSTALL"
     curl -L -o "$WORK/sdl2.tar.gz" "$SDL2_ARCHIVE"
@@ -325,7 +332,8 @@ PATCH_EOF
         -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
         -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
         -DCMAKE_BUILD_TYPE=Release \
-        -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TESTS=OFF \
+        -DSDL_SHARED=ON -DSDL_STATIC=ON -DSDL_STATIC_PIC=ON \
+        -DSDL_TESTS=OFF \
         -DSDL_X11=OFF -DSDL_WAYLAND=OFF -DSDL_KMSDRM=ON \
         -DSDL_OPENGLES=ON -DSDL_OPENGL=OFF \
         -DCMAKE_INSTALL_PREFIX="$SDL2_INSTALL"
@@ -341,7 +349,7 @@ PATCH_EOF
         echo "== libSDL2-2.0.so.0 liegt bereits in sysroot."
     fi
 else
-    echo "== SDL2-Header bereits in $SDL2_INSTALL"
+    echo "== SDL2-Header und libSDL2.a bereits in $SDL2_INSTALL"
     if [ ! -f "$SYSROOT_LIB/libSDL2-2.0.so.0" ]; then
         if [ -f "$SDL2_INSTALL/lib/libSDL2-2.0.so.0" ]; then
             cp -L "$SDL2_INSTALL/lib/libSDL2-2.0.so.0" "$SYSROOT_LIB/libSDL2-2.0.so.0"
@@ -354,12 +362,11 @@ export SDL2_INCLUDE="$SDL2_INSTALL/include"
 [ -f "$SDL2_INCLUDE/SDL2/SDL.h" ] || die "SDL2_INCLUDE=$SDL2_INCLUDE enthaelt kein SDL2/SDL.h"
 echo "== SDL2_INCLUDE=$SDL2_INCLUDE"
 
-if [ -f "$SDL2_INSTALL/lib/libSDL2.a" ]; then
-    export SDL2_LIB_DIR="$SDL2_INSTALL/lib"
-    echo "== SDL2_LIB_DIR=$SDL2_LIB_DIR (statisch verfuegbar)"
+export SDL2_LIB_DIR="$SDL2_INSTALL/lib"
+if [ -f "$SDL2_LIB_DIR/libSDL2.a" ]; then
+    echo "== SDL2_LIB_DIR=$SDL2_LIB_DIR (statisch: libSDL2.a, $(stat -c%s "$SDL2_LIB_DIR/libSDL2.a") Bytes)"
 else
-    export SDL2_LIB_DIR="$SDL2_INSTALL/lib"
-    echo "== SDL2_LIB_DIR=$SDL2_LIB_DIR (nur Header, keine .a)"
+    echo "== SDL2_LIB_DIR=$SDL2_LIB_DIR (WARNUNG: keine libSDL2.a)"
 fi
 
 # ══════════════════════════════════════════════════════════════════════
@@ -951,7 +958,7 @@ stamp=$({
     done
     [ -f "$HERE/pgo/halo_linux.profdata" ] && sha256sum "$HERE/pgo/halo_linux.profdata" | cut -d' ' -f1
     echo "pgo-mode=$PGO_MODE"
-    echo "armv8.0-clang-static-host=v1"
+    echo "armv8.0-clang-statichost-sdl2=v1"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 echo "$stamp" > "$SRC/.port-stamp"
@@ -969,7 +976,7 @@ python3 configure.py --release "$LTO_FLAG" "$PGO_FLAG" $PGO_EXTRA_ARGS \
 echo "== Baue Guest-ELF (halo_guest.elf) — mit -k 0 (alle Fehler sammeln) ..."
 ninja -j "$JOBS" -k 0 build/android/halo_guest.elf || true
 
-echo "== Baue Host-Binary (halo, dynamisch, clang/ARMv8.0) ueber port/knulli/build.sh ..."
+echo "== Baue Host-Binary (halo, statisch mit SDL2) ueber port/knulli/build.sh ..."
 bash "$SRC/port/knulli/build.sh" || true
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1014,6 +1021,10 @@ if [ -f "$DIST/halo" ]; then
     if command -v file > /dev/null 2>&1; then
         file "$DIST/halo" || true
     fi
+    if command -v readelf > /dev/null 2>&1; then
+        echo "  NEEDED (leer = statisch):"
+        readelf -d "$DIST/halo" 2>/dev/null | grep NEEDED || echo "    (keine)"
+    fi
 fi
 
 if [ "$PGO_MODE" = "train" ]; then
@@ -1027,7 +1038,7 @@ else
     cat <<'RELEASE'
 
 ────────────────────────────────────────────────────────────────────────
-RELEASE-BUILD (Settings-Only, Clang/ARMv8.0, ohne libmali)
+RELEASE-BUILD (Settings-Only, Clang/ARMv8.0, statischer Host mit SDL2)
 ────────────────────────────────────────────────────────────────────────
 Installation auf M9 Pro (wenn halo_guest.elf existiert):
 1. dist/Halo.sh           nach /roms/ports/Halo.sh
