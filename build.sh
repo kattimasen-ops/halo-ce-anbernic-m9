@@ -33,8 +33,7 @@ HOST_CC=${HOST_CC:-aarch64-clang}
 JOBS=${JOBS:-$(nproc)}
 OPEN_CE_URL=${OPEN_CE_URL:-https://github.com/OpenCommunityEdition/OpenCE.git}
 
-# Archiver fuer SDL2main.a / SDL2_test.a. CMake findet bei einem
-# Clang-Wrapper nicht automatisch llvm-ar-22.
+# Archiver fuer SDL2main.a / SDL2_test.a.
 AR=${AR:-/usr/bin/llvm-ar-22}
 RANLIB=${RANLIB:-/usr/bin/llvm-ranlib-22}
 
@@ -80,10 +79,6 @@ echo "== glibc-Version des Build-Containers:"
 ( ldd --version 2>/dev/null || true ) | head -1 || true
 echo "== Host-Compiler: $HOST_CC"
 "$HOST_CC" --version 2>&1 | head -2 || true
-echo "== Archiver: $AR"
-"$AR" --version 2>&1 | head -1 || true
-echo "== Ranlib: $RANLIB"
-"$RANLIB" --version 2>&1 | head -1 || true
 
 WORK=${WORK:-$HERE/work}
 DIST=${DIST:-$HERE/dist}
@@ -744,7 +739,7 @@ rm -rf "$SRC/port/knulli/__pycache__"
 chmod +x "$SRC/port/knulli/build.sh" 2>/dev/null || true
 
 # ══════════════════════════════════════════════════════════════════════
-# Restliche Python-Patches
+# Restliche Python-Patches (inkl. patch_terminal_buffer.py)
 # ══════════════════════════════════════════════════════════════════════
 echo ""
 echo "== Wende restliche Patch-Skripte an ..."
@@ -757,7 +752,7 @@ for patch_script in \
         patch_state_batching.py patch_texture_prewarm.py \
         patch_settings_menu.py patch_config_defaults.py \
         patch_credits.py patch_forward_declarations.py \
-        patch_config_changes.py; do
+        patch_config_changes.py patch_terminal_buffer.py; do
     if [ -f "$HERE/patches/$patch_script" ]; then
         echo "== $patch_script"
         if ! python3 "$HERE/patches/$patch_script" "$SRC"; then
@@ -847,6 +842,7 @@ check_patch "source/sound/game_sound.c"         "obstruction_interval_value"    
 check_patch "source/render/render_objects.c"    "HALO_MIN_OBJECT_PIXELS"        "render_objects.c Distant"
 check_patch "source/render/render_objects.c"    "HALO_LIGHTING_REFRESH_DIVISOR" "render_objects.c Lighting"
 check_patch "source/render/render_objects.c"    "aggressive_culling_guard"      "render_objects.c Culling"
+check_patch "source/interface/terminal.c"       "terminal_buffer_patch"         "terminal.c Buffer-Patch"
 check_patch "port/linux/src/port_config.c"      "HALO_SOUND_OBSTRUCTION_TICKS"  "port_config.c Sound"
 check_patch "port/linux/src/port_config.c"      "HALO_MIN_OBJECT_PIXELS"        "port_config.c Distant"
 check_patch "port/linux/src/port_config.c"      "HALO_LIGHTING_REFRESH_DIVISOR" "port_config.c Lighting"
@@ -948,13 +944,13 @@ stamp=$({
              patch_settings_menu.py patch_config_defaults.py \
              patch_credits.py patch_credits_xml.py \
              patch_forward_declarations.py patch_settings_only.py \
-             patch_config_changes.py \
+             patch_config_changes.py patch_terminal_buffer.py \
              settings_only_menu_functions.c; do
         cat "$HERE/patches/$p" 2>/dev/null || true
     done
     [ -f "$HERE/pgo/halo_linux.profdata" ] && sha256sum "$HERE/pgo/halo_linux.profdata" | cut -d' ' -f1
     echo "pgo-mode=$PGO_MODE"
-    echo "armv8.0-clang-dynamichost=v1"
+    echo "armv8.0-clang-dynamichost+terminal-patch=v1"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 echo "$stamp" > "$SRC/.port-stamp"
