@@ -11,11 +11,17 @@ config_boolean, config_integer, config_real in port_config.c). Die
 OpenCE-API (config_text, config_write, config_default, config_folder)
 wird darauf abgebildet, soweit moeglich; die plattformspezifischen
 Funktionen sind Stubs, die den Link durchgehen lassen.
+
+NEU: platform_audio_devices — wird von menu_tags.c aufgerufen, um die
+verfuegbaren Audio-Ausgabegeraete aufzulisten. Im Knulli-Port gibt es
+keine Geraeteliste; wir liefern eine minimale Liste mit dem Standard-
+Geraet zurueck.
 */
 
 #include "cseries.h"
 
 #include <string.h>
+#include <stdlib.h>
 
 /* ---------- Knulli-Konfigurations-API (port/linux/src/port_config.c) ---------- */
 
@@ -84,23 +90,19 @@ void config_folder(char *path, unsigned long size)
    OpenCE-Plattform-API, Stubs
    ══════════════════════════════════════════════════════════════════════ */
 
-/* settings_only: platform_display_apply — Anzeige-Aenderungen anwenden.
-   Der Knulli-Port wendet sie sofort an; nichts zu tun. */
+/* settings_only: platform_display_apply — Anzeige-Aenderungen anwenden. */
 void platform_display_apply(void)
 {
 	return;
 }
 
-/* settings_only: platform_request_quit — Beenden anfordern. Der
-   Knulli-Port kennt keinen sauberen Beenden-Pfad aus dem Spiel heraus;
-   wir tun nichts. */
+/* settings_only: platform_request_quit — Beenden anfordern. */
 void platform_request_quit(void)
 {
 	return;
 }
 
-/* settings_only: platform_window_sizes — verfuegbare Fenstergroessen.
-   Knulli hat 480p; wir melden 640x480 und 800x480 als Auswahl. */
+/* settings_only: platform_window_sizes — verfuegbare Fenstergroessen. */
 int platform_window_sizes(long *widths, long *heights, int maximum)
 {
 	if (maximum >= 2)
@@ -117,8 +119,7 @@ int platform_window_sizes(long *widths, long *heights, int maximum)
 	return 0;
 }
 
-/* settings_only: platform_display_resolutions — verfuegbare
-   Aufloesungen. Knulli hat 480p; wir melden sie. */
+/* settings_only: platform_display_resolutions — verfuegbare Aufloesungen. */
 int platform_display_resolutions(long *widths, long *heights, int maximum)
 {
 	if (maximum >= 1)
@@ -130,15 +131,49 @@ int platform_display_resolutions(long *widths, long *heights, int maximum)
 }
 
 /* ══════════════════════════════════════════════════════════════════════
+   platform_audio_devices
+   ══════════════════════════════════════════════════════════════════════ */
+
+/*
+ * settings_only: menu_tags.c ruft platform_audio_devices auf, um die
+ * verfuegbaren Audio-Ausgabegeraete aufzulisten. Im Knulli-Port gibt es
+ * keine Geraeteliste; wir liefern eine statische Liste mit dem Standard-
+ * Geraet.
+ *
+ * Signatur (aus OpenCE menu_tags.c):
+ *   int platform_audio_devices(char *names, int maximum, int name_size);
+ *
+ * Rueckgabe: Anzahl der Geraete.
+ * names:     Puffer fuer die Geraetenamen (mit '\0' getrennt).
+ * maximum:   maximale Anzahl Geraete.
+ * name_size: Groesse jedes Namens-Eintrags.
+ */
+int platform_audio_devices(char *names, int maximum, int name_size)
+{
+	const char *default_device = "Default Audio Device";
+	int length;
+
+	if (maximum <= 0 || name_size <= 0 || names == NULL)
+		return 0;
+
+	length = (int)strlen(default_device) + 1;
+	if (length > name_size)
+		length = name_size;
+
+	memcpy(names, default_device, length - 1);
+	names[length - 1] = '\0';
+
+	return 1;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
    ui_widget_port_go_back
    ══════════════════════════════════════════════════════════════════════ */
 
 /* settings_only: ui_widget_port_go_back — OpenCE ruft dies aus
    menu_functions.c, um im Widget-Stack einen Schritt zurueckzugehen.
    Der Knulli-Port exportiert die entsprechende Funktion nicht
-   oeffentlich; wir machen sie zum No-op. Falls der Zurueck-Knopf in den
-   Settings spaeter nicht funktioniert, muss die Knulli-Funktion
-   widget_instance_go_back_to_previous oeffentlich gemacht werden. */
+   oeffentlich; wir machen sie zum No-op. */
 void ui_widget_port_go_back(struct widget_instance *widget)
 {
 	(void)widget;
