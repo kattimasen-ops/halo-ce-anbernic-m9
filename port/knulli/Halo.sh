@@ -3,14 +3,15 @@
 #
 # RELEASE-BUILD: PGO (use) + LTO, alle Port-Optimierungen aktiv.
 #
-# Bild- und Performance-Einstellungen kommen NICHT mehr aus dieser Datei,
-# sondern aus config.toml (Settings -> Video im Spiel). Nur die
-# Host-seitigen Variablen (VSync-Intervall, GL-Thread, Button-Remap)
-# werden hier gesetzt.
+# Der Host wird seit v3 STATISCH gelinkt (inkl. SDL2), um die
+# LSE-Atomics der System-glibc (ARMv8.1) zu umgehen, die auf dem
+# Cortex-A35 (ARMv8.0) SIGILL ausloesen.
 #
-# WICHTIG: Der Port fasst die systemweite ALSA-Konfiguration NICHT an.
-# SDL2 benutzt den ALSA-Default von ArkOS, der bereits korrekt
-# eingerichtet ist.
+# NEU: Bibliotheks-Diagnose vor dem Spielstart.
+#   - ldd-Ausgabe der Host-Binary in log.txt
+#   - LD_DEBUG=libs-Log in halo-libdiag.txt (wenn HALO_LIBDIAG=1)
+#     Damit laesst sich die Bibliothek identifizieren, die einen
+#     etwaigen SIGILL ausloest.
 
 XDG_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
 
@@ -27,7 +28,7 @@ if [ ! -d "$GAMEDIR" ]; then
 fi
 cd "$GAMEDIR" || exit 1
 
-# ── LOGGING (nur Launcher-Minimum) ───────────────────────────────────
+# ── LOGGING ──────────────────────────────────────────────────────────
 LOG="$GAMEDIR/log.txt"
 if [ -f "$LOG" ] && [ "$(stat -c%s "$LOG" 2>/dev/null || echo 0)" -gt 2097152 ]; then
     mv -f "$LOG" "$LOG.1" 2>/dev/null || true
@@ -98,7 +99,6 @@ fi
 # ── SYSTEMOPTIMIERUNG ────────────────────────────────────────────────
 log_section "SYSTEMOPTIMIERUNG"
 
-# CPU-Governor auf performance
 cpu_governor_path=""
 for candidate in \
     /sys/devices/system/cpu/cpufreq/policy0/scaling_governor \
@@ -119,7 +119,6 @@ for cpu in /sys/devices/system/cpu/cpu[0-9]*; do
         echo performance > "$cpu/cpufreq/scaling_governor" 2>/dev/null || true
 done
 
-# GPU-Governor auf performance + min_freq = max_freq
 gpu_devfreq_path=""
 for candidate in /sys/class/devfreq/ff400000.gpu /sys/class/devfreq/gpu; do
     if [ -d "$candidate" ]; then
@@ -140,7 +139,6 @@ if [ -n "$gpu_devfreq_path" ]; then
     fi
 fi
 
-# ZRAM
 if swapon --show 2>/dev/null | grep -q zram; then
     log "ZRAM bereits aktiv."
 else
@@ -153,7 +151,6 @@ else
     fi
 fi
 
-# tailscaled stoppen
 HALO_SERVICE_STATE="/tmp/halo-ce-services.$$"
 HALO_SERVICES_RESTORED=0
 
@@ -241,30 +238,13 @@ else
     export LD_LIBRARY_PATH="$GAMEDIR/libs.aarch64:$GAMEDIR"
 fi
 
-# ── ALSA ─────────────────────────────────────────────────────────────
-# WICHTIG: Der Port fasst die systemweite ALSA-Konfiguration NICHT an.
-#
-# Frühere Versionen haben hier:
-#   1. eine persistente ~/.asoundrc geschrieben, die alle Anwendungen
-#      danach auf hw:0,0 zwang;
-#   2. mit "amixer cset numid=1 1" einen rohen Control-Index gesetzt,
-#      der auf dem R36S (RK817) Playback Path auf SPK_HP schaltete —
-#      danach waren Lautsprecher und Kopfhörer-Ausgang stumm, und
-#      die Einstellung blieb systemweit erhalten.
-#
-# SDL2 auf ArkOS benutzt den ALSA-Default bereits korrekt. Der Port
-# braucht hier nichts zu tun.
-
-# Nur aufräumen: falls eine ältere Version dieses Skripts die .asoundrc
-# angelegt hat, wird sie entfernt. Wir prüfen streng auf den exakten
-# Inhalt, damit eine vom Nutzer selbst angelegte .asoundrc unangetastet
-# bleibt.
+# ── ALSA aufraeumen ──────────────────────────────────────────────────
 ASOUNDRC="$HOME/.asoundrc"
 if [ -f "$ASOUNDRC" ]; then
     HALO_ASOUNDRC_EXPECTED="$(printf 'pcm.!default { type hw; card 0; device 0 }\nctl.!default { type hw; card 0 }\n')"
     if [ "$(cat "$ASOUNDRC" 2>/dev/null)" = "$HALO_ASOUNDRC_EXPECTED" ]; then
         mv -f "$ASOUNDRC" "$ASOUNDRC.halo-backup" 2>/dev/null || rm -f "$ASOUNDRC" 2>/dev/null || true
-        log "Alte .asoundrc (von einer früheren Halo-Version) entfernt und gesichert."
+        log "Alte .asoundrc (von einer frueheren Halo-Version) entfernt und gesichert."
     else
         log "Vorhandene .asoundrc stammt nicht von Halo - unangetastet."
     fi
@@ -282,36 +262,17 @@ export HALO_SAVE_ROOT="$GAMEDIR/save"
 log "HALO_DATA_ROOT=$HALO_DATA_ROOT"
 log "HALO_SAVE_ROOT=$HALO_SAVE_ROOT"
 
-# ── HALO-EINSTELLUNGEN (Release) ─────────────────────────────────────
+# ── HALO-EINSTELLUNGEN (Release, Max-Performance) ────────────────────
 log_section "HALO-EINSTELLUNGEN"
 
-# WICHTIG: Die Bild- und Performance-Einstellungen werden jetzt im
-# In-Game-Menue (Settings -> Video) gesetzt und aus config.toml gelesen.
-# Sie duerfen hier NICHT als HALO_*-Umgebungsvariablen exportiert werden,
-# sonst gewinnen sie gegen config.toml (port_config.c liest die Datei
-# zuerst und ueberschreibt sie dann mit vorhandenen HALO_*-Variablen).
-#
-# Nur noch Variablen, die der Host liest und die kein config.toml-
-# Setting haben:
-
-# VSync-Intervall: der Host liest HALO_SWAP_INTERVAL direkt.
-export HALO_SWAP_INTERVAL=1
-
-# HALO_NO_VSYNC darf nicht gesetzt sein.
-unset HALO_NO_VSYNC
-
-# GL-Thread und Async-Programs: der Host liest sie direkt.
+export HALO_SWAP_INTERVAL=0
+export HALO_NO_VSYNC=1
 export HALO_GL_THREAD="${HALO_GL_THREAD:-1}"
 export HALO_GL_THREAD_FRAMES="${HALO_GL_THREAD_FRAMES:-1}"
 export HALO_ASYNC_PROGRAMS="${HALO_ASYNC_PROGRAMS:-1}"
-
-# Tastenbelegung: vom Host (port/linux/src/xinput_sdl.c) gelesen.
-# A <-> B (Springen auf B, Nahkampf auf A)
-# X <-> Y (Nachladen auf Y, Waffenwechsel auf X)
-# LB (L1) <-> LT (L2) (Granate auf L1, Taschenlampe auf L2)
-# RB (R1) <-> RT (R2) (Feuern auf R1, Granatenwechsel auf R2)
 export HALO_BUTTON_REMAP=1
 
+log "VSync AUS (HALO_SWAP_INTERVAL=0, HALO_NO_VSYNC=1)."
 log "Bild- und Performance-Einstellungen kommen aus config.toml."
 log "Nur Host-Variablen (VSync, GL-Thread, Button-Remap) sind hier gesetzt."
 
@@ -343,16 +304,74 @@ if [ ! -s "$GAMEDIR/maps/ui.map" ]; then
     exit 1
 fi
 
-# ── SPIELSTART ───────────────────────────────────────────────────────
-log_section "SPIELSTART"
-
 if [ ! -x ./halo ]; then
+    log "FEHLER: ./halo fehlt oder nicht ausfuehrbar."
     echo "FEHLER: ./halo fehlt." >&2
     exit 1
 fi
 
-if [ -f ./halo_guest.elf ]; then
-    GUEST_SIZE=$(stat -c%s ./halo_guest.elf)
+# ══════════════════════════════════════════════════════════════════════
+# HOST-BIBLIOTHEKEN (Diagnose)
+#
+# Zeigt im log.txt, welche Bibliotheken der Host-Loader zur Laufzeit
+# braucht. Bei einem statisch gelinkten Host ist die NEEDED-Liste leer.
+# Bei gesetztem HALO_LIBDIAG=1 laeuft zusaetzlich LD_DEBUG=libs und
+# schreibt die Adresszuordnung der Bibliotheken in halo-libdiag.txt -
+# damit laesst sich eine Bibliothek identifizieren, die einen SIGILL
+# ausloest.
+# ══════════════════════════════════════════════════════════════════════
+log_section "HOST-BIBLIOTHEKEN"
+
+if command -v file > /dev/null 2>&1; then
+    log "file ./halo:"
+    file ./halo 2>&1 | while IFS= read -r line; do log "  $line"; done
+fi
+
+if command -v readelf > /dev/null 2>&1; then
+    log "readelf -d ./halo | grep NEEDED:"
+    readelf -d ./halo 2>/dev/null | grep NEEDED | while IFS= read -r line; do log "  $line"; done || log "  (keine NEEDED - statisch gelinkt)"
+fi
+
+if command -v ldd > /dev/null 2>&1; then
+    log "ldd ./halo:"
+    ldd ./halo 2>&1 | while IFS= read -r line; do log "  $line"; done || true
+fi
+
+log "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
+log "SDL_VIDEODRIVER=$SDL_VIDEODRIVER"
+
+# ── LD_DEBUG-Diagnose (optional, HALO_LIBDIAG=1) ─────────────────────
+LIBDIAG_LOG="$GAMEDIR/halo-libdiag.txt"
+if [ "${HALO_LIBDIAG:-0}" = "1" ]; then
+    log ""
+    log "HALO_LIBDIAG=1: LD_DEBUG=libs Diagnose-Lauf (max. 5 Sekunden) ..."
+    : > "$LIBDIAG_LOG"
+    # Der Host crasht sofort oder laeuft; wir begrenzen auf 5 Sekunden.
+    # LD_DEBUG schreibt nach stderr.
+    ( LD_DEBUG=libs timeout 5 ./halo ) > /dev/null 2>> "$LIBDIAG_LOG" || true
+    # Nur die ersten 200 Zeilen behalten, der Rest ist unnoetig.
+    if [ -s "$LIBDIAG_LOG" ]; then
+        head -200 "$LIBDIAG_LOG" > "$LIBDIAG_LOG.head"
+        mv -f "$LIBDIAG_LOG.head" "$LIBDIAG_LOG"
+        log "  $LIBDIAG_LOG geschrieben ($(wc -l < "$LIBDIAG_LOG") Zeilen)"
+        log "  Erste 40 Zeilen (auch hier im Log):"
+        head -40 "$LIBDIAG_LOG" | while IFS= read -r line; do log "    $line"; done
+    else
+        log "  (kein LD_DEBUG-Output)"
+    fi
+else
+    log ""
+    log "Hinweis: Setze HALO_LIBDIAG=1 in Halo.sh, um die Bibliotheks-"
+    log "         Adresszuordnung in halo-libdiag.txt zu erhalten."
+fi
+
+# ══════════════════════════════════════════════════════════════════════
+# SPIELSTART
+# ══════════════════════════════════════════════════════════════════════
+log_section "SPIELSTART"
+
+GUEST_SIZE=$(stat -c%s ./halo_guest.elf 2>/dev/null || echo 0)
+if [ "$GUEST_SIZE" -gt 0 ]; then
     GUEST_SIZE_MB=$((GUEST_SIZE / 1048576))
     log "halo_guest.elf: $GUEST_SIZE Bytes (~${GUEST_SIZE_MB} MB)"
 fi
