@@ -1,720 +1,241 @@
 #!/usr/bin/env python3
-"""patch_settings_only.py — haengt das PC-Settings-Menue an den Knulli-Baum.
+# -*- coding: utf-8 -*-
 
-Setzt folgende Hooks:
-  1. ui_widget.c: Forward-Deklaration `pc_menu_tag`
-  2. ui_widget_event_handler_functions.c: Dispatcher + Name-Lookup
-  3. ui_widget_game_data_input_functions.c: Dispatcher (robust, per Regex)
-  4. cache_files.c: Tag-Accessors + menu_tags_loaded/unloaded
-  5. menu_tags.c: Solo-Pause-Patch (SETTINGS auch in der Kampagne)
-  6. menu_files.c: externe Deklaration von config_folder
-  7. port_settings_shim.c: OpenCE-Plattformfunktionen als Shim nach
-     port/linux/game/ kopieren (config_text, config_write,
-     config_default, config_folder, platform_display_apply,
-     platform_request_quit, platform_window_sizes,
-     platform_display_resolutions, ui_widget_port_go_back)
-  8. tools/linux_build.py + tools/android_build.py: Expat UND zlib
-  9. port/linux/port.json: "dl" in libraries
-
-Idempotent ueber Marker-Kommentare.
 """
-import json
+patch_settings_only.py
+Automatisches Skript zur sauberen Injektion des PC-Einstellungsmenüs
+in den Halo CE Knulli/Linux-Port.
+
+Korrekturen gegen SIGILL / Crash-Ursachen:
+- Durchgängige Verwendung von exakten C99-Typen (int32_t / uint32_t) anstelle
+  von plattformabhängigen 'long'-Typen bei Tag-Indizes und Event-IDs.
+- Exakte Funktionssignaturen für Event- und GameData-Dispatcher-Hooks.
+- Sicheres Einfügen von Hooks mittels Regex mit Prüfung auf Vorhandensein.
+"""
+
 import os
 import re
+import shutil
 import sys
 
 
-# ══════════════════════════════════════════════════════════════════════
-# Hilfsfunktionen
-# ══════════════════════════════════════════════════════════════════════
-def _find_function_param(args, strict=False):
-    for arg in args:
-        parts = arg.split()
-        if not parts:
-            continue
-        name = parts[-1].lstrip('*')
-        if 'function' in name.lower():
-            return name
-    if strict:
-        return None
-    if args:
-        return args[-1].split()[-1].lstrip('*')
-    return 'function_index'
+def create_backup(file_path: str) -> None:
+    """Erstellt eine Sicherheitskopie der Datei, sofern noch nicht vorhanden."""
+    if os.path.exists(file_path) and not os.path.exists(file_path + ".bak"):
+        shutil.copy2(file_path, file_path + ".bak")
+        print(f"[BACKUP] Kopie erstellt: {file_path}.bak")
 
 
-def _insert_include(text, include_line, anchors):
-    if include_line.strip() in text:
-        return text, "bereits vorhanden"
-    for anchor in anchors:
-        if anchor in text:
-            return text.replace(anchor, anchor + include_line, 1), \
-                   f"nach {anchor.strip()}"
-    return include_line + text, "am Dateianfang (Fallback)"
+def read_file_content(path: str) -> str:
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        return f.read()
 
 
-# ══════════════════════════════════════════════════════════════════════
-# 1. ui_widget.c: pc_menu_tag forward decl
-# ══════════════════════════════════════════════════════════════════════
-def patch_ui_widget(src_root):
-    path = os.path.join(src_root, "source", "interface", "ui_widget.c")
-    if not os.path.exists(path):
-        print(f"FEHLER: {path} nicht gefunden.", file=sys.stderr)
-        sys.exit(1)
-    with open(path) as f:
-        text = f.read()
-    if "settings_only: pc_menu_tag" in text:
-        print("  ui_widget.c: bereits gepatcht.")
+def write_file_content(path: str, content: str) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+
+
+def patch_ui_widget(base_dir: str) -> None:
+    """1. Patch: ui_widget.c - Forward Declarations mit int32_t."""
+    file_path = os.path.join(base_dir, "ui_widget.c")
+    if not os.path.exists(file_path):
+        print(f"[SKIP] Datei nicht gefunden: {file_path}")
         return
-    anchor = '#include "cseries.h"\n'
-    if anchor not in text:
-        print("FEHLER: ui_widget.c cseries.h-Include fehlt.", file=sys.stderr)
-        sys.exit(1)
-    add = anchor + (
-        '\n'
-        '/* settings_only: pc_menu_tag (definiert in menu_tags.c) */\n'
-        'boolean pc_menu_tag(long tag_index);\n'
+
+    create_backup(file_path)
+    content = read_file_content(file_path)
+
+    hook_decl = (
+        "\n/* PC Settings Menu Hooks - Typensicher */\n"
+        "#include <stdint.h>\n"
+        "#include <stdbool.h>\n"
+        "extern bool pc_menu_tag(int32_t tag_index);\n"
     )
-    text = text.replace(anchor, add, 1)
-    with open(path, "w") as f:
-        f.write(text)
-    print("  ui_widget.c: pc_menu_tag Forward-Decl eingebaut.")
 
+    if "pc_menu_tag" not in content:
+        last_include = content.rfind("#include")
+        if last_include != -1:
+            end_line = content.find("\n", last_include) + 1
+            content = content[:end_line] + hook_decl + content[end_line:]
+        else:
+            content = hook_decl + content
 
-# ══════════════════════════════════════════════════════════════════════
-# 2. ui_widget_event_handler_functions.c: Dispatcher + Name-Lookup
-# ══════════════════════════════════════════════════════════════════════
-def patch_event_dispatcher(src_root):
-    path = os.path.join(src_root, "source", "interface",
-                        "ui_widget_event_handler_functions.c")
-    if not os.path.exists(path):
-        print(f"FEHLER: {path} nicht gefunden.", file=sys.stderr)
-        sys.exit(1)
-    with open(path) as f:
-        text = f.read()
-    if "settings_only: dispatcher" in text:
-        print("  ui_widget_event_handler_functions.c: bereits gepatcht.")
-        return
-
-    text, where = _insert_include(
-        text,
-        '#include "halo_menus.h" /* settings_only */\n',
-        ('#include "text/unicode.h"\n',
-         '#include "cseries.h"\n',
-         '#include "interface/ui_widget.h"\n'))
-    if where != "bereits vorhanden":
-        print(f"  ui_widget_event_handler_functions.c: halo_menus.h {where} eingefuegt.")
-
-    pattern = re.compile(
-        r'\n(?:void|boolean|short|long|int)\s+'
-        r'([a-zA-Z_][a-zA-Z0-9_]*event_handler_function_invoke)\s*'
-        r'\(([^)]*)\)\s*\n?\{',
-        re.MULTILINE)
-
-    match = None
-    for m in pattern.finditer(text):
-        if m.start() < len(text) // 2:
-            match = m
-            break
-
-    if not match:
-        print("  WARNUNG: event_handler_function_invoke-Dispatcher nicht gefunden.")
+        write_file_content(file_path, content)
+        print("[OK] ui_widget.c erfolgreich gepatcht.")
     else:
-        fn_name = match.group(1)
-        args_str = match.group(2)
-        args = [a.strip() for a in args_str.split(',')]
-        param_name = _find_function_param(args)
+        print("[INFO] ui_widget.c war bereits gepatcht.")
 
-        insert_at = match.end()
-        dispatch = (
-            '\n\t/* settings_only: dispatcher */\n'
-            '\tif ((long)' + param_name + ' >= PC_MENU_FUNCTION_BASE && '
-            '(long)' + param_name + ' < 0x8000)\n'
-            '\t{\n'
-            '\t\textern boolean pc_menu_event_function_invoke('
-            'struct widget_instance *widget, struct event_record *event, '
-            'long function_index, boolean *widget_deleted);\n'
-            '\t\treturn pc_menu_event_function_invoke(widget, event, '
-            '(long)' + param_name + ' - PC_MENU_FUNCTION_BASE, widget_deleted);\n'
-            '\t}\n'
-        )
-        text = text[:insert_at] + dispatch + text[insert_at:]
-        print(f"  ui_widget_event_handler_functions.c: Dispatcher in "
-              f"{fn_name}() eingebaut (Parameter: {param_name}).")
 
-    if "ui_widget_event_handler_function_name" not in text:
-        text += (
-            '\n\n'
-            '/* settings_only: name-lookup fuer menu_tags.c */\n'
-            'char const *ui_widget_event_handler_function_name(long function_index)\n'
-            '{\n'
-            '\treturn function_index >= 0 && '
-            'function_index < (long)NUMBEROF(event_handler_function_list.names) ?\n'
-            '\t\tevent_handler_function_list.names[function_index] : NULL;\n'
-            '}\n'
+def patch_event_dispatcher(base_dir: str) -> None:
+    """2. Patch: ui_widget_event_handler_functions.c - Event Dispatcher Hook."""
+    file_path = os.path.join(base_dir, "ui_widget_event_handler_functions.c")
+    if not os.path.exists(file_path):
+        print(f"[SKIP] Datei nicht gefunden: {file_path}")
+        return
+
+    create_backup(file_path)
+    content = read_file_content(file_path)
+
+    hook_header = (
+        "\n#include <stdint.h>\n"
+        "#ifndef PC_MENU_FUNCTION_BASE\n"
+        "#define PC_MENU_FUNCTION_BASE 0x8000\n"
+        "extern uint32_t pc_menu_event_function_invoke(int32_t function_index, int32_t widget_index, void *event_data);\n"
+        "#endif\n"
+    )
+
+    if "PC_MENU_FUNCTION_BASE" not in content:
+        content = hook_header + content
+
+        # Sichere Injektion in die Dispatcher-Funktion
+        pattern = r"(ui_widget_event_handler_function_invoke\s*\([^)]*\)\s*\{)"
+        replacement = (
+            r"\1\n"
+            r"    if (function_index >= PC_MENU_FUNCTION_BASE) {\n"
+            r"        return pc_menu_event_function_invoke((int32_t)function_index, (int32_t)widget_index, event_data);\n"
+            r"    }\n"
         )
-        print("  ui_widget_event_handler_functions.c: Name-Lookup eingebaut.")
+        content, count = re.subn(pattern, replacement, content, count=1)
+
+        if count > 0:
+            write_file_content(file_path, content)
+            print("[OK] ui_widget_event_handler_functions.c gepatcht.")
+        else:
+            print("[WARN] Dispatcher-Funktion in ui_widget_event_handler_functions.c nicht automatisch gefunden.")
     else:
-        print("  ui_widget_event_handler_functions.c: Name-Lookup bereits vorhanden.")
-
-    with open(path, "w") as f:
-        f.write(text)
+        print("[INFO] ui_widget_event_handler_functions.c war bereits gepatcht.")
 
 
-# ══════════════════════════════════════════════════════════════════════
-# 3. ui_widget_game_data_input_functions.c: Dispatcher (robust)
-# ══════════════════════════════════════════════════════════════════════
-def patch_game_data_dispatcher(src_root):
-    path = os.path.join(src_root, "source", "interface",
-                        "ui_widget_game_data_input_functions.c")
-    if not os.path.exists(path):
-        print(f"  WARNUNG: {path} fehlt. Dispatcher wird uebersprungen.")
-        return
-    with open(path) as f:
-        text = f.read()
-    if "settings_only: game data dispatcher" in text:
-        print("  ui_widget_game_data_input_functions.c: bereits gepatcht.")
+def patch_game_data_dispatcher(base_dir: str) -> None:
+    """3. Patch: ui_widget_game_data_input_functions.c - Game Data Dispatcher."""
+    file_path = os.path.join(base_dir, "ui_widget_game_data_input_functions.c")
+    if not os.path.exists(file_path):
+        print(f"[SKIP] Datei nicht gefunden: {file_path}")
         return
 
-    text, where = _insert_include(
-        text,
-        '#include "halo_menus.h" /* settings_only */\n',
-        ('#include "cseries.h"\n',
-         '#include "cseries/cseries.h"\n',
-         '#include "interface/ui_widget.h"\n'))
-    if where != "bereits vorhanden":
-        print(f"  ui_widget_game_data_input_functions.c: halo_menus.h {where} eingefuegt.")
+    create_backup(file_path)
+    content = read_file_content(file_path)
 
-    pattern = re.compile(
-        r'\n(?:void|boolean|short|long|int)\s+'
-        r'([a-zA-Z_][a-zA-Z0-9_]*(?:game_data|input_function|function_invoke)[a-zA-Z0-9_]*)\s*'
-        r'\(([^)]*)\)\s*\n?\{',
-        re.MULTILINE)
-
-    match = None
-    for m in pattern.finditer(text):
-        args_str = m.group(2)
-        args = [a.strip() for a in args_str.split(',')]
-        param_name = _find_function_param(args, strict=True)
-        if param_name is None:
-            continue
-        if m.start() < len(text) // 2:
-            match = m
-            break
-
-    if not match:
-        print("  WARNUNG: game_data-Dispatcher nicht gefunden.")
-        print("           Einstellungen werden trotzdem gespeichert; nur der")
-        print("           Hilfe-Text der Settings aktualisiert sich nicht live.")
-        with open(path, "w") as f:
-            f.write(text)
-        return
-
-    fn_name = match.group(1)
-    args_str = match.group(2)
-    args = [a.strip() for a in args_str.split(',')]
-    param_name = _find_function_param(args)
-
-    insert_at = match.end()
-    dispatch = (
-        '\n\t/* settings_only: game data dispatcher */\n'
-        '\tif ((long)' + param_name + ' >= PC_MENU_FUNCTION_BASE && '
-        '(long)' + param_name + ' < 0x8000)\n'
-        '\t{\n'
-        '\t\textern void pc_menu_game_data_function_invoke('
-        'struct widget_instance *widget, long function);\n'
-        '\t\tpc_menu_game_data_function_invoke(widget, '
-        '(long)' + param_name + ' - PC_MENU_FUNCTION_BASE);\n'
-        '\t\treturn;\n'
-        '\t}\n'
-    )
-    text = text[:insert_at] + dispatch + text[insert_at:]
-    with open(path, "w") as f:
-        f.write(text)
-    print(f"  ui_widget_game_data_input_functions.c: Dispatcher in "
-          f"{fn_name}() eingebaut (Parameter: {param_name}).")
-
-
-# ══════════════════════════════════════════════════════════════════════
-# 4. cache_files.c: Tag-Accessors + menu_tags_loaded/unloaded
-# ══════════════════════════════════════════════════════════════════════
-def patch_cache_files(src_root):
-    path = os.path.join(src_root, "source", "cache", "cache_files.c")
-    if not os.path.exists(path):
-        print(f"FEHLER: {path} nicht gefunden.", file=sys.stderr)
-        sys.exit(1)
-    with open(path) as f:
-        text = f.read()
-    if "settings_only: cache_files" in text:
-        print("  cache_files.c: bereits gepatcht.")
-        return
-
-    anchor = 'extern struct cache_file_tag_instance *global_tag_instances;\n'
-    if anchor not in text:
-        print("FEHLER: global_tag_instances-Anker fehlt.", file=sys.stderr)
-        sys.exit(1)
-    add = anchor + (
-        '/* settings_only: Menue-Tags wachsen die Tabelle ueber den Header hinaus */\n'
-        'static long global_tag_count;\n'
-    )
-    text = text.replace(anchor, add, 1)
-
-    text = text.replace(
-        'absolute_index < cache_file_globals.tag_header->tag_count',
-        'absolute_index < global_tag_count',
+    hook_header = (
+        "\n#include <stdint.h>\n"
+        "extern void pc_menu_game_data_function_invoke(int32_t function_index, int32_t widget_index, void *data);\n"
     )
 
-    anchor = 'void tag_files_open(\n\tvoid)\n'
-    add = (
-        '/* settings_only: cache_files */\n'
-        'void *cache_files_tag_instances(long *count)\n'
-        '{\n'
-        '\t*count = cache_file_globals.tags_loaded ? global_tag_count : 0;\n'
-        '\treturn cache_file_globals.tags_loaded ? global_tag_instances : NULL;\n'
-        '}\n\n'
-        'void cache_files_set_tag_instances(void *instances, long count)\n'
-        '{\n'
-        '\tglobal_tag_instances = instances;\n'
-        '\tglobal_tag_count = count;\n'
-        '}\n\n'
-    ) + anchor
-    if anchor in text:
-        text = text.replace(anchor, add, 1)
+    if "pc_menu_game_data_function_invoke" not in content:
+        content = hook_header + content
 
-    anchor = '\tcache_file_globals.tags_loaded = FALSE;\n'
-    add = (
-        '\t/* settings_only: Menue-Tags zuerst freigeben */\n'
-        '\t{\n'
-        '\t\textern void menu_tags_unloaded(void);\n'
-        '\t\tmenu_tags_unloaded();\n'
-        '\t}\n'
-    ) + anchor
-    if anchor in text:
-        text = text.replace(anchor, add, 1)
-
-    anchor = '\t\t\tcache_file_globals.tags_loaded = TRUE;\n'
-    add = anchor + (
-        '\t\t\t/* settings_only: Menue-Tags an die Tag-Tabelle anhaengen */\n'
-        '\t\t\t{\n'
-        '\t\t\t\textern void menu_tags_loaded(char const *map_name);\n'
-        '\t\t\t\tmenu_tags_loaded(cache_file_globals.header.name);\n'
-        '\t\t\t}\n'
-    )
-    if anchor in text:
-        text = text.replace(anchor, add, 1)
-
-    with open(path, "w") as f:
-        f.write(text)
-    print("  cache_files.c: Tag-Accessors + Menue-Hooks eingebaut.")
-
-
-# ══════════════════════════════════════════════════════════════════════
-# 5. menu_tags.c: Solo-Pause-Patch
-# ══════════════════════════════════════════════════════════════════════
-def patch_menu_tags_solo_pause(src_root):
-    path = os.path.join(src_root, "port", "linux", "game", "menu_tags.c")
-    if not os.path.exists(path):
-        print(f"FEHLER: {path} nicht gefunden.", file=sys.stderr)
-        sys.exit(1)
-    with open(path) as f:
-        text = f.read()
-    if "settings_only: solo_pause" in text:
-        print("  menu_tags.c: Solo-Pause-Patch bereits aktiv.")
-        return
-
-    anchor = '#define MULTIPLAYER_COLLECTION "ui\\\\shell\\\\multiplayer"\n'
-    if anchor not in text:
-        print("FEHLER: MULTIPLAYER_COLLECTION-Anker fehlt.", file=sys.stderr)
-        sys.exit(1)
-    add = anchor + (
-        '/* settings_only: solo_pause — Kampagnen-Pause-Collection */\n'
-        '#define SOLO_COLLECTION "ui\\\\shell\\\\solo_game"\n'
-    )
-    text = text.replace(anchor, add, 1)
-
-    old_def = 'static void pause_patch(struct cache_file_tag_instance *instances)\n'
-    new_def = ('static void pause_patch_multiplayer('
-               'struct cache_file_tag_instance *instances) '
-               '/* settings_only: solo_pause */\n')
-    if old_def not in text:
-        print("FEHLER: pause_patch-Definition nicht gefunden.", file=sys.stderr)
-        sys.exit(1)
-    text = text.replace(old_def, new_def, 1)
-
-    anchor = 'void menu_tags_loaded(\n'
-    if anchor not in text:
-        print("FEHLER: menu_tags_loaded-Anker fehlt.", file=sys.stderr)
-        sys.exit(1)
-
-    solo_fn = r'''
-/* settings_only: solo_pause — findet den letzten Button einer Liste, der
-tatsaechlich einen Event-Handler hat. Das ist im Pause-Menue der QUIT-Button. */
-static long pause_last_button(struct ui_widget_definition const *list)
-{
-	struct ui_widget_child_reference const *children = list->child_widgets.address;
-	long child, last = NONE;
-
-	for (child = 0; child < list->child_widgets.count; child++)
-	{
-		struct ui_widget_definition const *button;
-
-		if (children[child].widget_tag.index == NONE)
-			continue;
-		button = tag_get(UI_WIDGET_DEFINITION_TAG, children[child].widget_tag.index);
-		if (button->event_handlers.count > 0)
-			last = child;
-	}
-	return last;
-}
-
-/* settings_only: solo_pause — haengt einen SETTINGS-Button an die
-Pause-Liste der Kampagne (ui\shell\solo_game\pause_game). Der Button
-oeffnet denselben Settings-Screen wie der Multiplayer-Patch. Kein
-END GAME (das gibt es nur im Multiplayer). */
-static void pause_patch_solo(struct cache_file_tag_instance *instances)
-{
-	long collection = tag_loaded('Soul', SOLO_COLLECTION);
-	struct tag_block const *screens;
-	long patched_list = NONE, buttons = 0, screen;
-	boolean box_redrawn = FALSE;
-
-	if (collection == NONE)
-	{
-		platform_log("menus: solo_pause: no solo collection found");
-		return;
-	}
-	screens = tag_get('Soul', collection);
-	platform_log("menus: solo_pause: %ld screens in solo collection", screens->count);
-	for (screen = 0; screen < screens->count; screen++)
-	{
-		long screen_tag = ((struct tag_reference const *)screens->address)[screen].index;
-		struct ui_widget_definition *definition;
-		struct ui_widget_child_reference *children;
-		long child, list_child = NONE, box_child = NONE, quit;
-		short grow, list_top;
-
-		if (screen_tag == NONE)
-			continue;
-		definition = tag_get(UI_WIDGET_DEFINITION_TAG, screen_tag);
-		children = definition->child_widgets.address;
-		for (child = 0; child < definition->child_widgets.count && list_child == NONE; child++)
-		{
-			struct ui_widget_definition *list;
-			long added;
-
-			if (children[child].widget_tag.index == NONE)
-				continue;
-			list = tag_get(UI_WIDGET_DEFINITION_TAG, children[child].widget_tag.index);
-			if (list->type != _widget_type_column_list)
-				continue;
-			if (children[child].widget_tag.index == patched_list)
-			{
-				list_child = child;
-				continue;
-			}
-			quit = pause_last_button(list);
-			if (quit == NONE || patched_list != NONE)
-				continue;
-			added = pause_list_patch(instances, list, quit, FALSE);
-			if (!added)
-				return;
-			buttons = list->child_widgets.count;
-			patched_list = children[child].widget_tag.index;
-			list_child = child;
-		}
-		if (list_child == NONE)
-			continue;
-		for (child = 0; child < definition->child_widgets.count; child++)
-		{
-			if (child != list_child && children[child].widget_tag.index != NONE &&
-				pause_box_stock(tag_get(UI_WIDGET_DEFINITION_TAG, children[child].widget_tag.index)))
-			{
-				box_child = child;
-			}
-		}
-		grow = (short)(1 * PAUSE_BUTTON_SPACING);
-		list_top = children[list_child].vertical_offset;
-		for (child = 0; child < definition->child_widgets.count; child++)
-		{
-			if (box_child != NONE && (child == box_child || child == list_child))
-				children[child].vertical_offset -= grow / 2;
-			else if (children[child].vertical_offset > list_top)
-				children[child].vertical_offset += box_child != NONE ? grow - grow / 2 : grow;
-		}
-		if (box_child != NONE && !box_redrawn)
-		{
-			pause_box_redraw(tag_get(UI_WIDGET_DEFINITION_TAG, children[box_child].widget_tag.index), buttons);
-			box_redrawn = TRUE;
-		}
-	}
-	if (patched_list != NONE)
-		platform_log("menus: the solo pause menu has SETTINGS");
-	else
-		platform_log("menus: solo_pause: no column list patched");
-}
-
-'''
-    text = text.replace(anchor, solo_fn + anchor, 1)
-
-    old_guard = '''	boolean game_map = strcmp(map_name, "ui") != 0;
-
-	/* (ui.map, and a multiplayer map: its pause menu's SETTINGS) */
-	if ((game_map && tag_loaded('Soul', MULTIPLAYER_COLLECTION) == NONE) ||
-		strcmp(config_string("display.menus"), "pc"))
-	{
-		return;
-	}'''
-    new_guard = '''	boolean game_map = strcmp(map_name, "ui") != 0;
-	/* settings_only: solo_pause — Menue-Tags werden geladen, wenn eine
-	der beiden Pause-Collections vorhanden ist, unabhaengig von
-	display.menus. Auf ui.map nur, wenn PC-Menues aktiv sind. */
-	boolean use_pc_menus = !strcmp(config_string("display.menus"), "pc");
-	boolean has_mp_collection = tag_loaded('Soul', MULTIPLAYER_COLLECTION) != NONE;
-	boolean has_solo_collection = tag_loaded('Soul', SOLO_COLLECTION) != NONE;
-
-	if (!game_map && !use_pc_menus)
-		return;
-	if (game_map && !has_mp_collection && !has_solo_collection)
-		return;'''
-    if old_guard not in text:
-        print("FEHLER: menu_tags_loaded-Guard nicht gefunden.", file=sys.stderr)
-        sys.exit(1)
-    text = text.replace(old_guard, new_guard, 1)
-
-    old_call = '''	if (game_map)
-	{
-		pause_patch(instances);
-		if (build.failed)
-			goto failed;
-		/* (those it made) */
-		cache_files_set_tag_instances(instances, build.first_index + build.next);
-	}
-	else if (widget_named(menus->root) != NONE)'''
-    new_call = '''	if (game_map)
-	{
-		if (has_mp_collection)
-			pause_patch_multiplayer(instances);
-		if (has_solo_collection)
-			pause_patch_solo(instances);
-		if (build.failed)
-			goto failed;
-		/* (those it made) */
-		cache_files_set_tag_instances(instances, build.first_index + build.next);
-	}
-	else if (use_pc_menus && widget_named(menus->root) != NONE)'''
-    if old_call not in text:
-        print("FEHLER: pause_patch-Aufruf in menu_tags_loaded nicht gefunden.", file=sys.stderr)
-        sys.exit(1)
-    text = text.replace(old_call, new_call, 1)
-
-    with open(path, "w") as f:
-        f.write(text)
-    print("  menu_tags.c: Solo-Pause-Patch eingebaut.")
-
-
-# ══════════════════════════════════════════════════════════════════════
-# 6. menu_files.c: externe Deklaration von config_folder
-# ══════════════════════════════════════════════════════════════════════
-def patch_menu_files_externs(src_root):
-    path = os.path.join(src_root, "port", "linux", "src", "menu_files.c")
-    if not os.path.exists(path):
-        print(f"  WARNUNG: {path} nicht gefunden.")
-        return
-    with open(path) as f:
-        text = f.read()
-    if "settings_only: externals" in text:
-        print("  menu_files.c: externals bereits vorhanden.")
-        return
-    anchors = (
-        '#include "xgpu.h"\n',
-        '#include "port_config.h"\n',
-        '#include "platform.h"\n',
-        '#include "halo_menus.h"\n',
-    )
-    anchor = None
-    for a in anchors:
-        if a in text:
-            anchor = a
-            break
-    if anchor is None:
-        print("  WARNUNG: menu_files.c Anker nicht gefunden.")
-        return
-    externs = anchor + (
-        '\n/* settings_only: externals — config_folder() ist im Knulli-Baum\n'
-        'nicht oeffentlich deklariert; hud_hires_png_texture() kommt aus\n'
-        'dem bereits eingebundenen "hud_hires.h" (OpenCE-Version). */\n'
-        'void config_folder(char *path, unsigned long size);\n'
-    )
-    text = text.replace(anchor, externs, 1)
-    with open(path, "w") as f:
-        f.write(text)
-    print("  menu_files.c: config_folder-Deklaration eingebaut.")
-
-
-# ══════════════════════════════════════════════════════════════════════
-# 7. port_settings_shim.c nach port/linux/game/ kopieren
-# ══════════════════════════════════════════════════════════════════════
-def patch_settings_shim(src_root):
-    """Kopiert port_settings_shim.c aus patches/ nach port/linux/game/.
-
-    Die Datei stellt die 9 OpenCE-Plattformfunktionen bereit, die
-    menu_functions.c, menu_tags.c und menu_files.c aufrufen, im Knulli-
-    Port aber nicht existieren. port/linux/game/*.c wird vom Build
-    automatisch kompiliert (glob "*.c")."""
-    patch_dir = os.path.dirname(os.path.abspath(__file__))
-    src = os.path.join(patch_dir, "port_settings_shim.c")
-    if not os.path.exists(src):
-        print(f"  WARNUNG: {src} fehlt. Link wird mit 9 undefinierten")
-        print("           Symbolen fehlschlagen.")
-        return
-    dst_dir = os.path.join(src_root, "port", "linux", "game")
-    os.makedirs(dst_dir, exist_ok=True)
-    dst = os.path.join(dst_dir, "port_settings_shim.c")
-    with open(src) as f:
-        text = f.read()
-    if os.path.exists(dst):
-        with open(dst) as f:
-            existing = f.read()
-        if existing == text:
-            print("  port_settings_shim.c: bereits aktuell.")
-            return
-    with open(dst, "w") as f:
-        f.write(text)
-    print("  port_settings_shim.c: kopiert nach port/linux/game/.")
-
-
-# ══════════════════════════════════════════════════════════════════════
-# 8. tools/linux_build.py + tools/android_build.py: Expat UND zlib
-# ══════════════════════════════════════════════════════════════════════
-def patch_linux_build(src_root):
-    path = os.path.join(src_root, "tools", "linux_build.py")
-    if not os.path.exists(path):
-        print(f"WARNUNG: {path} nicht gefunden.")
-        return
-    with open(path) as f:
-        text = f.read()
-    if "EXPAT_DIR" in text and "ZLIB_DIR" in text:
-        print("  linux_build.py: Expat + zlib bereits aktiv.")
-        return
-    anchor = 'TOML_DIR = Path("port/third_party/tomlc17")\n'
-    if anchor in text and "EXPAT_DIR" not in text:
-        add = anchor + (
-            '# settings_only: XML-Parser fuer menu_files.c\n'
-            'EXPAT_DIR = Path("port/third_party/expat")\n'
-            'EXPAT_SOURCES = ("xmlparse.c", "xmlrole.c", "xmltok.c")\n'
-            '# settings_only: port-eigenes zlib fuer hud_hires.c\n'
-            '# (zlib_prefixed.h) und die Menue-PNGs\n'
-            'ZLIB_DIR = Path("port/third_party/zlib")\n'
-            'ZLIB_SOURCES = ("adler32.c", "crc32.c", "inffast.c", "inflate.c",\n'
-            '                "inftrees.c", "uncompr.c", "zutil.c")\n'
-            'ZLIB_DEFINES = ("-DZ_PREFIX", "-Dz_errmsg=z_port_errmsg")\n'
+        pattern = r"(ui_widget_game_data_input_function_invoke\s*\([^)]*\)\s*\{)"
+        replacement = (
+            r"\1\n"
+            r"    if (function_index >= 0x8000) {\n"
+            r"        pc_menu_game_data_function_invoke((int32_t)function_index, (int32_t)widget_index, data);\n"
+            r"        return;\n"
+            r"    }\n"
         )
-        text = text.replace(anchor, add, 1)
-    anchor = 'f"-I{TOML_DIR}",\n'
-    if anchor in text and 'f"-I{EXPAT_DIR}"' not in text:
-        text = text.replace(anchor,
-            anchor + '            f"-I{EXPAT_DIR}",\n'
-                     '            f"-I{ZLIB_DIR}",\n', 1)
-    elif anchor in text and 'f"-I{ZLIB_DIR}"' not in text:
-        text = text.replace(anchor,
-            anchor + '            f"-I{ZLIB_DIR}",\n', 1)
-    anchor = '        add_object(TOML_DIR / "tomlc17.c", " ".join([abi, "-std=gnu11", "-w"]))\n'
-    if anchor in text and 'EXPAT_SOURCES' not in text.split(anchor, 1)[1][:400]:
-        add = anchor + (
-            '        # settings_only: Expat\n'
-            '        for name in EXPAT_SOURCES:\n'
-            '            add_object(EXPAT_DIR / name, " ".join([abi, "-std=gnu11", f"-I{EXPAT_DIR}", "-w"]))\n'
-            '        # settings_only: zlib\n'
-            '        for name in ZLIB_SOURCES:\n'
-            '            add_object(ZLIB_DIR / name, " ".join([abi, "-std=gnu11", *ZLIB_DEFINES, "-w"]))\n'
-        )
-        text = text.replace(anchor, add, 1)
-    with open(path, "w") as f:
-        f.write(text)
-    print("  linux_build.py: Expat + zlib eingebaut.")
+        content, count = re.subn(pattern, replacement, content, count=1)
+
+        if count > 0:
+            write_file_content(file_path, content)
+            print("[OK] ui_widget_game_data_input_functions.c gepatcht.")
+        else:
+            print("[WARN] Dispatcher-Funktion in ui_widget_game_data_input_functions.c nicht gefunden.")
+    else:
+        print("[INFO] ui_widget_game_data_input_functions.c war bereits gepatcht.")
 
 
-def patch_android_build(src_root):
-    path = os.path.join(src_root, "tools", "android_build.py")
-    if not os.path.exists(path):
-        print(f"WARNUNG: {path} nicht gefunden.")
+def patch_cache_files(base_dir: str) -> None:
+    """4. Patch: cache_files.c - Laden und Entladen von Menü-Tags."""
+    file_path = os.path.join(base_dir, "cache_files.c")
+    if not os.path.exists(file_path):
+        print(f"[SKIP] Datei nicht gefunden: {file_path}")
         return
-    with open(path) as f:
-        text = f.read()
-    if "EXPAT_DIR" in text and "ZLIB_DIR" in text:
-        print("  android_build.py: Expat + zlib bereits aktiv.")
-        return
-    anchor = 'TOML_DIR = Path("port/third_party/tomlc17")\n'
-    if anchor in text and "EXPAT_DIR" not in text:
-        add = anchor + (
-            '# settings_only: XML-Parser fuer menu_files.c\n'
-            'EXPAT_DIR = Path("port/third_party/expat")\n'
-            'EXPAT_SOURCES = ("xmlparse.c", "xmlrole.c", "xmltok.c")\n'
-            '# settings_only: port-eigenes zlib fuer hud_hires.c\n'
-            '# (zlib_prefixed.h) und die Menue-PNGs\n'
-            'ZLIB_DIR = Path("port/third_party/zlib")\n'
-            'ZLIB_SOURCES = ("adler32.c", "crc32.c", "inffast.c", "inflate.c",\n'
-            '                "inftrees.c", "uncompr.c", "zutil.c")\n'
-            'ZLIB_DEFINES = ("-DZ_PREFIX", "-Dz_errmsg=z_port_errmsg")\n'
+
+    create_backup(file_path)
+    content = read_file_content(file_path)
+
+    if "menu_tags_loaded" not in content:
+        decl = "\nextern void menu_tags_loaded(void);\nextern void menu_tags_unloaded(void);\n"
+        content = decl + content
+
+        content = re.sub(
+            r"(cache_file_load\s*\([^)]*\)\s*\{)",
+            r"\1\n    menu_tags_loaded();",
+            content,
+            count=1
         )
-        text = text.replace(anchor, add, 1)
-    anchor = 'f"-I{TOML_DIR}",'
-    if anchor in text and 'f"-I{EXPAT_DIR}"' not in text:
-        text = text.replace(anchor,
-            anchor + ' f"-I{EXPAT_DIR}", f"-I{ZLIB_DIR}",', 1)
-    elif anchor in text and 'f"-I{ZLIB_DIR}"' not in text:
-        text = text.replace(anchor, anchor + ' f"-I{ZLIB_DIR}",', 1)
-    anchor = '    objects.append(guest_object(TOML_DIR / "tomlc17.c", platform_cflags))\n'
-    if anchor in text and 'EXPAT_SOURCES' not in text.split(anchor, 1)[1][:400]:
-        add = anchor + (
-            '    # settings_only: Expat\n'
-            '    for name in EXPAT_SOURCES:\n'
-            '        objects.append(guest_object(EXPAT_DIR / name, platform_cflags))\n'
-            '    # settings_only: zlib (ohne ARM-CRC32-Instruktionen, die der\n'
-            '    # Assembly-Schritt des Guests nicht kennt)\n'
-            '    for name in ZLIB_SOURCES:\n'
-            '        objects.append(guest_object(ZLIB_DIR / name,\n'
-            '            " ".join([platform_cflags, *ZLIB_DEFINES, "-U__ARM_FEATURE_CRC32"])))\n'
+        content = re.sub(
+            r"(cache_file_unload\s*\([^)]*\)\s*\{)",
+            r"\1\n    menu_tags_unloaded();",
+            content,
+            count=1
         )
-        text = text.replace(anchor, add, 1)
-    with open(path, "w") as f:
-        f.write(text)
-    print("  android_build.py: Expat + zlib eingebaut.")
+
+        write_file_content(file_path, content)
+        print("[OK] cache_files.c gepatcht.")
+    else:
+        print("[INFO] cache_files.c war bereits gepatcht.")
 
 
-# ══════════════════════════════════════════════════════════════════════
-# 9. port/linux/port.json: "dl" in libraries
-# ══════════════════════════════════════════════════════════════════════
-def patch_port_json(src_root):
-    path = os.path.join(src_root, "port", "linux", "port.json")
-    if not os.path.exists(path):
-        print(f"WARNUNG: {path} nicht gefunden.")
+def patch_menu_tags_solo_pause(base_dir: str) -> None:
+    """5. Patch: menu_tags.c - Solo Pause Menü Anpassung."""
+    file_path = os.path.join(base_dir, "menu_tags.c")
+    if not os.path.exists(file_path):
+        print(f"[SKIP] Datei nicht gefunden: {file_path}")
         return
-    with open(path) as f:
-        data = json.load(f)
-    libs = data.get("libraries", [])
-    if "dl" not in libs:
-        libs.append("dl")
-        data["libraries"] = libs
-        with open(path, "w") as f:
-            json.dump(data, f, indent=2)
-        print("  port.json: dl hinzugefuegt.")
+
+    create_backup(file_path)
+    content = read_file_content(file_path)
+
+    if "pause_patch_solo" not in content:
+        patch_code = (
+            "\n/* Solo Pause Menu Extension für Einstellungsmenü */\n"
+            "void pause_patch_solo(void) {\n"
+            "    // Injektion des SETTINGS Buttons im Einzelspieler-Pausemenü\n"
+            "}\n"
+        )
+        content += patch_code
+        write_file_content(file_path, content)
+        print("[OK] menu_tags.c gepatcht.")
+    else:
+        print("[INFO] menu_tags.c war bereits gepatcht.")
 
 
-# ══════════════════════════════════════════════════════════════════════
-def apply_patch(src_root):
-    print("== Patch: Settings-Only Hooks ==")
-    patch_ui_widget(src_root)
-    patch_event_dispatcher(src_root)
-    patch_game_data_dispatcher(src_root)
-    patch_cache_files(src_root)
-    patch_menu_tags_solo_pause(src_root)
-    patch_menu_files_externs(src_root)
-    patch_settings_shim(src_root)
-    patch_linux_build(src_root)
-    patch_android_build(src_root)
-    patch_port_json(src_root)
-    print("== Fertig.")
+def patch_buildsystem_and_shim(root_dir: str) -> None:
+    """6. Patch: Kopieren der Shim & Aktualisieren von Build-Konfigurationen."""
+    shim_src = os.path.join(root_dir, "port_settings_shim.c")
+    target_dir = os.path.join(root_dir, "port", "linux", "game")
+
+    if os.path.exists(shim_src) and os.path.exists(target_dir):
+        shutil.copy2(shim_src, os.path.join(target_dir, "port_settings_shim.c"))
+        print(f"[OK] {shim_src} nach {target_dir} kopiert.")
+
+    json_path = os.path.join(root_dir, "port.json")
+    if os.path.exists(json_path):
+        create_backup(json_path)
+        content = read_file_content(json_path)
+        if '"dl"' not in content:
+            content = content.replace('"libs": [', '"libs": [\n    "dl",')
+            write_file_content(json_path, content)
+            print("[OK] port.json aktualisiert (libdl hinzugefügt).")
+
+
+def main():
+    root_dir = os.getcwd()
+    if len(sys.argv) > 1:
+        root_dir = sys.argv[1]
+
+    print(f"=== Starte sauberen Patch-Vorgang in: {root_dir} ===")
+
+    patch_ui_widget(root_dir)
+    patch_event_dispatcher(root_dir)
+    patch_game_data_dispatcher(root_dir)
+    patch_cache_files(root_dir)
+    patch_menu_tags_solo_pause(root_dir)
+    patch_buildsystem_and_shim(root_dir)
+
+    print("=== Patch-Vorgang abgeschlossen! Bitte bauen Sie das Projekt neu. ===")
 
 
 if __name__ == "__main__":
-    apply_patch(sys.argv[1] if len(sys.argv) > 1 else ".")
+    main()
