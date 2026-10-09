@@ -3,17 +3,21 @@
 #
 # RELEASE-BUILD: PGO (use) + LTO, alle Port-Optimierungen aktiv.
 #
-# Der Host wird seit v3 STATISCH gelinkt (inkl. SDL2), um die
-# LSE-Atomics der System-glibc (ARMv8.1) zu umgehen, die auf dem
-# Cortex-A35 (ARMv8.0) SIGILL ausloesen.
+# Der Host wird dynamisch gelinkt. Er umgeht den SIGILL (LSE-Atomics)
+# durch -march=armv8-a -mno-outline-atomics.
 #
-# NEU: Bibliotheks-Diagnose vor dem Spielstart.
+# Bibliotheks-Diagnose vor dem Spielstart (standardmaessig AN):
 #   - ldd-Ausgabe der Host-Binary in log.txt
-#   - LD_DEBUG=libs-Log in halo-libdiag.txt (wenn HALO_LIBDIAG=1)
-#     Damit laesst sich die Bibliothek identifizieren, die einen
-#     etwaigen SIGILL ausloest.
+#   - LD_DEBUG=libs-Log in halo-libdiag.txt
+#   Damit laesst sich die Bibliothek identifizieren, die einen
+#   etwaigen SIGILL ausloest.
+#   Abschalten: HALO_LIBDIAG=0 in die Umgebung setzen.
 
 XDG_DATA_HOME=${XDG_DATA_HOME:-$HOME/.local/share}
+
+# Standardmaessig aktiv: das Diagnose-Log wird beim naechsten Start
+# erzeugt. Es kostet nur ~5 Sekunden und laeuft einmal.
+export HALO_LIBDIAG="${HALO_LIBDIAG:-1}"
 
 # ── PFADE ────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
@@ -52,6 +56,7 @@ log "SCRIPT_DIR=$SCRIPT_DIR"
 log "GAMEDIR=$GAMEDIR"
 log "Kernel=$(uname -r), Arch=$(uname -m)"
 log "Datum=$(date)"
+log "HALO_LIBDIAG=$HALO_LIBDIAG"
 
 # ── LOCK ─────────────────────────────────────────────────────────────
 exec 9> /tmp/halo-lock 2>/dev/null || true
@@ -262,7 +267,7 @@ export HALO_SAVE_ROOT="$GAMEDIR/save"
 log "HALO_DATA_ROOT=$HALO_DATA_ROOT"
 log "HALO_SAVE_ROOT=$HALO_SAVE_ROOT"
 
-# ── HALO-EINSTELLUNGEN (Release, Max-Performance) ────────────────────
+# ── HALO-EINSTELLUNGEN ───────────────────────────────────────────────
 log_section "HALO-EINSTELLUNGEN"
 
 export HALO_SWAP_INTERVAL=0
@@ -274,11 +279,7 @@ export HALO_BUTTON_REMAP=1
 
 log "VSync AUS (HALO_SWAP_INTERVAL=0, HALO_NO_VSYNC=1)."
 log "Bild- und Performance-Einstellungen kommen aus config.toml."
-log "Nur Host-Variablen (VSync, GL-Thread, Button-Remap) sind hier gesetzt."
 
-# ══════════════════════════════════════════════════════════════════════
-# KEINE DEBUG- ODER STATISTIK-AUSGABEN IM RELEASE
-# ══════════════════════════════════════════════════════════════════════
 unset HALO_DEBUG_LOGS 2>/dev/null || true
 unset HALO_GPU_STATS 2>/dev/null || true
 unset HALO_GL_TIMING 2>/dev/null || true
@@ -312,13 +313,6 @@ fi
 
 # ══════════════════════════════════════════════════════════════════════
 # HOST-BIBLIOTHEKEN (Diagnose)
-#
-# Zeigt im log.txt, welche Bibliotheken der Host-Loader zur Laufzeit
-# braucht. Bei einem statisch gelinkten Host ist die NEEDED-Liste leer.
-# Bei gesetztem HALO_LIBDIAG=1 laeuft zusaetzlich LD_DEBUG=libs und
-# schreibt die Adresszuordnung der Bibliotheken in halo-libdiag.txt -
-# damit laesst sich eine Bibliothek identifizieren, die einen SIGILL
-# ausloest.
 # ══════════════════════════════════════════════════════════════════════
 log_section "HOST-BIBLIOTHEKEN"
 
@@ -329,7 +323,7 @@ fi
 
 if command -v readelf > /dev/null 2>&1; then
     log "readelf -d ./halo | grep NEEDED:"
-    readelf -d ./halo 2>/dev/null | grep NEEDED | while IFS= read -r line; do log "  $line"; done || log "  (keine NEEDED - statisch gelinkt)"
+    readelf -d ./halo 2>/dev/null | grep NEEDED | while IFS= read -r line; do log "  $line"; done || log "  (keine NEEDED)"
 fi
 
 if command -v ldd > /dev/null 2>&1; then
@@ -340,16 +334,29 @@ fi
 log "LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
 log "SDL_VIDEODRIVER=$SDL_VIDEODRIVER"
 
-# ── LD_DEBUG-Diagnose (optional, HALO_LIBDIAG=1) ─────────────────────
+# ══════════════════════════════════════════════════════════════════════
+# LD_DEBUG-Diagnose (HALO_LIBDIAG=1, Default)
+# ══════════════════════════════════════════════════════════════════════
 LIBDIAG_LOG="$GAMEDIR/halo-libdiag.txt"
 if [ "${HALO_LIBDIAG:-0}" = "1" ]; then
     log ""
     log "HALO_LIBDIAG=1: LD_DEBUG=libs Diagnose-Lauf (max. 5 Sekunden) ..."
     : > "$LIBDIAG_LOG"
-    # Der Host crasht sofort oder laeuft; wir begrenzen auf 5 Sekunden.
-    # LD_DEBUG schreibt nach stderr.
-    ( LD_DEBUG=libs timeout 5 ./halo ) > /dev/null 2>> "$LIBDIAG_LOG" || true
-    # Nur die ersten 200 Zeilen behalten, der Rest ist unnoetig.
+
+    if command -v timeout > /dev/null 2>&1; then
+        # timeout ist vorhanden (coreutils)
+        ( LD_DEBUG=libs timeout 5 ./halo ) > /dev/null 2>> "$LIBDIAG_LOG" || true
+    else
+        # Fallback ohne timeout: Hintergrund-Job + sleep + kill
+        ( LD_DEBUG=libs ./halo ) > /dev/null 2>> "$LIBDIAG_LOG" &
+        DIAG_PID=$!
+        ( sleep 5 && kill -TERM "$DIAG_PID" 2>/dev/null ) &
+        KILLER_PID=$!
+        wait "$DIAG_PID" 2>/dev/null || true
+        kill -TERM "$KILLER_PID" 2>/dev/null || true
+        wait "$KILLER_PID" 2>/dev/null || true
+    fi
+
     if [ -s "$LIBDIAG_LOG" ]; then
         head -200 "$LIBDIAG_LOG" > "$LIBDIAG_LOG.head"
         mv -f "$LIBDIAG_LOG.head" "$LIBDIAG_LOG"
@@ -357,12 +364,15 @@ if [ "${HALO_LIBDIAG:-0}" = "1" ]; then
         log "  Erste 40 Zeilen (auch hier im Log):"
         head -40 "$LIBDIAG_LOG" | while IFS= read -r line; do log "    $line"; done
     else
-        log "  (kein LD_DEBUG-Output)"
+        log "  WARNUNG: LD_DEBUG hat nichts geschrieben."
+        log "  Pruefe: existiert ./halo? ist es ausfuehrbar?"
+        ls -la ./halo 2>&1 | while IFS= read -r line; do log "    $line"; done
     fi
 else
     log ""
-    log "Hinweis: Setze HALO_LIBDIAG=1 in Halo.sh, um die Bibliotheks-"
-    log "         Adresszuordnung in halo-libdiag.txt zu erhalten."
+    log "HALO_LIBDIAG=$HALO_LIBDIAG (Diagnose uebersprungen)."
+    log "Zum Aktivieren: HALO_LIBDIAG=1 in die Umgebung setzen oder"
+    log "die Zeile 'export HALO_LIBDIAG=1' oben in Halo.sh eintragen."
 fi
 
 # ══════════════════════════════════════════════════════════════════════
