@@ -1,19 +1,17 @@
 #!/bin/sh
 # Builds the Knulli port into build/knulli:
-#   halo            the aarch64 glibc host (the loader, SDL2, OpenGL ES)
+#   halo            the aarch64 STATIC glibc host
 #   halo_guest.elf  the game, the Android port's guest image
-#   libs.aarch64/   the runtime libraries the device may not have
+#   libs.aarch64/   die Laufzeitbibliotheken (SDL2 als Fallback)
 #
 # POSIX-sh-kompatibel (dash): set -eu statt set -euo pipefail.
 #
-# HOST-Compiler: aarch64-clang (Wrapper um clang-22 mit
-# --target=aarch64-linux-gnu --sysroot=/ --gcc-toolchain=/usr).
-# WICHTIG: -march=armv8-a -mno-outline-atomics, weil der RK3326
-# (Cortex-A35) ARMv8.0 ist und die LSE-Atomics aus ARMv8.1 nicht
-# ausfuehren kann.
-#
-# libmali wird NICHT gelinkt; EGL/GLES kommen zur Laufzeit aus der
-# System-Mali (/tmp/halo-mali).
+# WICHTIG: Host wird STATISCH gelinkt, inklusive SDL2 (libSDL2.a).
+# Grund: Die System-glibc auf dem M9 Pro (ArkOS) enthaelt LSE-Atomics
+# (ARMv8.1); der Cortex-A35 ist ARMv8.0 und stirbt daran mit SIGILL.
+# Eine statische glibc im Host umgeht das. libmali wird weiterhin per
+# dlopen zur Laufzeit geladen (ueber /tmp/halo-mali in Halo.sh), aber
+# SDL2 und glibc sind im Host eingebettet.
 set -eu
 
 folder() {
@@ -34,6 +32,13 @@ CC=${CC:-aarch64-clang}
 JOBS=${JOBS:-$(nproc)}
 OUT=build/knulli
 OBJ=$OUT/obj
+
+# Statisches SDL2 (aus $SDL2_LIB_DIR) fuer den Host-Link.
+SDL2_LIB_DIR="${SDL2_LIB_DIR:-}"
+STATIC_SDL2=""
+if [ -n "$SDL2_LIB_DIR" ] && [ -f "$SDL2_LIB_DIR/libSDL2.a" ]; then
+    STATIC_SDL2="$SDL2_LIB_DIR/libSDL2.a"
+fi
 
 ninja -j "$JOBS" build/android/halo_guest.elf build/android/host/host_import_table.c
 mkdir -p "$OBJ" "$OUT/gl_include" "$OUT/lib" "$OUT/libs.aarch64"
@@ -63,6 +68,8 @@ copy_runtime_lib() {
     return 0
 }
 
+# Nur die dynamischen Bibliotheken ausliefern, die der Host zur Laufzeit
+# braucht. libmali wird nicht mitgeliefert (kommt aus /tmp/halo-mali).
 copy_runtime_lib "libSDL3"   "libSDL3.so.0"
 copy_runtime_lib "libSDL2"   "libSDL2-2.0.so.0"
 copy_runtime_lib "libdecor"  "libdecor-0.so.0"
@@ -159,18 +166,40 @@ done
 compile port/third_party/tomlc17/tomlc17.c -w
 compile build/android/host/host_import_table.c
 
-echo "LINK $OUT/halo (dynamisch, clang/aarch64, ohne LTO, ARMv8.0)"
-$CC $CFLAGS -o "$OUT/halo" $objects \
-    -L"$OUT/lib" \
-    -Wl,-rpath-link,"$OUT/lib" \
-    -Wl,--allow-shlib-undefined \
-    -Wl,--unresolved-symbols=ignore-all \
-    -Wl,--as-needed -Wl,--gc-sections \
-    -lSDL2 -lpthread -ldl -lm
+# ── LINK ─────────────────────────────────────────────────────────────
+echo "LINK $OUT/halo"
+
+if [ -n "$STATIC_SDL2" ]; then
+    echo "  Modus: STATISCH (libSDL2.a + -static)"
+    echo "  libSDL2.a: $STATIC_SDL2 ($(stat -c%s "$STATIC_SDL2") Bytes)"
+    # --whole-archive fuer libSDL2.a: damit alle von SDL2 intern
+    # referenzierten Objekte mit hineinkommen (SDL_main, Dynapi usw.).
+    # Reihenfolge: objects -> SDL2.a -> weitere statische Systemlibs.
+    $CC -static $CFLAGS -o "$OUT/halo" $objects \
+        -Wl,--whole-archive "$STATIC_SDL2" -Wl,--no-whole-archive \
+        -Wl,--allow-multiple-definition \
+        -Wl,-O1 -Wl,--gc-sections \
+        -lm -lpthread -ldl -lrt -lresolv
+else
+    echo "  Modus: DYNAMISCH (kein libSDL2.a gefunden)"
+    echo "  WARNUNG: Ohne statisches SDL2 laedt der Host die System-glibc,"
+    echo "           die auf dem M9 Pro LSE-Atomics enthaelt und SIGILL"
+    echo "           ausloest. Baue SDL2 mit -DSDL_STATIC=ON in der"
+    echo "           Root-build.sh, damit libSDL2.a entsteht."
+    $CC $CFLAGS -o "$OUT/halo" $objects \
+        -L"$OUT/lib" \
+        -Wl,-rpath-link,"$OUT/lib" \
+        -Wl,--allow-shlib-undefined \
+        -Wl,--unresolved-symbols=ignore-all \
+        -Wl,--as-needed -Wl,--gc-sections \
+        -lSDL2 -lpthread -ldl -lm
+fi
 
 cp build/android/halo_guest.elf "$OUT/halo_guest.elf"
 
-echo "== Host-Binary:"
+# ── DIAGNOSE ─────────────────────────────────────────────────────────
+echo ""
+echo "== Host-Binary-Diagnose:"
 if command -v file > /dev/null 2>&1; then
     file "$OUT/halo" || true
 fi
@@ -178,6 +207,17 @@ ls -l "$OUT/halo"
 HOST_SIZE=$(stat -c%s "$OUT/halo")
 echo "  Groesse: $HOST_SIZE Bytes"
 
+if command -v readelf > /dev/null 2>&1; then
+    echo "  Dynamische Abhaengigkeiten (leer = statisch):"
+    readelf -d "$OUT/halo" 2>/dev/null | grep NEEDED || echo "    (keine)"
+fi
+
+if [ "$HOST_SIZE" -lt 400000 ]; then
+    echo "  WARNUNG: Host-Binary ist unerwartet klein ($HOST_SIZE Bytes)."
+    echo "           Erwartet: ueber 400 KB (SDL2 statisch eingebunden)."
+fi
+
+echo ""
 echo "== Inhalt von $OUT/libs.aarch64/:"
 ls -la "$OUT/libs.aarch64/"
 echo "== $OUT/halo und $OUT/halo_guest.elf:"
