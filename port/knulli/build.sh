@@ -2,19 +2,18 @@
 # Builds the Knulli port into build/knulli:
 #   halo            the aarch64 glibc host (the loader, SDL2, OpenGL ES)
 #   halo_guest.elf  the game, the Android port's guest image
-#   libs.aarch64/   the runtime libraries the device may not have
+#   libs.aarch64/   die Laufzeitbibliotheken
 #
 # POSIX-sh-kompatibel (dash): set -eu statt set -euo pipefail.
 #
-# Host-Compiler: aarch64-clang (Wrapper um clang-22 mit
-# --target=aarch64-linux-gnu --sysroot=/ --gcc-toolchain=/usr).
-# WICHTIG: -march=armv8-a -mno-outline-atomics, weil der RK3326
-# (Cortex-A35) ARMv8.0 ist und die LSE-Atomics aus ARMv8.1 nicht
-# ausfuehren kann.
+# Host-Compiler: aarch64-linux-gnu-gcc (GCC 9.4 aus Ubuntu 20.04).
+# GCC 9 ist von Natur aus ARMv8.0-kompatibel — er erzeugt keine
+# LSE-Atomics und ruft die glibc-Pfade, die sie enthalten, nicht auf.
+# Damit tritt der SIGILL auf dem Cortex-A35 nicht auf.
 #
 # libmali wird NICHT gelinkt (die sysroot-libmali.so.0 ist beschaedigt);
 # die EGL/GLES-Symbole bleiben undefiniert und werden zur Laufzeit aus
-# /tmp/halo-mali geladen. SDL2 wird dynamisch aus libs.aarch64 geladen.
+# /tmp/halo-mali geladen.
 set -eu
 
 folder() {
@@ -31,7 +30,7 @@ NDK=$(folder "${ANDROID_NDK:?the Android NDK (for the OpenGL ES and EGL headers)
 
 cd "$(dirname "$0")/../.."
 ROOT=$(folder .)
-CC=${CC:-aarch64-clang}
+CC=${CC:-aarch64-linux-gnu-gcc}
 JOBS=${JOBS:-$(nproc)}
 OUT=build/knulli
 OBJ=$OUT/obj
@@ -89,11 +88,10 @@ link_library "libSDL2*"  "libSDL2.so"    || exit 1
 link_library "libSDL3*"  "libSDL3.so"    || exit 1
 link_library "libdecor*" "libdecor.so"   || exit 1
 
-CFLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -march=armv8-a -mno-outline-atomics \
-        -fPIC -Wall -Wno-unused-function \
+CFLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -fPIC -Wall -Wno-unused-function \
         -D_GNU_SOURCE -DEGL_NO_X11 -DMESA_EGL_NO_X11_HEADERS \
         -DHALO_ANDROID \
-        -fomit-frame-pointer -ffunction-sections -fdata-sections \
+        -flto -fomit-frame-pointer -ffunction-sections -fdata-sections \
         -fno-plt -fno-semantic-interposition"
 
 CFLAGS="$CFLAGS -ffile-prefix-map=$ROOT=. -ffile-prefix-map=$SDL2_INCLUDE=sdl2"
@@ -160,7 +158,7 @@ done
 compile port/third_party/tomlc17/tomlc17.c -w
 compile build/android/host/host_import_table.c
 
-echo "LINK $OUT/halo (dynamisch, clang/ARMv8.0)"
+echo "LINK $OUT/halo (dynamisch, GCC 9)"
 $CC $CFLAGS -o "$OUT/halo" $objects \
     -L"$OUT/lib" \
     -Wl,-rpath-link,"$OUT/lib" \
