@@ -4,14 +4,10 @@ set -euo pipefail
 # ══════════════════════════════════════════════════════════════════════
 # Halo CE Universal — M9 Pro (RK3326 / Cortex-A35 + Mali-G31 MP2)
 #
-# Host-Loader + SDL2 werden mit Clang 22 (Wrapper: aarch64-clang)
-# gebaut, weil GCC 9 aus Ubuntu 20.04 trotz -mcpu=cortex-a35
-# LSE-Atomics (ARMv8.1) erzeugt und der RK3326 (ARMv8.0) darauf mit
-# SIGILL stirbt.
-#
-# Der Wrapper aarch64-clang setzt:
-#   --target=aarch64-linux-gnu --sysroot=/ --gcc-toolchain=/usr
-#   -march=armv8-a -mno-outline-atomics
+# Host wird mit aarch64-linux-gnu-gcc (GCC 9.4 aus Ubuntu 20.04)
+# gebaut. GCC 9 kennt keine LSE-Atomics und ruft die glibc-Pfade, die
+# sie enthalten, nicht auf — dadurch tritt der SIGILL auf ARMv8.0 nicht
+# auf. (Clang 22 ruft diese Pfade auf und loeste den SIGILL aus.)
 #
 # Ausgangslage: DYNAMISCHER Host, DYNAMISCHE SDL2 (aus libs.aarch64).
 # libmali wird NICHT gelinkt (sysroot-Datei ist beschaedigt); die
@@ -29,13 +25,9 @@ SDL3_TAG=release-3.2.10
 SDL2_TAG=release-2.30.10
 SDL2_ARCHIVE=https://github.com/libsdl-org/SDL/archive/refs/tags/$SDL2_TAG.tar.gz
 GUEST_CC=${GUEST_CC:-clang-22}
-HOST_CC=${HOST_CC:-aarch64-clang}
+HOST_CC=${HOST_CC:-aarch64-linux-gnu-gcc}
 JOBS=${JOBS:-$(nproc)}
 OPEN_CE_URL=${OPEN_CE_URL:-https://github.com/OpenCommunityEdition/OpenCE.git}
-
-# Archiver fuer SDL2main.a / SDL2_test.a.
-AR=${AR:-/usr/bin/llvm-ar-22}
-RANLIB=${RANLIB:-/usr/bin/llvm-ranlib-22}
 
 die() { echo "build.sh: $*" >&2; exit 1; }
 need() { command -v "$1" > /dev/null 2>&1 || die "$1 not found: $2"; }
@@ -46,10 +38,8 @@ need ninja "install ninja-build"
 need curl "install curl"
 need tar "install tar"
 need cmake "install cmake"
-need "$HOST_CC" "install clang-22 and create /usr/local/bin/aarch64-clang (see workflow)"
+need "$HOST_CC" "install gcc-aarch64-linux-gnu, or set HOST_CC"
 need "$GUEST_CC" "install clang-22 from apt.llvm.org, or set GUEST_CC"
-[ -x "$AR" ]      || die "$AR nicht gefunden (install llvm-22)"
-[ -x "$RANLIB" ]  || die "$RANLIB nicht gefunden (install llvm-22)"
 "$GUEST_CC" -print-targets 2> /dev/null | grep -q aarch64_32 ||
     die "$GUEST_CC has no arm64_32 (aarch64_32) target; use clang 22 from apt.llvm.org"
 [ -n "${ANDROID_NDK:-}" ] || die "set ANDROID_NDK to the Android NDK r28c folder"
@@ -206,10 +196,10 @@ print("  XML-Hunk entfernt; Patch ist jetzt %d Bytes kleiner." % (len(text) - le
 PYEOF
 
 # ══════════════════════════════════════════════════════════════════════
-# SDL3 (nur bauen, wenn .so fehlt) — mit aarch64-clang, ARMv8.0, shared
+# SDL3 (nur bauen, wenn .so fehlt) — mit GCC, shared
 # ══════════════════════════════════════════════════════════════════════
 if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
-    echo "== SDL3 $SDL3_TAG: kompiliere aus dem Quellcode (aarch64-clang, ARMv8.0)"
+    echo "== SDL3 $SDL3_TAG: kompiliere aus dem Quellcode (GCC, shared)"
     SDL3_SRC=$WORK/SDL3-${SDL3_TAG#release-}
     SDL3_BUILD=$WORK/sdl3-build
     SDL3_INSTALL=$WORK/sdl3-install
@@ -222,11 +212,8 @@ if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
     mkdir -p "$SDL3_BUILD" "$SDL3_INSTALL"
     cmake -S "$SDL3_SRC" -B "$SDL3_BUILD" \
         -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
-        -DCMAKE_C_COMPILER=aarch64-clang \
-        -DCMAKE_C_FLAGS="-march=armv8-a -mno-outline-atomics" \
-        -DCMAKE_AR="$AR" \
-        -DCMAKE_RANLIB="$RANLIB" \
-        -DCMAKE_FIND_ROOT_PATH=/ \
+        -DCMAKE_C_COMPILER="$HOST_CC" \
+        -DCMAKE_FIND_ROOT_PATH=/usr/aarch64-linux-gnu \
         -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
         -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
         -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
@@ -248,14 +235,14 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════════
-# SDL2 (nur shared) — mit aarch64-clang, ARMv8.0
+# SDL2 (nur shared) — mit GCC
 # ══════════════════════════════════════════════════════════════════════
 SDL2_SRC=$WORK/SDL2-src
 SDL2_BUILD=$WORK/sdl2-build
 SDL2_INSTALL=$WORK/sdl2-install
 
 if [ ! -d "$SDL2_INSTALL/include/SDL2" ]; then
-    echo "== SDL2 $SDL2_TAG: Quellcode holen und mit aarch64-clang bauen (shared)"
+    echo "== SDL2 $SDL2_TAG: Quellcode holen und mit GCC bauen (shared)"
     rm -rf "$SDL2_SRC" "$SDL2_BUILD" "$SDL2_INSTALL"
     mkdir -p "$SDL2_SRC" "$SDL2_BUILD" "$SDL2_INSTALL"
     curl -L -o "$WORK/sdl2.tar.gz" "$SDL2_ARCHIVE"
@@ -318,11 +305,8 @@ PATCH_EOF
 
     cmake -S "$SDL2_SRC" -B "$SDL2_BUILD" \
         -DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64 \
-        -DCMAKE_C_COMPILER=aarch64-clang \
-        -DCMAKE_C_FLAGS="-march=armv8-a -mno-outline-atomics" \
-        -DCMAKE_AR="$AR" \
-        -DCMAKE_RANLIB="$RANLIB" \
-        -DCMAKE_FIND_ROOT_PATH=/ \
+        -DCMAKE_C_COMPILER="$HOST_CC" \
+        -DCMAKE_FIND_ROOT_PATH=/usr/aarch64-linux-gnu \
         -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
         -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
         -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
@@ -950,7 +934,7 @@ stamp=$({
     done
     [ -f "$HERE/pgo/halo_linux.profdata" ] && sha256sum "$HERE/pgo/halo_linux.profdata" | cut -d' ' -f1
     echo "pgo-mode=$PGO_MODE"
-    echo "armv8.0-clang-dynamichost+terminal-patch=v1"
+    echo "gcc9-host-dynamic=v1"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 echo "$stamp" > "$SRC/.port-stamp"
@@ -958,7 +942,7 @@ echo "$stamp" > "$SRC/.port-stamp"
 # ══════════════════════════════════════════════════════════════════════
 # Build
 # ══════════════════════════════════════════════════════════════════════
-export ANDROID_NDK SYSROOT_LIB SDL2_INCLUDE SDL2_LIB_DIR GUEST_CC HOST_CC JOBS AR RANLIB
+export ANDROID_NDK SYSROOT_LIB SDL2_INCLUDE SDL2_LIB_DIR GUEST_CC HOST_CC JOBS
 cd "$SRC"
 
 echo "== Konfiguriere mit $LTO_FLAG $PGO_FLAG $PGO_EXTRA_ARGS ..."
@@ -968,7 +952,7 @@ python3 configure.py --release "$LTO_FLAG" "$PGO_FLAG" $PGO_EXTRA_ARGS \
 echo "== Baue Guest-ELF (halo_guest.elf) — mit -k 0 (alle Fehler sammeln) ..."
 ninja -j "$JOBS" -k 0 build/android/halo_guest.elf || true
 
-echo "== Baue Host-Binary (halo, dynamisch) ueber port/knulli/build.sh ..."
+echo "== Baue Host-Binary (halo, dynamisch, GCC 9) ueber port/knulli/build.sh ..."
 bash "$SRC/port/knulli/build.sh" || true
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1026,7 +1010,7 @@ else
     cat <<'RELEASE'
 
 ────────────────────────────────────────────────────────────────────────
-RELEASE-BUILD (Settings-Only, Clang/ARMv8.0, dynamischer Host)
+RELEASE-BUILD (Settings-Only, GCC 9, dynamischer Host)
 ────────────────────────────────────────────────────────────────────────
 Installation auf M9 Pro (wenn halo_guest.elf existiert):
 1. dist/Halo.sh           nach /roms/ports/Halo.sh
