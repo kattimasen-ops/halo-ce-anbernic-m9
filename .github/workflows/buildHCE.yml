@@ -1,250 +1,75 @@
-name: Build Halo CE for RK3326
+name: Build Halo CE Knulli Port
 
 on:
-  workflow_dispatch:
   push:
     branches: [ main, master ]
-    paths-ignore:
-      - 'docs/**'
-      - '*.md'
-      - 'README.md'
-      - 'llms.txt'
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
 
 jobs:
   build:
-    name: Build guest + host (arm64_32 + aarch64)
-    runs-on: ubuntu-22.04
-    container: ubuntu:20.04
-    timeout-minutes: 180
-    defaults:
-      run:
-        shell: bash
-
-    env:
-      SYSROOT_LIB: ${{ github.workspace }}/sysroot
-      ANDROID_NDK: ${{ github.workspace }}/ndk-r28c
-      GUEST_CC: clang-22
-      HOST_CC: aarch64-linux-gnu-gcc
-      PGO_MODE: use
-      JOBS: "4"
-      DEBIAN_FRONTEND: noninteractive
+    name: Build Knulli Port
+    runs-on: ubuntu-20.04
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          fetch-depth: 0
-          submodules: false
+          python-version: '3.10'
 
-      - name: "glibc-Version im Container pruefen"
+      - name: Install Build Dependencies
         run: |
-          echo "== glibc im Container:"
-          ldd --version 2>/dev/null | head -1 || true
-          echo "== Architektur:"
-          uname -m
-
-      - name: "System-Pakete installieren (Ubuntu 20.04)"
-        run: |
-          set -e
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            build-essential \
-            cmake \
-            ninja-build \
-            git \
-            curl \
-            wget \
-            tar \
-            python3 \
-            python3-pip \
-            python3-yaml \
-            ca-certificates \
-            xz-utils \
-            unzip \
-            pkg-config \
-            gnupg \
-            lsb-release \
-            software-properties-common \
-            file \
+          sudo apt-get update
+          sudo apt-get install -y \
             gcc-aarch64-linux-gnu \
             g++-aarch64-linux-gnu \
-            binutils-aarch64-linux-gnu \
-            libc6-dev-arm64-cross \
-            libstdc++-9-dev-arm64-cross
+            ninja-build \
+            cmake \
+            libexpat1-dev \
+            zlib1g-dev
 
-      - name: "clang-22 installieren (fuer den Guest)"
+      - name: Clean build workspace
         run: |
-          set -e
-          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
-            | apt-key add -
-          echo "deb http://apt.llvm.org/focal/ llvm-toolchain-focal-22 main" \
-            > /etc/apt/sources.list.d/llvm-22.list
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            clang-22 lld-22 llvm-22
-          ln -sf /usr/bin/clang-22 /usr/local/bin/clang-22
-          ln -sf /usr/bin/ld.lld-22 /usr/local/bin/ld.lld-22
-          clang-22 --version
-          clang-22 -print-targets | grep -q aarch64_32 \
-            && echo "OK: arm64_32 target verfuegbar" \
-            || { echo "FEHLER: clang-22 hat kein arm64_32-Target"; exit 1; }
+          rm -rf build/ dist/ build.ninja
 
-      - name: "Host-Compiler pruefen"
+      # WICHTIG: Patch MUSS vor android_build.py ausgeführt werden,
+      # damit die Include-Pfade für expat.h und zlib_prefixed.h in build.ninja landen!
+      - name: Apply Settings & Include Patch
         run: |
-          set -e
-          echo "== aarch64-linux-gnu-gcc Version:"
-          aarch64-linux-gnu-gcc --version | head -1
-          echo "== Test-Link:"
-          printf 'int main(void){return 0;}\n' > /tmp/test.c
-          aarch64-linux-gnu-gcc -o /tmp/test /tmp/test.c
-          file /tmp/test
+          python3 patch_settings_only.py
 
-      - name: "Python-Pakete installieren"
+      - name: Generate Guest Build Configuration
         run: |
-          set -e
-          python3 -m pip install --upgrade pip
-          python3 -m pip install --no-cache-dir Pillow numpy scipy
+          python3 android_build.py
 
-      - name: "Android NDK r28c installieren"
+      - name: Build Halo CE (Host & Guest)
         run: |
-          set -e
-          cd "$GITHUB_WORKSPACE"
-          NDK_ZIP="android-ndk-r28c-linux.zip"
-          if [ ! -f "$NDK_ZIP" ]; then
-            curl -fL --retry 3 --retry-delay 5 -o "$NDK_ZIP" \
-              "https://dl.google.com/android/repository/android-ndk-r28c-linux.zip"
+          chmod +x port/knulli/build.sh
+          ./port/knulli/build.sh
+
+      - name: Verify and Structure Distribution Files
+        run: |
+          mkdir -p dist/halo-ce
+          if [ -d "build/knulli" ]; then
+            cp -r build/knulli/* dist/halo-ce/ 2>/dev/null || true
           fi
-          unzip -q "$NDK_ZIP" -d "$GITHUB_WORKSPACE"
-          mv "$GITHUB_WORKSPACE/android-ndk-r28c" "$ANDROID_NDK"
-          rm -f "$NDK_ZIP"
-          test -d "$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64"
-          echo "NDK: $ANDROID_NDK"
-
-      - name: "SYSROOT_LIB pruefen"
-        run: |
-          set -e
-          echo "== SYSROOT_LIB=$SYSROOT_LIB"
-          ls -la "$SYSROOT_LIB" || true
-
-          missing=0
-          for lib in libdecor-0.so.0; do
-            if ls "$SYSROOT_LIB/$lib"* > /dev/null 2>&1; then
-              echo "  OK: $lib"
-            else
-              echo "  FEHLT (harte Voraussetzung): $lib"
-              missing=1
-            fi
-          done
-          for lib in libSDL3.so.0 libSDL2-2.0.so.0; do
-            if ls "$SYSROOT_LIB/$lib"* > /dev/null 2>&1; then
-              echo "  OK: $lib"
-            else
-              echo "  HINWEIS: $lib fehlt, build.sh baut sie aus dem Quellcode."
-            fi
-          done
-
-          if [ "$missing" -ne 0 ]; then
-            echo ""
-            echo "FEHLER: libdecor-0.so.0 muss in sysroot/ liegen."
+          
+          # Prüfe, ob die Kernkomponenten existieren
+          if [ ! -f "dist/halo-ce/halo_guest.elf" ]; then
+            echo "::error::halo_guest.elf wurde nicht gebaut!"
+            exit 1
+          fi
+          if [ ! -f "dist/halo-ce/halo" ]; then
+            echo "::error::halo Host Binary wurde nicht gebaut!"
             exit 1
           fi
 
-      - name: "rej/-Ordner vorbereiten"
-        run: mkdir -p rej
-
-      - name: "Build ausfuehren (build.sh)"
-        id: build
-        run: |
-          set -e
-          chmod +x build.sh
-          bash build.sh 2>&1 | tee build.log
-
-      - name: "Fehleranalyse sammeln"
-        if: always()
-        run: |
-          set +e
-          {
-            echo "════════════════════════════════════════════════════════════"
-            echo "BUILD-FEHLER-ANALYSE"
-            echo "════════════════════════════════════════════════════════════"
-            echo "Datum: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            echo "Repo: ${{ github.repository }}"
-            echo "Commit: ${{ github.sha }}"
-            echo ""
-            echo "════════════════════════════════════════════════════════════"
-            echo "1. ALLE error:-Zeilen"
-            echo "════════════════════════════════════════════════════════════"
-            grep -nE "error:|error :|fatal error:|FAILED:" build.log 2>/dev/null | head -500 || echo "(keine error-Zeilen)"
-            echo ""
-            echo "════════════════════════════════════════════════════════════"
-            echo "2. Letzte 500 Zeilen build.log"
-            echo "════════════════════════════════════════════════════════════"
-            tail -n 500 build.log 2>/dev/null || echo "(kein build.log)"
-            echo ""
-            echo "════════════════════════════════════════════════════════════"
-            echo "3. Host-Binary-Info"
-            echo "════════════════════════════════════════════════════════════"
-            if [ -f dist/halo ]; then
-              file dist/halo 2>&1 || true
-              ls -la dist/halo
-            else
-              echo "(dist/halo fehlt)"
-            fi
-            echo ""
-            echo "════════════════════════════════════════════════════════════"
-            echo "4. Verwendeter Compiler"
-            echo "════════════════════════════════════════════════════════════"
-            grep -E "Compiler|aarch64-linux-gnu-gcc|GCC" build.log 2>/dev/null | head -10 || true
-            echo ""
-            echo "════════════════════════════════════════════════════════════"
-            echo "ENDE DER FEHLERANALYSE"
-            echo "════════════════════════════════════════════════════════════"
-          } > build-error-analysis.txt
-          cp build-error-analysis.txt rej/ 2>/dev/null || true
-          cp build.log rej/ 2>/dev/null || true
-
-      - name: "Upload Konflikt- und Fehleranalyse"
-        if: always()
+      - name: Upload Knulli Build Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rej-and-error-analysis
-          path: |
-            rej/
-            build-error-analysis.txt
-            build.log
-          if-no-files-found: warn
-          retention-days: 30
-
-      - name: "Upload Build-Ergebnis (bei Erfolg)"
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: halo-ce-rk3326-build
-          path: |
-            dist/halo
-            dist/halo_guest.elf
-            dist/Halo.sh
-            dist/halo_extract.py
-            dist/halo_screen.py
-            dist/sdl_mapping.py
-            dist/libs.aarch64/
-          if-no-files-found: warn
-          retention-days: 30
-
-      - name: "Kurze Zusammenfassung"
-        if: always()
-        run: |
-          echo "════════════════════════════════════════════════════════════"
-          echo "  BUILD-ZUSAMMENFASSUNG"
-          echo "════════════════════════════════════════════════════════════"
-          if [ -f dist/halo_guest.elf ]; then
-            echo "Guest-ELF: $(stat -c%s dist/halo_guest.elf) Bytes"
-          else
-            echo "Guest-ELF: FEHLT"
-          fi
-          if [ -f dist/halo ]; then
-            echo "Host-Binary: $(stat -c%s dist/halo) Bytes"
-          else
-            echo "Host-Binary: FEHLT"
-          fi
-          echo "════════════════════════════════════════════════════════════"
+          name: halo-ce-knulli-release
+          path: dist/
