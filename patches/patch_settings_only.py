@@ -4,7 +4,7 @@
 """
 patch_settings_only.py
 Automatisches Skript zur sauberen Injektion des PC-Einstellungsmenüs
-sowie Behebung der fehlenden Header-Pfade (zlib_prefixed.h, expat.h) im Guest-Build.
+und Behebung fehlender Expat/zlib-Include-Pfade.
 """
 
 import os
@@ -14,7 +14,6 @@ import sys
 
 
 def create_backup(file_path: str) -> None:
-    """Erstellt eine Sicherheitskopie der Datei, sofern noch nicht vorhanden."""
     if os.path.exists(file_path) and not os.path.exists(file_path + ".bak"):
         shutil.copy2(file_path, file_path + ".bak")
         print(f"[BACKUP] Kopie erstellt: {file_path}.bak")
@@ -31,7 +30,6 @@ def write_file_content(path: str, content: str) -> None:
 
 
 def patch_ui_widget(base_dir: str) -> None:
-    """1. Patch: ui_widget.c - Forward Declarations mit int32_t."""
     file_path = os.path.join(base_dir, "ui_widget.c")
     if not os.path.exists(file_path):
         return
@@ -55,11 +53,10 @@ def patch_ui_widget(base_dir: str) -> None:
             content = hook_decl + content
 
         write_file_content(file_path, content)
-        print("[OK] ui_widget.c erfolgreich gepatcht.")
+        print("[OK] ui_widget.c gepatcht.")
 
 
 def patch_event_dispatcher(base_dir: str) -> None:
-    """2. Patch: ui_widget_event_handler_functions.c - Event Dispatcher Hook."""
     file_path = os.path.join(base_dir, "ui_widget_event_handler_functions.c")
     if not os.path.exists(file_path):
         return
@@ -93,7 +90,6 @@ def patch_event_dispatcher(base_dir: str) -> None:
 
 
 def patch_game_data_dispatcher(base_dir: str) -> None:
-    """3. Patch: ui_widget_game_data_input_functions.c - Game Data Dispatcher."""
     file_path = os.path.join(base_dir, "ui_widget_game_data_input_functions.c")
     if not os.path.exists(file_path):
         return
@@ -125,42 +121,40 @@ def patch_game_data_dispatcher(base_dir: str) -> None:
 
 
 def patch_android_build_includes(root_dir: str) -> None:
-    """4. Patch: Fehlende zlib und expat Include-Pfade in android_build.py / Build-Skripten einfügen."""
-    build_py_path = os.path.join(root_dir, "android_build.py")
-    if not os.path.exists(build_py_path):
-        build_py_path = os.path.join(root_dir, "tools", "android_build.py")
+    """Nutzt 'tomlc17' als verlässlichen Anker zur Injektion von Expat & Zlib Include-Pfaden."""
+    candidates = [
+        os.path.join(root_dir, "android_build.py"),
+        os.path.join(root_dir, "tools", "android_build.py"),
+    ]
 
-    if os.path.exists(build_py_path):
-        create_backup(build_py_path)
-        content = read_file_content(build_py_path)
+    patched = False
+    for build_py_path in candidates:
+        if os.path.exists(build_py_path):
+            create_backup(build_py_path)
+            content = read_file_content(build_py_path)
 
-        # Füge Pfade für zlib und expat zu den Include-Flags hinzu
-        includes_to_add = [
-            "-Iport/third_party/expat/lib",
-            "-Iport/third_party/expat/include",
-            "-Iport/third_party/zlib",
-            "-Iport/third_party/zlib/include",
-        ]
-
-        modified = False
-        for inc in includes_to_add:
-            if inc not in content:
-                # Sucht nach existierenden Include-Einträgen in CFLAGS / INCLUDES Array
-                content = re.sub(
-                    r'(includes\s*=\s*\[)',
-                    rf'\1\n    "{inc}",',
-                    content,
-                    count=1
+            if "port/third_party/expat" not in content:
+                old_str = '"port/third_party/tomlc17"'
+                new_str = (
+                    '"port/third_party/tomlc17",\n'
+                    '    "port/third_party/expat/lib",\n'
+                    '    "port/third_party/expat",\n'
+                    '    "port/third_party/zlib"'
                 )
-                modified = True
 
-        if modified:
-            write_file_content(build_py_path, content)
-            print("[OK] android_build.py mit expat & zlib Include-Pfaden gepatcht.")
+                if old_str in content:
+                    content = content.replace(old_str, new_str)
+                    write_file_content(build_py_path, content)
+                    print(f"[OK] {os.path.basename(build_py_path)} erfolgreich mit Expat/Zlib Pfaden erweitert.")
+                    patched = True
+                else:
+                    print(f"[WARN] Anker {old_str} in {build_py_path} nicht gefunden.")
+
+    if not patched:
+        print("[WARN] Keine android_build.py Datei zur Anpassung gefunden.")
 
 
 def patch_cache_files(base_dir: str) -> None:
-    """5. Patch: cache_files.c - Laden und Entladen von Menü-Tags."""
     file_path = os.path.join(base_dir, "cache_files.c")
     if not os.path.exists(file_path):
         return
@@ -190,7 +184,6 @@ def patch_cache_files(base_dir: str) -> None:
 
 
 def patch_buildsystem_and_shim(root_dir: str) -> None:
-    """6. Patch: Kopieren der Shim & Aktualisieren von Build-Konfigurationen."""
     shim_src = os.path.join(root_dir, "port_settings_shim.c")
     target_dir = os.path.join(root_dir, "port", "linux", "game")
 
@@ -213,7 +206,7 @@ def main():
     if len(sys.argv) > 1:
         root_dir = sys.argv[1]
 
-    print(f"=== Starte sauberen Patch-Vorgang in: {root_dir} ===")
+    print(f"=== Starte Patch-Vorgang in: {root_dir} ===")
 
     patch_ui_widget(root_dir)
     patch_event_dispatcher(root_dir)
@@ -222,7 +215,7 @@ def main():
     patch_cache_files(root_dir)
     patch_buildsystem_and_shim(root_dir)
 
-    print("=== Patch-Vorgang abgeschlossen! Bitte führen Sie 'ninja clean' aus und bauen Sie neu. ===")
+    print("=== Patch-Vorgang abgeschlossen! ===")
 
 
 if __name__ == "__main__":
