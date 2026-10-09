@@ -24,7 +24,7 @@ jobs:
       SYSROOT_LIB: ${{ github.workspace }}/sysroot
       ANDROID_NDK: ${{ github.workspace }}/ndk-r28c
       GUEST_CC: clang-22
-      HOST_CC: aarch64-clang
+      HOST_CC: aarch64-linux-gnu-gcc
       PGO_MODE: use
       JOBS: "4"
       DEBIAN_FRONTEND: noninteractive
@@ -72,7 +72,7 @@ jobs:
             libc6-dev-arm64-cross \
             libstdc++-9-dev-arm64-cross
 
-      - name: "clang-22 + Wrapper fuer aarch64-Cross-Compile"
+      - name: "clang-22 installieren (fuer den Guest)"
         run: |
           set -e
           wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
@@ -89,23 +89,14 @@ jobs:
             && echo "OK: arm64_32 target verfuegbar" \
             || { echo "FEHLER: clang-22 hat kein arm64_32-Target"; exit 1; }
 
-          cat > /usr/local/bin/aarch64-clang <<'WRAPPER'
-          #!/bin/sh
-          exec /usr/bin/clang-22 \
-              --target=aarch64-linux-gnu \
-              --sysroot=/ \
-              --gcc-toolchain=/usr \
-              -march=armv8-a \
-              -mno-outline-atomics \
-              "$@"
-          WRAPPER
-          sed -i 's/^          //' /usr/local/bin/aarch64-clang
-          chmod +x /usr/local/bin/aarch64-clang
-          echo "== aarch64-clang Wrapper:"
-          cat /usr/local/bin/aarch64-clang
+      - name: "Host-Compiler pruefen"
+        run: |
+          set -e
+          echo "== aarch64-linux-gnu-gcc Version:"
+          aarch64-linux-gnu-gcc --version | head -1
           echo "== Test-Link:"
           printf 'int main(void){return 0;}\n' > /tmp/test.c
-          /usr/local/bin/aarch64-clang -o /tmp/test /tmp/test.c
+          aarch64-linux-gnu-gcc -o /tmp/test /tmp/test.c
           file /tmp/test
 
       - name: "Python-Pakete installieren"
@@ -199,6 +190,11 @@ jobs:
             else
               echo "(dist/halo fehlt)"
             fi
+            echo ""
+            echo "════════════════════════════════════════════════════════════"
+            echo "4. Verwendeter Compiler"
+            echo "════════════════════════════════════════════════════════════"
+            grep -E "Compiler|aarch64-linux-gnu-gcc|GCC" build.log 2>/dev/null | head -10 || true
             echo ""
             echo "════════════════════════════════════════════════════════════"
             echo "ENDE DER FEHLERANALYSE"
