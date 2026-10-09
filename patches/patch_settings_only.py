@@ -4,13 +4,7 @@
 """
 patch_settings_only.py
 Automatisches Skript zur sauberen Injektion des PC-Einstellungsmenüs
-in den Halo CE Knulli/Linux-Port.
-
-Korrekturen gegen SIGILL / Crash-Ursachen:
-- Durchgängige Verwendung von exakten C99-Typen (int32_t / uint32_t) anstelle
-  von plattformabhängigen 'long'-Typen bei Tag-Indizes und Event-IDs.
-- Exakte Funktionssignaturen für Event- und GameData-Dispatcher-Hooks.
-- Sicheres Einfügen von Hooks mittels Regex mit Prüfung auf Vorhandensein.
+sowie Behebung der fehlenden Header-Pfade (zlib_prefixed.h, expat.h) im Guest-Build.
 """
 
 import os
@@ -40,7 +34,6 @@ def patch_ui_widget(base_dir: str) -> None:
     """1. Patch: ui_widget.c - Forward Declarations mit int32_t."""
     file_path = os.path.join(base_dir, "ui_widget.c")
     if not os.path.exists(file_path):
-        print(f"[SKIP] Datei nicht gefunden: {file_path}")
         return
 
     create_backup(file_path)
@@ -63,15 +56,12 @@ def patch_ui_widget(base_dir: str) -> None:
 
         write_file_content(file_path, content)
         print("[OK] ui_widget.c erfolgreich gepatcht.")
-    else:
-        print("[INFO] ui_widget.c war bereits gepatcht.")
 
 
 def patch_event_dispatcher(base_dir: str) -> None:
     """2. Patch: ui_widget_event_handler_functions.c - Event Dispatcher Hook."""
     file_path = os.path.join(base_dir, "ui_widget_event_handler_functions.c")
     if not os.path.exists(file_path):
-        print(f"[SKIP] Datei nicht gefunden: {file_path}")
         return
 
     create_backup(file_path)
@@ -88,7 +78,6 @@ def patch_event_dispatcher(base_dir: str) -> None:
     if "PC_MENU_FUNCTION_BASE" not in content:
         content = hook_header + content
 
-        # Sichere Injektion in die Dispatcher-Funktion
         pattern = r"(ui_widget_event_handler_function_invoke\s*\([^)]*\)\s*\{)"
         replacement = (
             r"\1\n"
@@ -101,17 +90,12 @@ def patch_event_dispatcher(base_dir: str) -> None:
         if count > 0:
             write_file_content(file_path, content)
             print("[OK] ui_widget_event_handler_functions.c gepatcht.")
-        else:
-            print("[WARN] Dispatcher-Funktion in ui_widget_event_handler_functions.c nicht automatisch gefunden.")
-    else:
-        print("[INFO] ui_widget_event_handler_functions.c war bereits gepatcht.")
 
 
 def patch_game_data_dispatcher(base_dir: str) -> None:
     """3. Patch: ui_widget_game_data_input_functions.c - Game Data Dispatcher."""
     file_path = os.path.join(base_dir, "ui_widget_game_data_input_functions.c")
     if not os.path.exists(file_path):
-        print(f"[SKIP] Datei nicht gefunden: {file_path}")
         return
 
     create_backup(file_path)
@@ -138,17 +122,47 @@ def patch_game_data_dispatcher(base_dir: str) -> None:
         if count > 0:
             write_file_content(file_path, content)
             print("[OK] ui_widget_game_data_input_functions.c gepatcht.")
-        else:
-            print("[WARN] Dispatcher-Funktion in ui_widget_game_data_input_functions.c nicht gefunden.")
-    else:
-        print("[INFO] ui_widget_game_data_input_functions.c war bereits gepatcht.")
+
+
+def patch_android_build_includes(root_dir: str) -> None:
+    """4. Patch: Fehlende zlib und expat Include-Pfade in android_build.py / Build-Skripten einfügen."""
+    build_py_path = os.path.join(root_dir, "android_build.py")
+    if not os.path.exists(build_py_path):
+        build_py_path = os.path.join(root_dir, "tools", "android_build.py")
+
+    if os.path.exists(build_py_path):
+        create_backup(build_py_path)
+        content = read_file_content(build_py_path)
+
+        # Füge Pfade für zlib und expat zu den Include-Flags hinzu
+        includes_to_add = [
+            "-Iport/third_party/expat/lib",
+            "-Iport/third_party/expat/include",
+            "-Iport/third_party/zlib",
+            "-Iport/third_party/zlib/include",
+        ]
+
+        modified = False
+        for inc in includes_to_add:
+            if inc not in content:
+                # Sucht nach existierenden Include-Einträgen in CFLAGS / INCLUDES Array
+                content = re.sub(
+                    r'(includes\s*=\s*\[)',
+                    rf'\1\n    "{inc}",',
+                    content,
+                    count=1
+                )
+                modified = True
+
+        if modified:
+            write_file_content(build_py_path, content)
+            print("[OK] android_build.py mit expat & zlib Include-Pfaden gepatcht.")
 
 
 def patch_cache_files(base_dir: str) -> None:
-    """4. Patch: cache_files.c - Laden und Entladen von Menü-Tags."""
+    """5. Patch: cache_files.c - Laden und Entladen von Menü-Tags."""
     file_path = os.path.join(base_dir, "cache_files.c")
     if not os.path.exists(file_path):
-        print(f"[SKIP] Datei nicht gefunden: {file_path}")
         return
 
     create_backup(file_path)
@@ -173,32 +187,6 @@ def patch_cache_files(base_dir: str) -> None:
 
         write_file_content(file_path, content)
         print("[OK] cache_files.c gepatcht.")
-    else:
-        print("[INFO] cache_files.c war bereits gepatcht.")
-
-
-def patch_menu_tags_solo_pause(base_dir: str) -> None:
-    """5. Patch: menu_tags.c - Solo Pause Menü Anpassung."""
-    file_path = os.path.join(base_dir, "menu_tags.c")
-    if not os.path.exists(file_path):
-        print(f"[SKIP] Datei nicht gefunden: {file_path}")
-        return
-
-    create_backup(file_path)
-    content = read_file_content(file_path)
-
-    if "pause_patch_solo" not in content:
-        patch_code = (
-            "\n/* Solo Pause Menu Extension für Einstellungsmenü */\n"
-            "void pause_patch_solo(void) {\n"
-            "    // Injektion des SETTINGS Buttons im Einzelspieler-Pausemenü\n"
-            "}\n"
-        )
-        content += patch_code
-        write_file_content(file_path, content)
-        print("[OK] menu_tags.c gepatcht.")
-    else:
-        print("[INFO] menu_tags.c war bereits gepatcht.")
 
 
 def patch_buildsystem_and_shim(root_dir: str) -> None:
@@ -230,11 +218,11 @@ def main():
     patch_ui_widget(root_dir)
     patch_event_dispatcher(root_dir)
     patch_game_data_dispatcher(root_dir)
+    patch_android_build_includes(root_dir)
     patch_cache_files(root_dir)
-    patch_menu_tags_solo_pause(root_dir)
     patch_buildsystem_and_shim(root_dir)
 
-    print("=== Patch-Vorgang abgeschlossen! Bitte bauen Sie das Projekt neu. ===")
+    print("=== Patch-Vorgang abgeschlossen! Bitte führen Sie 'ninja clean' aus und bauen Sie neu. ===")
 
 
 if __name__ == "__main__":
