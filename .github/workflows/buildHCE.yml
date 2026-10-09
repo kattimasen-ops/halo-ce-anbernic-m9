@@ -103,12 +103,10 @@ jobs:
           chmod +x /usr/local/bin/aarch64-clang
           echo "== aarch64-clang Wrapper:"
           cat /usr/local/bin/aarch64-clang
-          echo "== Test-Link (32-bit AArch64 Hello World):"
+          echo "== Test-Link:"
           printf 'int main(void){return 0;}\n' > /tmp/test.c
           /usr/local/bin/aarch64-clang -o /tmp/test /tmp/test.c
           file /tmp/test
-          echo "== Test-Inspect:"
-          readelf -h /tmp/test | head -5
 
       - name: "Python-Pakete installieren"
         run: |
@@ -201,11 +199,6 @@ jobs:
             else
               echo "(dist/halo fehlt)"
             fi
-            echo ""
-            echo "════════════════════════════════════════════════════════════"
-            echo "4. Verwendeter Compiler/Linker"
-            echo "════════════════════════════════════════════════════════════"
-            grep -E "ld\.lld|LLD|GNU ld|Clang|aarch64-clang|Target:" build.log 2>/dev/null | head -20 || true
             echo ""
             echo "════════════════════════════════════════════════════════════"
             echo "ENDE DER FEHLERANALYSE"
