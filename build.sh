@@ -13,10 +13,10 @@ set -euo pipefail
 #   --target=aarch64-linux-gnu --sysroot=/ --gcc-toolchain=/usr
 #   -march=armv8-a -mno-outline-atomics
 #
-# SDL2 wird als statische UND dynamische Bibliothek gebaut
-# (-DSDL_STATIC=ON -DSDL_STATIC_PIC=ON), damit port/knulli/build.sh den
-# Host vollstaendig statisch dagegen linken kann — siehe den Kommentar
-# dort.
+# Ausgangslage: DYNAMISCHER Host, DYNAMISCHE SDL2 (aus libs.aarch64).
+# libmali wird NICHT gelinkt (sysroot-Datei ist beschaedigt); die
+# EGL/GLES-Symbole bleiben undefiniert und werden zur Laufzeit aus
+# /tmp/halo-mali geladen.
 # ══════════════════════════════════════════════════════════════════════
 PGO_MODE=${PGO_MODE:-use}
 
@@ -33,8 +33,8 @@ HOST_CC=${HOST_CC:-aarch64-clang}
 JOBS=${JOBS:-$(nproc)}
 OPEN_CE_URL=${OPEN_CE_URL:-https://github.com/OpenCommunityEdition/OpenCE.git}
 
-# Archiver fuer statische Bibliotheken (SDL2main, SDL2_test, libSDL2.a).
-# CMake findet bei einem Clang-Wrapper nicht automatisch llvm-ar-22.
+# Archiver fuer SDL2main.a / SDL2_test.a. CMake findet bei einem
+# Clang-Wrapper nicht automatisch llvm-ar-22.
 AR=${AR:-/usr/bin/llvm-ar-22}
 RANLIB=${RANLIB:-/usr/bin/llvm-ranlib-22}
 
@@ -211,7 +211,7 @@ print("  XML-Hunk entfernt; Patch ist jetzt %d Bytes kleiner." % (len(text) - le
 PYEOF
 
 # ══════════════════════════════════════════════════════════════════════
-# SDL3 (nur bauen, wenn .so fehlt) — mit aarch64-clang, ARMv8.0
+# SDL3 (nur bauen, wenn .so fehlt) — mit aarch64-clang, ARMv8.0, shared
 # ══════════════════════════════════════════════════════════════════════
 if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
     echo "== SDL3 $SDL3_TAG: kompiliere aus dem Quellcode (aarch64-clang, ARMv8.0)"
@@ -236,7 +236,7 @@ if [ ! -f "$SYSROOT_LIB/libSDL3.so.0" ]; then
         -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
         -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
         -DCMAKE_BUILD_TYPE=Release \
-        -DSDL_SHARED=ON -DSDL_STATIC=ON -DSDL_STATIC_PIC=ON \
+        -DSDL_SHARED=ON -DSDL_STATIC=OFF \
         -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF \
         -DSDL_INSTALL_TESTS=OFF -DSDL_WERROR=OFF -DSDL_UNIX_CONSOLE_BUILD=ON \
         -DSDL_X11=OFF -DSDL_WAYLAND=OFF -DSDL_KMSDRM=ON \
@@ -253,14 +253,14 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════════
-# SDL2 — mit aarch64-clang, ARMv8.0, shared UND static
+# SDL2 (nur shared) — mit aarch64-clang, ARMv8.0
 # ══════════════════════════════════════════════════════════════════════
 SDL2_SRC=$WORK/SDL2-src
 SDL2_BUILD=$WORK/sdl2-build
 SDL2_INSTALL=$WORK/sdl2-install
 
-if [ ! -f "$SDL2_INSTALL/lib/libSDL2.a" ] || [ ! -d "$SDL2_INSTALL/include/SDL2" ]; then
-    echo "== SDL2 $SDL2_TAG: Quellcode holen und mit aarch64-clang bauen (shared + static)"
+if [ ! -d "$SDL2_INSTALL/include/SDL2" ]; then
+    echo "== SDL2 $SDL2_TAG: Quellcode holen und mit aarch64-clang bauen (shared)"
     rm -rf "$SDL2_SRC" "$SDL2_BUILD" "$SDL2_INSTALL"
     mkdir -p "$SDL2_SRC" "$SDL2_BUILD" "$SDL2_INSTALL"
     curl -L -o "$WORK/sdl2.tar.gz" "$SDL2_ARCHIVE"
@@ -332,7 +332,7 @@ PATCH_EOF
         -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
         -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY \
         -DCMAKE_BUILD_TYPE=Release \
-        -DSDL_SHARED=ON -DSDL_STATIC=ON -DSDL_STATIC_PIC=ON \
+        -DSDL_SHARED=ON -DSDL_STATIC=OFF \
         -DSDL_TESTS=OFF \
         -DSDL_X11=OFF -DSDL_WAYLAND=OFF -DSDL_KMSDRM=ON \
         -DSDL_OPENGLES=ON -DSDL_OPENGL=OFF \
@@ -349,7 +349,7 @@ PATCH_EOF
         echo "== libSDL2-2.0.so.0 liegt bereits in sysroot."
     fi
 else
-    echo "== SDL2-Header und libSDL2.a bereits in $SDL2_INSTALL"
+    echo "== SDL2-Header bereits in $SDL2_INSTALL"
     if [ ! -f "$SYSROOT_LIB/libSDL2-2.0.so.0" ]; then
         if [ -f "$SDL2_INSTALL/lib/libSDL2-2.0.so.0" ]; then
             cp -L "$SDL2_INSTALL/lib/libSDL2-2.0.so.0" "$SYSROOT_LIB/libSDL2-2.0.so.0"
@@ -363,11 +363,7 @@ export SDL2_INCLUDE="$SDL2_INSTALL/include"
 echo "== SDL2_INCLUDE=$SDL2_INCLUDE"
 
 export SDL2_LIB_DIR="$SDL2_INSTALL/lib"
-if [ -f "$SDL2_LIB_DIR/libSDL2.a" ]; then
-    echo "== SDL2_LIB_DIR=$SDL2_LIB_DIR (statisch: libSDL2.a, $(stat -c%s "$SDL2_LIB_DIR/libSDL2.a") Bytes)"
-else
-    echo "== SDL2_LIB_DIR=$SDL2_LIB_DIR (WARNUNG: keine libSDL2.a)"
-fi
+echo "== SDL2_LIB_DIR=$SDL2_LIB_DIR"
 
 # ══════════════════════════════════════════════════════════════════════
 # Upstream klonen + Knulli-Patch + OpenCE-Dateien
@@ -958,7 +954,7 @@ stamp=$({
     done
     [ -f "$HERE/pgo/halo_linux.profdata" ] && sha256sum "$HERE/pgo/halo_linux.profdata" | cut -d' ' -f1
     echo "pgo-mode=$PGO_MODE"
-    echo "armv8.0-clang-statichost-sdl2=v1"
+    echo "armv8.0-clang-dynamichost=v1"
     (cd "$HERE/port/knulli" && find . -type f ! -path '*/__pycache__/*' -print0 | sort -z | xargs -0 cat)
 } | sha256sum | cut -d' ' -f1)
 echo "$stamp" > "$SRC/.port-stamp"
@@ -976,7 +972,7 @@ python3 configure.py --release "$LTO_FLAG" "$PGO_FLAG" $PGO_EXTRA_ARGS \
 echo "== Baue Guest-ELF (halo_guest.elf) — mit -k 0 (alle Fehler sammeln) ..."
 ninja -j "$JOBS" -k 0 build/android/halo_guest.elf || true
 
-echo "== Baue Host-Binary (halo, statisch mit SDL2) ueber port/knulli/build.sh ..."
+echo "== Baue Host-Binary (halo, dynamisch) ueber port/knulli/build.sh ..."
 bash "$SRC/port/knulli/build.sh" || true
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1021,10 +1017,6 @@ if [ -f "$DIST/halo" ]; then
     if command -v file > /dev/null 2>&1; then
         file "$DIST/halo" || true
     fi
-    if command -v readelf > /dev/null 2>&1; then
-        echo "  NEEDED (leer = statisch):"
-        readelf -d "$DIST/halo" 2>/dev/null | grep NEEDED || echo "    (keine)"
-    fi
 fi
 
 if [ "$PGO_MODE" = "train" ]; then
@@ -1038,7 +1030,7 @@ else
     cat <<'RELEASE'
 
 ────────────────────────────────────────────────────────────────────────
-RELEASE-BUILD (Settings-Only, Clang/ARMv8.0, statischer Host mit SDL2)
+RELEASE-BUILD (Settings-Only, Clang/ARMv8.0, dynamischer Host)
 ────────────────────────────────────────────────────────────────────────
 Installation auf M9 Pro (wenn halo_guest.elf existiert):
 1. dist/Halo.sh           nach /roms/ports/Halo.sh
